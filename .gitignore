@@ -1,0 +1,137 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env
+
+# pytest
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache
+coverage.xml
+*.cover
+
+# mypy / flake8
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.flake8
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# =============================================================================
+# 项目特定
+# =============================================================================
+
+# 模型权重（绝对不能上传——大、可能违反许可）
+models/
+weights/
+checkpoints/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.pkl
+*.ckpt
+
+# 数据集
+data/
+datasets/
+*.parquet
+*.arrow
+.cache/huggingface/
+
+# 实验结果（量大、可重现）
+results/
+runs/
+logs/
+wandb/
+mlruns/
+tensorboard_logs/
+*.log
+
+# Profiling trace（量大）
+traces/
+*.nsys-rep
+*.nsys-sqlite
+*.qdrep
+*.qdstrm
+*.prof
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+*.orig
+.cache/
+
+# 敏感信息
+.env
+.env.local
+*.key
+*.pem
+secrets.yaml
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 编译产物
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+
+# LaTeX
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# 允许的例外（README 里的引用等）
+!README.md
+!docs/**/*.md
+!docs/**/*.bib
+!configs/*.yaml

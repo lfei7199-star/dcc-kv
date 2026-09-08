@@ -1,0 +1,90 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ===========================================================================
+  # Job 1: CPU-only 单元测试（mock 模式）
+  # ===========================================================================
+  cpu-tests:
+    name: CPU Tests (mock only)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch（用 index URL 强制 CPU）
+          pip install torch==2.3.0+cpu --index-url https://download.pytorch.org/whl/cpu
+          pip install pytest pytest-cov numpy
+
+      - name: Run CPU tests
+        run: |
+          pytest tests/ -m "not distributed and not gpu" --cov=src/ --cov-report=term-missing
+
+      - name: Run distributed tests (2 proc gloo)
+        run: |
+          pytest tests/ -m "distributed and not gpu"
+
+  # ===========================================================================
+  # Job 2: GPU 测试（self-hosted runner，需要 GPU）
+  # ===========================================================================
+  gpu-tests:
+    name: GPU Tests (NCCL)
+    runs-on: [self-hosted, gpu, a100]   # 需要 self-hosted runner with A100
+    needs: cpu-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies (GPU)
+        run: |
+          pip install torch==2.3.0
+          pip install pytest
+          nvidia-smi  # 验证 GPU 可用
+
+      - name: Run GPU tests
+        run: |
+          pytest tests/ -m gpu
+
+  # ===========================================================================
+  # Job 3: Lint + 类型检查
+  # ===========================================================================
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install flake8 mypy
+      - run: flake8 src/ tests/ --max-line-length=120 --ignore=E501,W503
+      - run: mypy src/ --ignore-missing-imports || true   # mypy 不是 blocker

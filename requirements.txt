@@ -1,0 +1,23 @@
+# DCC-KV 依赖
+# 对齐 experiment_matrix.yaml `requirements.software`
+
+# 核心
+torch>=2.3.0
+torchvision>=0.18.0
+transformers==4.41.0
+accelerate==0.30.0
+einops
+datasets==2.19.0
+
+# 分布式（gloo 包含在 torch 里）
+# nccl 包含在 CUDA toolkit
+
+# 测试
+pytest>=7.4
+pytest-cov
+numpy
+
+# 性能
+flash-attn>=2.5.8
+
+# 注意：vLLM / FlashInfer 暂不安装（M4 阶段决定）
