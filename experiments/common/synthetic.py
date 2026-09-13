@@ -576,9 +576,229 @@ def build_shared(
     )
 
 
+# =============================================================================
+# 留出拆分：拟合用 Query 与评估用 Query 必须不相交
+# =============================================================================
+
+@dataclass
+class HeldoutSplit:
+    """把场景的目的端 Query 一分为二：`fit` 供构造用，`eval` 仅供评估用。
+
+    **为什么这个拆分是必要的**
+    构造紧凑 KV 时，代表 Query 是从目的端 Query 中挑出来的。若用同一批
+    Query 同时做拟合与评估，误差会被系统性低估，而且凡是"增加 M"的扫描
+    都会自动获胜 —— 因为 M 越大，模型见过的评估点越多。那样得到的
+    "M 是主要旋钮"就是一个同义反复，不是发现。
+
+    因此所有涉及 M 的扫描都必须在 `eval_queries` 上评分，
+    而 `eval_queries` 从未参与过 Key 选择、β 拟合或 V 回归。
+    """
+    keys: torch.Tensor
+    values: torch.Tensor
+    fit_queries: Dict[int, torch.Tensor]
+    eval_queries: Dict[int, torch.Tensor]
+    band_of_dest: Dict[int, Tuple[int, int]]
+
+    @property
+    def L_s(self) -> int:
+        return self.keys.shape[0]
+
+    @property
+    def d_h(self) -> int:
+        return self.keys.shape[1]
+
+    @property
+    def all_fit_queries(self) -> torch.Tensor:
+        return torch.cat([self.fit_queries[k] for k in sorted(self.fit_queries)], dim=0)
+
+    @property
+    def all_eval_queries(self) -> torch.Tensor:
+        return torch.cat([self.eval_queries[k] for k in sorted(self.eval_queries)], dim=0)
+
+
+def heldout_split(
+    scenario: SyntheticScenario,
+    eval_fraction: float = 0.5,
+) -> HeldoutSplit:
+    """按比例把每个目的端的 Query 切成 fit / eval 两份（互不相交）。
+
+    Args:
+        scenario: 由 `make_scenario` 产出的场景
+        eval_fraction: 划给评估集的比例
+
+    Returns:
+        HeldoutSplit
+
+    Raises:
+        ValueError: 某个目的端的 Query 太少，切完有一侧为空
+    """
+    if not 0.0 < eval_fraction < 1.0:
+        raise ValueError(f"eval_fraction 必须在 (0,1) 内，得到 {eval_fraction}")
+
+    fit_queries: Dict[int, torch.Tensor] = {}
+    eval_queries: Dict[int, torch.Tensor] = {}
+
+    for dest, q in scenario.dest_queries.items():
+        n = q.shape[0]
+        n_eval = int(round(n * eval_fraction))
+        n_eval = max(1, min(n - 1, n_eval))
+        if n_eval <= 0 or n - n_eval <= 0:
+            raise ValueError(
+                f"目的端 {dest} 只有 {n} 个 Query，无法按 {eval_fraction} 拆分"
+            )
+        eval_queries[dest] = q[n - n_eval:]
+        fit_queries[dest] = q[: n - n_eval]
+
+    return HeldoutSplit(
+        keys=scenario.keys,
+        values=scenario.values,
+        fit_queries=fit_queries,
+        eval_queries=eval_queries,
+        band_of_dest=scenario.band_of_dest,
+    )
+
+
+def absolute_mass_error(
+    probe_queries: torch.Tensor,
+    compact: CompactKV,
+    keys: torch.Tensor,
+    beta_mode: str = "full",
+    num_repr_queries: int = 1,
+) -> torch.Tensor:
+    """ε_mass 的**绝对**版本：两侧用**同一个**偏移常数。
+
+    `mass_error` / `signed_mass_error` 的实现是"各自减自己的最大值"。
+    这一做法对 β 的**常数分量完全免疫** —— 因为 β 的常数部分在减 max 时被抵消掉了。
+    而 β 的常数分量恰恰是它的主要作用（见 `mixture_output` 的说明）。
+
+    因此这里改用公共偏移 `c = max(ℓ_full)` 同时作用于两侧：
+
+        ε_mass = |Σ_j exp(ℓc_j + β_j − c) − Σ_k exp(ℓo_k − c)| / Σ_k exp(ℓo_k − c)
+
+    这样"整块质量被抬高/压低"才可观测。
+
+    Returns:
+        [N] 相对误差（无符号）
+    """
+    scale = 1.0 / (keys.shape[-1] ** 0.5)
+    logits_full = (probe_queries @ keys.T) * scale
+    c = logits_full.max()
+    mass_full = torch.exp(logits_full - c).sum(dim=-1)
+
+    bias = beta_applied(compact.logit_bias, beta_mode, num_repr_queries)
+    logits_c = (probe_queries @ compact.keys.T) * scale + bias
+    mass_c = torch.exp(logits_c - c).sum(dim=-1)
+
+    return (mass_c - mass_full).abs() / (mass_full + 1e-12)
+
+
+def mixture_output(
+    probe_queries: torch.Tensor,
+    fixed_keys: torch.Tensor,
+    fixed_values: torch.Tensor,
+    compact: Optional[CompactKV] = None,
+    keys: Optional[torch.Tensor] = None,
+    values: Optional[torch.Tensor] = None,
+    beta_mode: str = "full",
+    num_repr_queries: int = 1,
+) -> torch.Tensor:
+    """把"源块"与一个固定的上下文块**拼接后**再算注意力输出。
+
+    为什么必须这样测 β
+    ------------------
+    紧凑块的诱导分布是 `softmax(ℓc + β)`。softmax 对 logit 的**整体常数位移免疫**，
+    所以**只要独立地看单个块**，β 中所有 Key 共同的抬升部分是不可见的 ——
+    测到的只是 β 的跨 Key 离散度。
+
+    但 Attention Matching 给 β 设定的职责是"补回被压缩块丢掉的质量"，
+    而质量只在**与其他块共处一个 softmax 分母**时才有意义：
+    最终输出是各块贡献的加权混合，权重正比于各块的未归一化质量
+    `exp(m_block)·l_block`。此时把 β 整体抬高 c，
+    该块的权重就被乘以 exp(c)，混合比例随之改变。
+
+    所以「β 是否补回了质量」只能在**归并后**的输出上测。
+    这正是源论文 Appendix A.2 "mass-preserving" 论证的落点。
+
+    Args:
+        probe_queries: [N, d_h]
+        fixed_keys/fixed_values: 固定上下文块（模拟已有 KV）
+        compact: 紧凑块；给出时用它替代 (keys, values)
+        keys/values: 完整源块（compact 为 None 时使用）
+        beta_mode / num_repr_queries: β 的用法
+
+    Returns:
+        [N, d_v] 归并后的输出
+    """
+    from src.dcc_kv_ref import merge_softmax_states, online_softmax_from_attention
+
+    d_h = fixed_keys.shape[-1]
+    scale = 1.0 / (d_h ** 0.5)
+    N = probe_queries.shape[0]
+    outs = []
+
+    for i in range(N):
+        q = probe_queries[i]
+        l_fix = (q @ fixed_keys.T) * scale
+        st = online_softmax_from_attention(l_fix, fixed_values)
+
+        if compact is not None:
+            bias = beta_applied(compact.logit_bias, beta_mode, num_repr_queries)
+            l_src = (q @ compact.keys.T) * scale + bias
+            st2 = online_softmax_from_attention(l_src, compact.values)
+        else:
+            assert keys is not None and values is not None
+            l_src = (q @ keys.T) * scale
+            st2 = online_softmax_from_attention(l_src, values)
+
+        m = merge_softmax_states(st, st2)
+        outs.append(m.o / m.l)
+    return torch.stack(outs, dim=0)
+
+
+def mixture_relative_error(
+    probe_queries: torch.Tensor,
+    fixed_keys: torch.Tensor,
+    fixed_values: torch.Tensor,
+    compact: CompactKV,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    beta_mode: str = "full",
+    num_repr_queries: int = 1,
+) -> torch.Tensor:
+    """归并后的相对输出误差 —— β "质量保持"职责的正确度量。
+
+    || mixture(固定块, 紧凑块) − mixture(固定块, 完整块) || / || 后者 ||
+    """
+    y_c = mixture_output(probe_queries, fixed_keys, fixed_values,
+                         compact=compact, beta_mode=beta_mode,
+                         num_repr_queries=num_repr_queries)
+    y_d = mixture_output(probe_queries, fixed_keys, fixed_values,
+                         keys=keys, values=values)
+    return (y_c - y_d).norm(dim=-1) / (y_d.norm(dim=-1) + 1e-12)
+
+
+def make_fixed_context(
+    d_h: int = 32,
+    d_v: int = 32,
+    length: int = 128,
+    seed: int = 7,
+    dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """生成一个固定的上下文块（模拟"已经存在的 KV"），用于归并实验。"""
+    g = torch.Generator().manual_seed(seed)
+    return (torch.randn(length, d_h, generator=g, dtype=dtype),
+            torch.randn(length, d_v, generator=g, dtype=dtype))
+
+
 __all__ = [
     "SyntheticScenario",
     "make_scenario",
+    "HeldoutSplit",
+    "heldout_split",
+    "absolute_mass_error",
+    "mixture_output",
+    "mixture_relative_error",
+    "make_fixed_context",
     "compaction_dtype_support",
     "dtype_from_name",
     "DTYPE_BUG_FILE",
