@@ -5,7 +5,11 @@
 % 编写约束（来自仓库 README.md "不主张的内容" 与 docs/release_checklist.md）：
 %   - 所有条目必须真实可验证，arXiv 编号 / 会议 / 页码均经 WebSearch 核对。
 %   - 不得为"堆引用"而加入未读过的文献。
-%   - 每条目附 note 字段，标注其在正文中的用途（便于后续核对引用完整性）。
+%   - 每条目附 annote 字段，标注其在正文中的用途（便于后续核对引用完整性）。
+%     用 annote 而非 note：ACM-Reference-Format.bst 定义了 output.note（会被排版进
+%     参考文献表），但完全不引用 annote。因此 annote 可作为"只给作者看"的注释，
+%     既不污染正式参考文献表，也不引入中文/特殊字符的排版问题。
+%     该字段的内容同时维护在资料库文档「DCC-KV 论文参考文献索引」中。
 %
 % 引用键命名约定： <firstauthor-lastname><year><shortname>
 % =============================================================================
@@ -21,7 +25,7 @@
   year      = {2023},
   doi       = {10.48550/arXiv.2310.01889},
   url       = {https://arxiv.org/abs/2310.01889},
-  note      = {Sec.2.1 / Sec.1 — Ring Attention 本体，序列并行的代表作，本文的通信瓶颈出发点（每个块需广播至所有目的端）。}
+  annote    = {Sec.2.1 / Sec.1 — Ring Attention 本体，序列并行的代表作，本文的通信瓶颈出发点（每个块需广播至所有目的端）。}
 }
 
 @inproceedings{brandon2023striped,
@@ -31,7 +35,7 @@
   year      = {2023},
   doi       = {10.48550/arXiv.2311.09431},
   url       = {https://arxiv.org/abs/2311.09431},
-  note      = {Sec.2.1 — 针对因果注意力负载不均衡的条带化改进。}
+  annote    = {Sec.2.1 — 针对因果注意力负载不均衡的条带化改进。}
 }
 
 @inproceedings{li2024distflash,
@@ -43,7 +47,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.LG},
   url       = {https://arxiv.org/abs/2310.03294},
-  note      = {Sec.2.1 — 又名 LightSeq；载荷均衡的序列并行，官方实现见 github.com/RulinShao/LightSeq。}
+  annote    = {Sec.2.1 — 又名 LightSeq；载荷均衡的序列并行，官方实现见 github.com/RulinShao/LightSeq。}
 }
 
 @inproceedings{fang2024usp,
@@ -53,7 +57,7 @@
   year      = {2024},
   doi       = {10.48550/arXiv.2405.07719},
   url       = {https://arxiv.org/abs/2405.07719},
-  note      = {Sec.2.1 — 统一序列并行（Ulysses + Ring），本文在其设定的"长上下文协同推理"语境下讨论。}
+  annote    = {Sec.2.1 — 统一序列并行（Ulysses + Ring），本文在其设定的"长上下文协同推理"语境下讨论。}
 }
 
 @inproceedings{acharya2024star,
@@ -63,7 +67,7 @@
   year      = {2024},
   doi       = {10.48550/arXiv.2411.17116},
   url       = {https://arxiv.org/abs/2411.17116},
-  note      = {Sec.2.1 — NVIDIA 的两阶段块本地 + 全局锚点注意力；与本文"锚点/代表 Query"思路的对照基线。}
+  annote    = {Sec.2.1 — NVIDIA 的两阶段块本地 + 全局锚点注意力；与本文"锚点/代表 Query"思路的对照基线。}
 }
 
 @inproceedings{huang2025apb,
@@ -75,7 +79,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.CL},
   url       = {https://arxiv.org/abs/2502.12085},
-  note      = {Sec.2.1 — 清华大学 NLP + 中南 + 北邮 + 腾讯微信 AI；全网共享 anchor 的设计。标题、作者与编号已由 literature/huang2025apb_2502.12085_APB.pdf 首页核对确认。}
+  annote    = {Sec.2.1 — 清华大学 NLP + 中南 + 北邮 + 腾讯微信 AI；全网共享 anchor 的设计。标题、作者与编号已由 literature/huang2025apb_2502.12085_APB.pdf 首页核对确认。}
 }
 
 % -----------------------------------------------------------------------------
@@ -92,7 +96,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.LG},
   url       = {https://arxiv.org/abs/2306.14048},
-  note      = {Sec.2.2 — Heavy Hitter 累积注意力分数驱逐策略，KV 压缩的经典基线。}
+  annote    = {Sec.2.2 — Heavy Hitter 累积注意力分数驱逐策略，KV 压缩的经典基线。}
 }
 
 @inproceedings{liu2023scissorhands,
@@ -105,7 +109,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.CL},
   url       = {https://arxiv.org/abs/2305.17118},
-  note      = {Sec.2.2 — 重要性持久性假设；Rice University + Stevens Institute。}
+  annote    = {Sec.2.2 — 重要性持久性假设；Rice University + Stevens Institute。}
 }
 
 @inproceedings{xiao2024streamingllm,
@@ -117,7 +121,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.CL},
   url       = {https://arxiv.org/abs/2309.17453},
-  note      = {Sec.2.2 — Attention Sink 现象；保留初始 token 的流式推理。CMU + MIT + Meta AI + NVIDIA；代码 mit-han-lab/streaming-llm。}
+  annote    = {Sec.2.2 — Attention Sink 现象；保留初始 token 的流式推理。CMU + MIT + Meta AI + NVIDIA；代码 mit-han-lab/streaming-llm。}
 }
 
 @inproceedings{li2024snapkv,
@@ -130,7 +134,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.CL},
   url       = {https://arxiv.org/abs/2404.14469},
-  note      = {Sec.2.2 — 基于观察窗口的 query-aware 压缩；UIUC + Cohere + Princeton。"查询感知"路线的代表。}
+  annote    = {Sec.2.2 — 基于观察窗口的 query-aware 压缩；UIUC + Cohere + Princeton。"查询感知"路线的代表。}
 }
 
 @article{cai2024pyramidkv,
@@ -140,7 +144,7 @@
   year      = {2024},
   doi       = {10.48550/arXiv.2406.02069},
   url       = {https://arxiv.org/abs/2406.02069},
-  note      = {Sec.2.2 — 金字塔式逐层预算分配；UW-Madison + PKU + Qwen + UCR + Microsoft。}
+  annote    = {Sec.2.2 — 金字塔式逐层预算分配；UW-Madison + PKU + Qwen + UCR + Microsoft。}
 }
 
 @inproceedings{tang2024quest,
@@ -152,7 +156,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.LG},
   url       = {https://arxiv.org/abs/2406.10774},
-  note      = {Sec.2.2 — 用 query 表示估计块重要性的上界，实现细粒度稀疏。SJTU + MIT + UW + NVIDIA。}
+  annote    = {Sec.2.2 — 用 query 表示估计块重要性的上界，实现细粒度稀疏。SJTU + MIT + UW + NVIDIA。}
 }
 
 % -----------------------------------------------------------------------------
@@ -166,7 +170,7 @@
   year      = {2026},
   doi       = {10.48550/arXiv.2602.16284},
   url       = {https://arxiv.org/abs/2602.16284},
-  note      = {Sec.2.2 / Sec.4.3 — ⚠️ 关键引用：本文 4.3 节的紧凑 KV 构建流程（Key 选择 → 质量偏置 β 拟合 (NNLS) → Value 拟合）沿用该工作，本文不主张该机制为原创。MIT CSAIL；官方实现 github.com/adamzweiger/compaction。标题与作者已由 literature/zweiger2026attentionmatching_2602.16284_AttentionMatching.pdf 首页核对确认。}
+  annote    = {Sec.2.2 / Sec.4.3 — ⚠️ 关键引用：本文 4.3 节的紧凑 KV 构建流程（Key 选择 → 质量偏置 β 拟合 (NNLS) → Value 拟合）沿用该工作，本文不主张该机制为原创。MIT CSAIL；官方实现 github.com/adamzweiger/compaction。标题与作者已由 literature/zweiger2026attentionmatching_2602.16284_AttentionMatching.pdf 首页核对确认。}
 }
 
 % -----------------------------------------------------------------------------
@@ -182,7 +186,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.LG},
   url       = {https://arxiv.org/abs/2209.01188},
-  note      = {Sec.2.3 — 协同推理的开拓工作，把模型分片部署到异构节点。HSE + Yandex + UW + HuggingFace + ENS Paris-Saclay；期刊扩展版 arXiv:2312.08361 (NeurIPS 2023)。}
+  annote    = {Sec.2.3 — 协同推理的开拓工作，把模型分片部署到异构节点。HSE + Yandex + UW + HuggingFace + ENS Paris-Saclay；期刊扩展版 arXiv:2312.08361 (NeurIPS 2023)。}
 }
 
 % -----------------------------------------------------------------------------
@@ -198,7 +202,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.LG},
   url       = {https://arxiv.org/abs/2205.14135},
-  note      = {Sec.4.4 — 分块注意力与 online softmax 的工程基础，本文块级分解的实现依赖。}
+  annote    = {Sec.4.4 — 分块注意力与 online softmax 的工程基础，本文块级分解的实现依赖。}
 }
 
 @inproceedings{dao2023flashattention2,
@@ -210,7 +214,7 @@
   archivePrefix = {arXiv},
   primaryClass  = {cs.LG},
   url       = {https://arxiv.org/abs/2307.08691},
-  note      = {Sec.4.4 — 并行度与工作划分优化，本文异步流水设计时的算力侧前提。}
+  annote    = {Sec.4.4 — 并行度与工作划分优化，本文异步流水设计时的算力侧前提。}
 }
 
 @article{milakov2018online,
@@ -220,7 +224,7 @@
   year      = {2018},
   doi       = {10.48550/arXiv.1805.02867},
   url       = {https://arxiv.org/abs/1805.02867},
-  note      = {Sec.3.2 / Sec.4.4 eq.(21)-(27) — 在线归一化 (m, l, o) 状态与其归并算子 ⊕ 的理论来源。本文的顺序无关性论证直接建立其上。}
+  annote    = {Sec.3.2 / Sec.4.4 eq.(21)-(27) — 在线归一化 (m, l, o) 状态与其归并算子 ⊕ 的理论来源。本文的顺序无关性论证直接建立其上。}
 }
 
 % =============================================================================

@@ -97,7 +97,7 @@ $O(L_s(d_h+d_v))$ 降至 $O(B_{s,r}(d_h+d_v))$，其中 $B_{s,r} \ll L_s$。本�
 \label{sec:intro}
 
 长文档问答、代码仓库分析和多轮智能体推理要求语言模型处理数十万乃至更长的上下文。尽管
-FlashAttention \cite{dao2022flashattention} 等工作降低了单设备注意力的显存访存开销，完整
+FlashAttention \cite{dao2022flashattention,dao2023flashattention2} 等工作降低了单设备注意力的显存访存开销，完整
 上下文仍可能超过单卡容量。序列并行由此成为扩展上下文长度的重要路径：输入沿序列维度被划分到
 多个设备，每个设备保留局部 Query、Key 和 Value，并通过跨设备通信恢复全局注意力。
 
@@ -381,7 +381,7 @@ m_b = \max_j g_{b,j},\quad
 l_b = \sum_j e^{g_{b,j} - m_b},\quad
 o_b = \sum_j e^{g_{b,j} - m_b} v_{b,j}.
 \end{equation}
-对两个状态 $S_a$ 与 $S_b$，定义归并算子 $\oplus$：
+对两个状态 $S_a$ 与 $S_b$，沿用在线 Softmax 的归并算子 $\oplus$ \cite{milakov2018online}：
 \begin{align}
 m_{ab} &= \max(m_a, m_b),\\
 l_{ab} &= e^{m_a - m_{ab}} l_a + e^{m_b - m_{ab}} l_b,\\
