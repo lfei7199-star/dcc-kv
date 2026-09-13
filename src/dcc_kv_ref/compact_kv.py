@@ -93,15 +93,27 @@ def build_compact_kv(
         source_keys, repr_queries, budget=budget,
     )
 
-    # Step 3: β 拟合 — 需要原始块对代表 Q 的 attention 质量
+    # Step 3: β 拟合 — 需要原始块对代表 Q 的**未归一化**注意力质量
+    #
+    # 修正（2026-09-13）：旧实现写的是
+    #     A_orig = softmax(logits_orig, dim=-1); block_mass = A_orig.sum(dim=-1)
+    # 沿归一化维求和**恒等于 1**（softmax 的定义），因此该目标与输入完全无关，
+    # β 的拟合问题退化为「让 G w ≈ 1」，不携带任何质量信息。
+    #
+    # 源论文 Attention Matching (arXiv:2602.16284) 的定义是
+    #     Mass(q; K) = Σ_j exp(ℓ(q, k_j))          —— 未归一化
+    # 与本文件 calibration.py 文档中的 eq.(15) 一致。
     M, d_h = repr_queries.shape
     scale = 1.0 / (d_h ** 0.5)
     logits_orig = (repr_queries @ source_keys.T) * scale
-    A_orig = torch.softmax(logits_orig, dim=-1)
-    block_mass = A_orig.sum(dim=-1)  # [M]
+    # 全局常数偏移 c：同时作用于目标质量与设计矩阵，不改变拟合出的 β，
+    # 仅用于防止 exp(ℓ) 溢出（见 calibration.fit_logit_bias 的说明）
+    mass_shift = float(logits_orig.max().item())
+    block_mass = torch.exp(logits_orig - mass_shift).sum(dim=-1)  # [M]
 
     beta = fit_logit_bias(
-        repr_queries, compact_keys, block_mass, lambda_reg=lambda_beta,
+        repr_queries, compact_keys, block_mass,
+        lambda_reg=lambda_beta, mass_shift=mass_shift,
     )
 
     # Step 4: V 回归

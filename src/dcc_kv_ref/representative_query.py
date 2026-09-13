@@ -1,6 +1,18 @@
 """M1.1: 代表 Query 选择（Rademacher 投影 + 最远点采样）。
 
 论文 reference: DCC-KV eq.(10)(11)(12)
+
+设备与精度说明（2026-09-13 修正）
+--------------------------------
+旧实现在 `rademacher_projection` 与 `farthest_point_sampling` 中直接用
+`torch.Generator()` + `torch.randint(...)`，两者都默认建在 **CPU**：
+
+- 当 `queries` 在 CUDA 上时，`queries @ proj.T` 会因设备不一致直接报错，
+  整条紧凑 KV 构造链在 GPU 上不可用；
+- `proj.float()` 写死 float32，使 float64 输入报 dtype 不匹配，
+  第 5 章的 FP64 误差分析因此在实现上无法复现。
+
+现改为按输入张量的 device/dtype 生成。
 """
 from __future__ import annotations
 
@@ -24,10 +36,12 @@ def rademacher_projection(
     Returns:
         projection_matrix: [projection_dim, head_dim]（用于后续投影）
     """
-    g = torch.Generator().manual_seed(seed)
-    # P_{a,b} ~ 1/sqrt(d_p) * {+1, -1}
-    proj = (torch.randint(0, 2, (projection_dim, queries.shape[-1]), generator=g) * 2 - 1)
-    proj = proj.float() / (projection_dim ** 0.5)
+    device = queries.device
+    g = torch.Generator(device=device).manual_seed(seed)
+    # P_{a,b} ~ 1/sqrt(d_p) * {+1, -1}；dtype 与 device 均随输入
+    proj = (torch.randint(0, 2, (projection_dim, queries.shape[-1]),
+                          generator=g, device=device) * 2 - 1)
+    proj = proj.to(queries.dtype) / (projection_dim ** 0.5)
     return proj
 
 
@@ -50,13 +64,13 @@ def farthest_point_sampling(
         seed: 起始点随机种子
 
     Returns:
-        indices: [num_samples] 代表 query 的索引
+        indices: [num_samples] 代表 query 的索引（与 features 同 device）
     """
     N = features.shape[0]
     if num_samples >= N:
-        return torch.arange(N)
+        return torch.arange(N, device=features.device)
 
-    g = torch.Generator().manual_seed(seed)
+    g = torch.Generator(device=features.device).manual_seed(seed)
 
     # 距离矩阵（用余弦距离：D = 1 - z^T z'）
     # features 已归一化，所以 z^T z' = cos sim
@@ -65,7 +79,8 @@ def farthest_point_sampling(
     dist = 1.0 - sim
 
     # 起点：随机
-    start = int(torch.randint(0, N, (1,), generator=g).item())
+    start = int(torch.randint(0, N, (1,), generator=g,
+                              device=features.device).item())
     selected = [start]
     min_dist = dist[start].clone()  # [N]
 
@@ -76,7 +91,7 @@ def farthest_point_sampling(
         # 更新 min_dist
         min_dist = torch.minimum(min_dist, dist[next_idx])
 
-    return torch.tensor(selected, dtype=torch.long)
+    return torch.tensor(selected, dtype=torch.long, device=features.device)
 
 
 def select_representative_queries(
@@ -102,7 +117,6 @@ def select_representative_queries(
         representative_queries: [M, d] 原始维度的代表 query
         indices: [M] 选中的索引
     """
-    g = torch.Generator().manual_seed(seed)
     proj = rademacher_projection(queries, projection_dim=projection_dim, seed=seed)
     z = queries @ proj.T  # [N, d_p]
     z_norm = z / (z.norm(dim=-1, keepdim=True) + 1e-8)

@@ -14,10 +14,16 @@ from dataclasses import dataclass
 from typing import List, Optional
 import torch
 
-from ..dcc_kv_ref import (
-    build_compact_kv, CompactKV, OnlineSoftmaxState,
-    online_softmax_from_attention, merge_softmax_states,
-)
+try:  # 允许两种导入根：包内 `src.` 导入 与 把 `src/` 直接加入 sys.path
+    from ..dcc_kv_ref import (
+        build_compact_kv, CompactKV, OnlineSoftmaxState,
+        online_softmax_from_attention, merge_softmax_states,
+    )
+except ImportError:  # pragma: no cover - 兼容把 src/ 直接加入 sys.path 的调用方
+    from dcc_kv_ref import (
+        build_compact_kv, CompactKV, OnlineSoftmaxState,
+        online_softmax_from_attention, merge_softmax_states,
+    )
 
 
 @dataclass

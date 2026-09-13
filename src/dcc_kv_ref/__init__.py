@@ -9,6 +9,8 @@ from .online_softmax import (
     OnlineSoftmaxState,
     online_softmax_from_attention,
     merge_softmax_states,
+    merge_softmax_states_list,
+    attention_output_from_state,
     verify_order_invariance,
 )
 from .representative_query import (
@@ -35,6 +37,8 @@ __all__ = [
     "OnlineSoftmaxState",
     "online_softmax_from_attention",
     "merge_softmax_states",
+    "merge_softmax_states_list",
+    "attention_output_from_state",
     "verify_order_invariance",
     # representative query
     "farthest_point_sampling",
