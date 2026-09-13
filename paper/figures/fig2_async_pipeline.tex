@@ -1,0 +1,76 @@
+% =============================================================================
+% 图 2：异步 All-to-Allv 流水时序
+% 编译：xelatex fig2_async_pipeline.tex
+% =============================================================================
+\documentclass[tikz,border=4pt]{standalone}
+\input{preamble}
+
+\begin{document}
+\begin{tikzpicture}[x=1mm, y=1mm]
+
+  % 泳道宽度与块高
+  \def\W{150}
+  \def\Hc{11}
+
+  % 标题
+  \node[font=\small, anchor=west] at (0, 30)
+       {\textbf{异步流水：接收 $\parallel$ 计算 $\parallel$ 发送}};
+
+  % --- 泳道 1：通信流（接收） ---
+  \node[font=\scriptsize, anchor=east] at (-2, 20) {通信流};
+  \draw[draw=black!50] (0,20) -- (\W,20);
+  \foreach \i/\a in {0/0, 1/42, 2/84, 3/126}{
+    \fill[blue!25, draw=blue!55, line width=0.3pt, rounded corners=1pt]
+      (\a, 15.5) rectangle ++(38, \Hc);
+    \node[font=\scriptsize] at (\a+19, 21) {recv $C^{s_{\i}}$};
+  }
+  % 发送流（与接收并行）
+  \foreach \i/\a in {0/20, 1/62, 2/104}{
+    \fill[orange!28, draw=orange!60, line width=0.3pt, rounded corners=1pt]
+      (\a, 5) rectangle ++(38, \Hc);
+    \node[font=\scriptsize] at (\a+19, 10.5) {send $C_{\i\to t}$};
+  }
+
+  % --- 泳道 2：计算流 ---
+  \node[font=\scriptsize, anchor=east] at (-2, -14) {计算流};
+  \draw[draw=black!50] (0,-14) -- (\W,-14);
+  % 计算块按到达时间错开，宽 36、间隔 38 —— 形成连续流水
+  \foreach \i/\a in {0/0, 1/38, 2/76, 3/114}{
+    \fill[green!26, draw=green!60!black, line width=0.3pt, rounded corners=1pt]
+      (\a, -20) rectangle ++(36, \Hc);
+    \node[font=\scriptsize] at (\a+18, -9.5) {Attn $s_{\i}$};
+  }
+
+  % --- 到达事件箭头（块到达即刻触发计算） ---
+  \foreach \a in {38, 76, 114}{
+    \draw[-{Stealth[length=1.6mm]}, dashed, draw=red!65, line width=0.4pt]
+      (\a, 15.5) -- (\a, -9.5);
+  }
+  \node[font=\scriptsize, text=red!65, anchor=west] at (116, 2)
+       {到达即计算};
+
+  % 时间轴
+  \draw[-{Stealth[length=2mm]}, draw=black!60] (0,-26) -- (\W+6,-26)
+       node[right, font=\scriptsize]{$t$};
+
+  % --- 串行 vs 异步对比条 ---
+  \begin{scope}[yshift=-40mm]
+    \node[font=\scriptsize, anchor=east] at (-2, 4) {同步（串行）};
+    \foreach \i/\a in {0/0, 1/30, 2/60, 3/90}{
+      \fill[blue!18, draw=blue!40, line width=0.3pt] (\a, 0) rectangle ++(18, 7);
+      \fill[green!18, draw=green!50!black, line width=0.3pt] (\a+18, 0) rectangle ++(18, 7);
+    }
+    \draw[draw=black!35] (0,0) rectangle (126, 7);
+    \node[font=\scriptsize, anchor=west] at (130, 3.5) {$\approx 4\,(T_c+T_k)$};
+
+    \node[font=\scriptsize, anchor=east] at (-2, -13) {异步（流水）};
+    % 通信流整体：4 × T_c
+    \fill[blue!18, draw=blue!40, line width=0.3pt] (0,-17) rectangle ++(120, 7);
+    % 计算流：首个计算需等首个块到达(T_c)，之后每 T_k 一个，共 4 个
+    \fill[green!30, draw=green!50!black, line width=0.5pt] (30,-17) rectangle ++(90, 7);
+    \node[font=\scriptsize, anchor=west] at (126, -13.5)
+         {$\approx \max(4T_c,\, T_c + 4T_k)$};
+  \end{scope}
+
+\end{tikzpicture}
+\end{document}

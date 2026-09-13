@@ -1,0 +1,260 @@
+\section{复杂度与误差分析}
+\label{sec:analysis}
+
+本节给出 DCC-KV 的通信量与计算复杂度，并将端到端近似误差分解为可独立界定的若干项。分析沿
+用第~\ref{sec:problem} 节的记号：$N$ 为设备数，$L_s$ 为源块长度，$d_h$、$d_v$ 分别为
+KV Head 的 Key 与 Value 维度，$M$ 为代表 Query 数，$d_p$ 为随机投影维度，$B_{s,r}$ 为边
+$(s,r)$ 的压缩预算。所有结论针对单个 Transformer 层、单个 KV Head；多层多头情形按层与头
+线性叠加。
+
+\subsection{通信量分析}
+\label{sec:analysis-comm}
+
+\subsubsection{消息长度}
+
+DCC-KV 的通信由两段组成。第一段是代表 Query 的环形交换：每轮转发一个
+$\widehat{Q}_r \in \mathbb{R}^{M \times d_h}$，进行 $N-1$ 轮，故单设备发送量为
+\begin{equation}
+\label{eq:comm-query}
+V_{\text{query}} = (N-1) \, M \, d_h .
+\end{equation}
+第二段是变长紧凑 KV 的 All-to-Allv：对每条有效边 $(s,r)$，消息长度为
+$B_{s,r}(d_h + d_v) + B_{s,r}$，其中最后一项对应质量偏置 $\beta^{s \to r}$。若以
+$|\mathcal{E}_s|$ 记源设备 $s$ 的出边数，则其单层发送总量为
+\begin{equation}
+\label{eq:comm-kv}
+V_{\text{kv}} = \sum_{r \in \mathcal{E}_s}
+B_{s,r}\,(d_h + d_v + 1).
+\end{equation}
+
+作为对照，精确序列并行下源设备 $s$ 必须向同一组目的端发送完整 KV 块，发送量为
+\begin{equation}
+\label{eq:comm-dense}
+V_{\text{dense}} = |\mathcal{E}_s| \, L_s \, (d_h + d_v) .
+\end{equation}
+
+若各边预算相同，记为 $B$，则当 $B \ll L_s$ 且 $N$ 不太大时有
+\begin{equation}
+\label{eq:comm-ratio}
+\frac{V_{\text{query}} + V_{\text{kv}}}{V_{\text{dense}}}
+\approx \frac{B}{L_s} + \frac{(N-1) M d_h}{|\mathcal{E}_s| L_s (d_h+d_v)} .
+\end{equation}
+即压缩比主要由 $B/L_s$ 决定，代表 Query 的开销随设备数线性增长但与上下文长度无关，
+在长上下文区间可忽略。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig4_comm_scaling.pdf}
+\caption{单边通信量的解析对比（$d_h+d_v=256$，$B=64$）。精确序列并行的通信量随源块长度
+$L_s$ 线性增长；DCC-KV 的紧凑 KV 传输量 $O(B_{s,r}(d_h+d_v))$ 与 $L_s$ 无关，二者相差
+$L_s/B$ 倍。代表 Query 的摘要开销 $O(NMd_h)$ 随设备数增长，但与上下文长度无关。
+\emph{本图为解析结果，非实测数据。}}
+\label{fig:comm}
+\end{figure}
+
+\subsubsection{与集合通信实现的匹配}
+
+式~\eqref{eq:comm-query} 的形状规整（所有 $\widehat{Q}_r$ 同形），可直接由 $N-1$ 轮
+Ring All-Gather 实现。式~\eqref{eq:comm-kv} 的关键性质是各边长度不同，标准 All-to-All
+要求每个接收端预知各来源的消息长度。4.4 节的两阶段实现（先交换长度与缓冲区偏移，再提交
+非阻塞收发）把这一约束转化为一次 $O(N^2)$ 的元数据交换，该交换与消息体传输解耦，因此不
+进入主通信路径。
+
+\subsection{计算复杂度分析}
+\label{sec:analysis-compute}
+
+\subsubsection{代表 Query 选择}
+
+按式~(10)--(12)：随机投影为 $O(L_r d_h d_p)$；$M$ 轮最远点采样，每轮维护并更新当前子集
+到所有候选点的最小距离，代价为 $O(M L_r d_p)$。故选择开销为
+\begin{equation}
+\label{eq:cost-fps}
+C_{\text{select}} = O\!\left(L_r d_h d_p + M L_r d_p\right),
+\end{equation}
+与 $L_r$ 成线性、与 $B_{s,r}$ 无关。注意该开销在所有设备上并行发生。
+
+\subsubsection{紧凑 KV 构造}
+
+对每个目的端 $r$，源设备 $s$ 需计算响应矩阵
+$A^{s\to r} = \mathrm{softmax}(\widehat{Q}_r K_s^\top / \sqrt{d_h}) \in
+\mathbb{R}^{M \times L_s}$，代价 $O(M L_s d_h)$；RMS 聚合与 Top-$B$ 选择为
+$O(M L_s)$ 与 $O(L_s \log B)$。质量偏置拟合的求解规模为 $M \times B$，
+投影梯度下降的每次迭代代价 $O(M B)$；Value 回归为 $M \times B$ 的岭回归，
+闭式解的构造成本 $O(M B^2 + M B d_v)$。合计
+\begin{equation}
+\label{eq:cost-build}
+C_{\text{build}} = O\!\left(M L_s d_h + M B_{s,r}(d_h + d_v) + M B_{s,r}^2\right).
+\end{equation}
+式~\eqref{eq:cost-build} 的第一项是主导项。这是目的端条件化的直接代价：源设备 $s$ 需为其
+每个出边重复一次构造，总构造代价乘以 $|\mathcal{E}_s|$。
+
+\subsubsection{目的端注意力计算}
+
+目的端 $r$ 的本地块注意力代价为 $O(L_r^2 d_h)$（因果情形减半）。对每个到达的远程紧凑块，
+计算式~(22) 的 Logit 与式~(23) 的状态，代价为 $O(L_r B_{s,r}(d_h + d_v))$。全部远程块合计
+\begin{equation}
+\label{eq:cost-attn}
+C_{\text{attn}} = O\!\left(L_r^2 d_h + L_r (d_h + d_v) \textstyle\sum_{s \in \mathcal{E}_r} B_{s,r}\right).
+\end{equation}
+与精确远程注意力 $O(L_r \sum_{s} L_s (d_h+d_v))$ 相比，式~\eqref{eq:cost-attn} 的第二项
+关于 $\sum_s B_{s,r}$ 而非 $\sum_s L_s$，这是压缩在计算侧的收益。
+
+\subsubsection{总览与权衡}
+
+表~\ref{tab:complexity} 汇总各阶段复杂度。需要强调的是，DCC-KV 并不降低本地块的注意力
+代价，也不减少层数或头数；其收益集中在跨设备通信量与远程注意力计算量两处，同时以
+$|\mathcal{E}_s|$ 倍的构造代价与 $M$ 倍的代表 Query 通信作为代价。当 $B \ll L_s$
+且 $M \ll L_r$ 时，这一交换在长上下文区间是划算的。
+
+\begin{table}[t]
+\centering
+\small
+\caption{DCC-KV 各阶段的单层单头复杂度。$B \equiv B_{s,r}$，$L \equiv L_s \approx L_r$。}
+\label{tab:complexity}
+\begin{tabular}{lll}
+\toprule
+阶段 & DCC-KV & 精确序列并行 \\
+\midrule
+代表 Query 交换 & $O(N M d_h)$ & --- \\
+紧凑 KV 构造 & $O(|\mathcal{E}_s|(M L d_h + M B^2))$ & --- \\
+跨设备通信量 & $O(|\mathcal{E}_s| B (d_h+d_v))$ & $O(|\mathcal{E}_s| L (d_h+d_v))$ \\
+远程注意力 & $O(L \sum_s B)$ & $O(L \sum_s L_s)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{误差分解与误差界}
+\label{sec:analysis-error}
+
+设目的端 $r$ 上某一 Query $q$ 的精确全局注意力为 $\mathrm{Attn}(q)$，DCC-KV 的输出为
+$\widehat{\mathrm{Attn}}(q)$。按式~(6) 的块分解，误差来自三个可分离的环节。以下均针对
+单个 Query，且假设所有有效块恰好被处理一次。
+
+\subsubsection{误差的三个来源}
+
+\paragraph{(i) Query 摘要误差。}
+源设备仅看到 $\widehat{Q}_r$ 而非完整 $Q_r$。若 $q$ 在投影空间中与所选代表 Query 距离
+较远，则据此构造的紧凑 KV 未必适配 $q$。该误差由代表 Query 集合对 $Q_r$ 分布的覆盖度
+决定，记作 $\epsilon_{\text{repr}}$。
+
+\paragraph{(ii) 块级质量匹配误差。}
+式~(16) 在非负约束与 $\lambda_\beta$ 正则下拟合 $m_a^{s\to r}$，一般不能精确复现。定义
+\begin{equation}
+\label{eq:err-mass}
+\epsilon_{\text{mass}}(q) = \sum_{s \in \mathcal{E}_r}
+\left| \widehat{M}_s(q) - M_s(q) \right| ,
+\end{equation}
+其中 $\widehat{M}_s(q) = \sum_{j=1}^{B_{s,r}} \exp(g_{s\to r,j})$。该误差直接改变远程块在
+全局 Softmax 分母中的相对权重，是所有误差项中对最终输出影响最直接的一项。
+
+\paragraph{(iii) 条件输出误差。}
+式~(19) 以 $\lambda_v$ 岭回归拟合 $Y^{s \to r}$，得到的是代表 Query 上的最小二乘解，
+不保证对任意 $q$ 成立。定义
+\begin{equation}
+\label{eq:err-out}
+\epsilon_{\text{out}}(q) = \sum_{s \in \mathcal{E}_r}
+M_s(q) \left\| \widehat{O}_s(q) - O_s(q) \right\|_2 .
+\end{equation}
+
+\subsubsection{误差界}
+
+将式~(6) 的分子分母分别扰动。设
+$\widehat{M}_s = M_s + \delta M_s$、$\widehat{O}_s = O_s + \delta O_s$，且记
+$S(q) = \sum_{s \in \mathcal{B}_r} M_s(q)$。当 $\sum_s |\delta M_s| < S/2$ 时，
+\begin{equation}
+\label{eq:err-bound}
+\left\| \widehat{\mathrm{Attn}}(q) - \mathrm{Attn}(q) \right\|_2
+\;\le\;
+\frac{\epsilon_{\text{out}}(q)}{S(q)}
+\;+\;
+\frac{2\, \epsilon_{\text{mass}}(q)}{S(q)} \cdot \max_{s \in \mathcal{B}_r} \|O_s(q)\|_2 .
+\end{equation}
+式~\eqref{eq:err-bound} 表明：质量误差通过"相对权重被放大"的机制进入输出，且放大系数是
+块输出范数的量级；输出误差则以与自身质量成比例的权重进入。二者均以全局 Softmax 分母
+$S(q)$ 归一化，因此远程块占比越大，单块误差的绝对影响越小。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig3_error_decomposition.pdf}
+\caption{端到端误差的来源与误差界。质量匹配误差 $\epsilon_{\text{mass}}$ 与输出匹配误差
+$\epsilon_{\text{out}}$ 分别作用于块级分母与条件输出，二者均以全局 Softmax 分母 $S(q)$
+归一化，故不随设备数发散。代表 Query 覆盖误差 $\epsilon_{\text{repr}}$ 不显式出现在界中，
+而是通过前两项间接体现。}
+\label{fig:err}
+\end{figure}
+
+式~\eqref{eq:err-bound} 中不含 $\epsilon_{\text{repr}}$ 的显式项，因为 Query 摘要误差
+通过 $\epsilon_{\text{mass}}$ 与 $\epsilon_{\text{out}}$ 间接体现：$q$ 偏离代表 Query
+越远，源设备为它构造的 $(\widehat{M}_s, \widehat{O}_s)$ 就越不准确。这一耦合意味着
+$M$ 的选取需要在"摘要开销小"与"$\epsilon_{\text{mass}}, \epsilon_{\text{out}}$ 低"
+之间权衡，且该权衡是可测量的（见第~\ref{sec:experiment} 节 E2/E5）。
+
+\subsubsection{若干可陈述的性质}
+
+\paragraph{性质 1（质量守恒的充分条件）。}
+若对某条边 $(s,r)$ 有 $B_{s,r} = L_s$，则式~(13) 的 Top-$B$ 选择保留全部 Key，式~(14)
+退化为 $C_k^{s \to r} = K_s$；此时式~(16) 取 $w = \mathbf{1}$、$\beta = \mathbf{0}$ 是
+零残差解，式~(19) 取 $C_v^{s \to r} = V_s$ 亦为零残差解。故 DCC-KV 在预算不裁剪时精确
+退化为全注意力，即该框架是精确注意力的一个严格泛化。
+
+\paragraph{性质 2（无偏置下的质量下界）。}
+由于 $w \ge 0$ 且式~(13) 按 RMS 响应选择 Key，被保留 Key 的响应在代表 Query 上系统性地
+偏高。故在无偏置情形（$\beta = \mathbf{0}$）下通常有 $\widehat{M}_s(q) \le M_s(q)$，
+即压缩后远程块的全局权重被系统性低估，而非随机波动。这为 4.3.2 节引入质量补偿偏置提供
+了直接的动机：$\beta$ 需要做的正是把被裁掉的指数响应重新分配给保留的 Key。
+
+\paragraph{性质 3（误差不随块数累积发散）。}
+式~\eqref{eq:err-bound} 的右侧以 $S(q)$ 归一化，而 $S(q)$ 本身随有效块数增长。因此，即使
+每条边都引入非零误差，只要各边的质量误差不同向叠加，总输出误差不会随设备数 $N$ 线性
+放大。这一点是 DCC-KV 在 $N$ 较大时仍可用的必要条件。需要说明的是，该性质依赖误差的
+符号分布；若所有边系统性低估质量（如性质 2 所述），则需靠 $\beta$ 拟合抵消，这也解释了
+4.3.2 节中正则项选择 $w = \mathbf{1}$ 而非 $w = \mathbf{0}$ 作为收缩目标的设计理由。
+
+\subsection{异步流水的理论加速上限}
+\label{sec:analysis-async}
+
+设单条边的紧凑 KV 传输耗时为 $T_{\text{comm}}$，其对应的注意力计算耗时为
+$T_{\text{comp}}$。在纯串行实现（等全部消息到达后统一计算）下，$N-1$ 轮的总耗时约为
+\begin{equation}
+\label{eq:serial-time}
+T_{\text{serial}} \approx (N-1)\left( T_{\text{comm}} + T_{\text{comp}} \right).
+\end{equation}
+在理想流水下（通信流与计算流完全独立，且任意时刻均有可计算的已到达块），总耗时受两阶段
+中较慢者支配：
+\begin{equation}
+\label{eq:pipeline-time}
+T_{\text{async}} \approx \max \Big( (N-1) T_{\text{comm}},\;(N-1) T_{\text{comp}} \Big)
++ T_{\text{comp}} .
+\end{equation}
+因此理想加速比上界为
+\begin{equation}
+\label{eq:speedup-bound}
+\frac{T_{\text{serial}}}{T_{\text{async}}}
+\;\lesssim\;
+\frac{T_{\text{comm}} + T_{\text{comp}}}{\max(T_{\text{comm}}, T_{\text{comp}})}
+\;=\; 1 + \frac{\min(T_{\text{comm}}, T_{\text{comp}})}{\max(T_{\text{comm}}, T_{\text{comp}})} .
+\end{equation}
+当 $T_{\text{comm}} \approx T_{\text{comp}}$ 时上界趋近 $2\times$；当两者严重失衡时加速
+趋于 $1$。该结论给出一个重要的实践含义：DCC-KV 的异步设计在通信与计算预算相当的区间收益
+最大，而在任一侧主导的区间收益有限。第~\ref{sec:experiment} 节 E6 的加速比测量应显式报告
+$T_{\text{comm}} / T_{\text{comp}}$ 的实测值，以便判断实测加速偏离上界的原因是流水不充分
+还是预算本身失衡。
+
+需要指出，式~\eqref{eq:speedup-bound} 是理论上界，不含通信启动延迟、元数据交换开销、
+负载不均衡以及调度抖动。此外，式~(26) 保证的只是数值结果与接收顺序无关，而在线 Softmax
+状态归并本身引入浮点舍入差异；该差异的量级需通过数值实验界定（见 E1）。因此，异步实现的
+实测加速比应低于式~\eqref{eq:speedup-bound}，且二者之差可用于衡量实现质量。
+
+\subsection{小结}
+
+本节确立三点。第一，DCC-KV 把每条边的通信量从 $O(L_s(d_h+d_v))$ 降至
+$O(B_{s,r}(d_h+d_v))$，代价是 $|\mathcal{E}_s|$ 倍的构造开销与 $O(NM d_h)$ 的摘要开销，
+二者在长上下文区间均可接受。第二，误差可分解为质量误差与输出误差两项并以全局 Softmax
+分母归一化，因此不随设备数发散；质量误差通过相对权重的放大机制进入输出。第三，异步流水
+的理想加速上界由 $T_{\text{comm}}$ 与 $T_{\text{comp}}$ 的比值决定，该比值是可测的，因而
+加速比与上界的差距可以归因。
+
+需要明确的是，本节给出的误差界依赖 $\lambda_\beta$、$\lambda_v$ 与代表 Query 覆盖度等
+量，其实际紧致程度、以及 $\epsilon_{\text{mass}}$、$\epsilon_{\text{out}}$ 在各数据集
+上的经验分布，目前尚未测量。第~\ref{sec:experiment} 节给出测量方案，其中可在纯 CPU 环境
+下复现的部分已标注，需要 GPU 的部分明确标为待执行。

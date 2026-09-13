@@ -1,0 +1,22 @@
+# =============================================================================
+# paper/ 目录专用忽略规则
+# 根 .gitignore 已覆盖 *.aux / *.bbl / *.blg / *.log / *.out，
+# 这里补充本目录特有的构建产物与本地文献缓存。
+# =============================================================================
+
+# 编译产物（可随时由 main.tex 重新生成）
+# main*.pdf 覆盖 main.pdf 及调试用的 main-*.pdf 变体
+main*.pdf
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# 图表：只提交 .tex 源码，PDF 由 `bash build.sh figures` 生成。
+# 这样仓库不含二进制大文件，且图与源码始终一致（release_checklist 第 5 节
+# 要求论文用 vector PDF，该要求由构建流程保证）。
+figures/fig*.pdf
+figures/*.png
+
+# 本地文献缓存：arXiv PDF 数量大且受各自许可约束，不入库。
+# 可由 refs.bib 中的 arXiv 编号重新获取，见 fetch_refs.sh。
+literature/

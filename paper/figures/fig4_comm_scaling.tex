@@ -1,0 +1,48 @@
+% =============================================================================
+% 图 4：单边通信量随上下文长度的变化（解析结果，非实测数据）
+% 编译：xelatex fig4_comm_scaling.tex
+% =============================================================================
+\documentclass[tikz,border=4pt]{standalone}
+\input{preamble}
+
+\begin{document}
+\begin{tikzpicture}[x=1mm, y=1mm]
+
+  \node[font=\small, anchor=west] at (0, 52)
+    {\textbf{单边通信量：解析对比（$d_h+d_v=256$，$B=64$）}};
+
+  % 坐标轴
+  \draw[-{Stealth[length=2mm]}] (0,0) -- (110,0)
+    node[right, font=\scriptsize]{上下文长度 $L_s$};
+  \draw[-{Stealth[length=2mm]}] (0,0) -- (0,44)
+    node[above, font=\scriptsize]{通信量};
+
+  % 网格与刻度
+  \foreach \x/\lb in {0/0, 27/4K, 55/8K, 82/12K, 110/16K}{
+    \draw[draw=black!18] (\x,0) -- (\x,42);
+    \node[font=\scriptsize, text=black!55] at (\x,-4) {\lb};
+  }
+
+  % 精确 KV：随 L_s 线性增长
+  \draw[draw=blue!70, line width=0.9pt] (0,0) -- (110,40);
+  \node[font=\scriptsize, text=blue!70, anchor=west] at (70, 43)
+    {精确：$O(L_s(d_h+d_v))$};
+
+  % DCC-KV：与 L_s 无关
+  \draw[draw=red!75, line width=0.9pt] (0,13) -- (110,13);
+  \node[font=\scriptsize, text=red!75, anchor=west] at (58, 15.5)
+    {DCC-KV：$O(B(d_h+d_v))$，与 $L_s$ 无关};
+
+  % 压缩比标注
+  \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, draw=black!45, line width=0.4pt]
+    (104, 13) -- (104, 39.1);
+  \node[font=\scriptsize, text=black!60, anchor=west] at (106, 26)
+    {$L_s/B$ 倍};
+
+  % 摘要开销（与 L_s 无关的小常数）
+  \draw[draw=green!55!black, line width=0.7pt, dashed] (0,4) -- (110,4);
+  \node[font=\scriptsize, text=green!55!black, anchor=west] at (18, 1.2)
+    {代表 Query 开销 $O(NMd_h)$};
+
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,57 @@
+% =============================================================================
+% 图 1：DCC-KV 总体架构 —— 目的端条件化
+% 编译：xelatex fig1_architecture.tex
+% =============================================================================
+\documentclass[tikz,border=4pt]{standalone}
+\input{preamble}
+
+\begin{document}
+\begin{tikzpicture}[node distance=8mm]
+
+  % 三个源设备
+  \node[dev] (s0) at (0,0)      {源设备 $s_0$\\ {\scriptsize $K_{s_0}, V_{s_0}$}};
+  \node[dev] (s1) at (0,-1.9)   {源设备 $s_1$\\ {\scriptsize $K_{s_1}, V_{s_1}$}};
+  \node[dev] (s2) at (0,-3.8)   {源设备 $s_2$\\ {\scriptsize $K_{s_2}, V_{s_2}$}};
+
+  % 中间：逐边构造
+  \node[blk] (c00) at (3.5,-0.35) {$C^{s_0\to r_0}$};
+  \node[blk] (c01) at (3.5,-1.2)  {$C^{s_0\to r_1}$};
+  \node[blk] (c11) at (3.5,-2.15) {$C^{s_1\to r_1}$};
+  \node[blk] (c12) at (3.5,-3.0)  {$C^{s_1\to r_2}$};
+
+  % 目的设备
+  \node[devr] (r0) at (7.4,-0.35) {目的设备 $r_0$\\ {\scriptsize $Q_{r_0}$}};
+  \node[devr] (r1) at (7.4,-1.95) {目的设备 $r_1$\\ {\scriptsize $Q_{r_1}$}};
+  \node[devr] (r2) at (7.4,-3.6)  {目的设备 $r_2$\\ {\scriptsize $Q_{r_2}$}};
+
+  % 源 → 紧凑块
+  \draw[flow] (s0) -- (c00);
+  \draw[flow] (s0) -- (c01);
+  \draw[flow] (s1) -- (c11);
+  \draw[flow] (s1) -- (c12);
+  % 紧凑块 → 目的端
+  \draw[flow] (c00) -- (r0);
+  \draw[flow] (c01) -- (r1);
+  \draw[flow] (c11) -- (r1);
+  \draw[flow] (c12) -- (r2);
+
+  % 代表 Query 回流（虚线，向右上的反馈）
+  \draw[flowd] (r0.north) to[out=100,in=80,looseness=2.2]
+        node[lab,pos=0.5] {$\widehat{Q}$ 摘要（Ring 交换）} (s0.north);
+
+  % 分隔标注
+  \node[font=\scriptsize, text=black!60] at (3.5,-4.6)
+       {逐边独立构造：$C^{s\to r_1} \neq C^{s\to r_2}$};
+
+  % 左侧大括号说明
+  \draw[decorate, decoration={brace, amplitude=4pt, mirror}, draw=black!45]
+       ($(s2.south west)+(-0.15,-0.1)$) -- ($(s0.north west)+(-0.15,0.1)$)
+       node[midway, left=5pt, font=\scriptsize, align=center, text=black!70]
+       {源端\\ 持有完整 KV};
+  \draw[decorate, decoration={brace, amplitude=4pt}, draw=black!45]
+       ($(r0.north east)+(0.15,0.1)$) -- ($(r2.south east)+(0.15,-0.1)$)
+       node[midway, right=5pt, font=\scriptsize, align=center, text=black!70]
+       {目的端\\ 仅发送\\ 代表 Query};
+
+\end{tikzpicture}
+\end{document}

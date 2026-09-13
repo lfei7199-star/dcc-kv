@@ -1,0 +1,36 @@
+% =============================================================================
+% DCC-KV 论文图表 —— 共享前言
+%
+% 由各 fig*.tex 通过 \input{preamble} 载入，必须位于 \documentclass 之后。
+%
+% 编译：在 figures/ 目录下执行 xelatex fig1_architecture.tex
+%      （含中文，必须用 xelatex；也可在 paper/ 下执行 make figures）
+%
+% 字体：默认使用 Windows 简体中文环境自带字体。
+%      在 Linux/macOS 上请把下面三行替换为该系统已安装的 CJK 字体，例如
+%      \setCJKmainfont{Noto Serif CJK SC}[BoldFont=Noto Sans CJK SC]
+% =============================================================================
+
+\usepackage{xeCJK}
+\setCJKmainfont{SimSun}[BoldFont=SimHei]
+\setCJKsansfont{Microsoft YaHei}
+
+\usepackage{tikz}
+\usepackage{amsmath,amssymb}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shapes.geometric,decorations.pathreplacing}
+
+% --- 统一样式 ---------------------------------------------------------------
+\tikzset{
+  dev/.style    = {draw=black!70, fill=blue!6,  rounded corners=2pt, minimum width=26mm,
+                   minimum height=11mm, align=center, font=\small, line width=0.5pt},
+  devr/.style   = {draw=black!70, fill=orange!10, rounded corners=2pt, minimum width=26mm,
+                   minimum height=11mm, align=center, font=\small, line width=0.5pt},
+  blk/.style    = {draw=black!60, fill=gray!8, rounded corners=1.5pt, minimum width=17mm,
+                   minimum height=8mm, align=center, font=\scriptsize, line width=0.4pt},
+  msg/.style    = {draw=black!60, fill=green!8, rounded corners=1.5pt, minimum width=15mm,
+                   minimum height=7mm, align=center, font=\scriptsize, line width=0.4pt},
+  flow/.style   = {-{Stealth[length=2mm]}, line width=0.7pt, draw=black!75},
+  flowd/.style  = {-{Stealth[length=2mm]}, line width=0.7pt, draw=black!50, dashed},
+  lab/.style    = {font=\scriptsize, inner sep=1.5pt, fill=white, fill opacity=0.85,
+                   text opacity=1},
+}

@@ -1,0 +1,252 @@
+\section{实验方案}
+\label{sec:experiment}
+
+本节给出 DCC-KV 的实验设计、评测协议与结果报告规范。需要首先明确本节的性质：\textbf{本文
+尚未报告端到端任务指标与通信性能。}截止撰写时，仓库所实现并已在 CPU 上验证的部分为
+（i）紧凑 KV 构造全流程，（ii）在线 Softmax 归并算子的顺序无关性，（iii）同步版分布式
+注意力的数值等价性，（iv）变长 All-to-All 消息的打包、解包与接口形状。异步通信流水与多卡
+可扩展性依赖 GPU 环境，尚未执行。因此，本节按"已可复现的验证"与"待执行的实验"两类分别
+陈述，并给出后者的完整协议，以便结果补齐后可直接填入。
+
+\subsection{实验设置}
+\label{sec:exp-setup}
+
+\subsubsection{硬件与软件}
+
+CPU 验证部分在任意多核环境即可复现，无需 GPU。GPU 部分按 \texttt{docs/reproducibility.md}
+第 4 节设定的配置执行：M2（多卡同步）最低 2$\times$A100 80G，M3（异步）最低
+4$\times$A100 80G NVLink，M4（端到端 8B）推荐 8$\times$A100 80G，70B/72B 与跨节点实验
+需要 8$\times$H100 或双节点环境。所有依赖版本通过 \texttt{requirements.lock} 锁定；
+PyTorch 版本、CUDA、NCCL 与 Transformers 版本均记入 \texttt{ExperimentMetadata}
+（见 \S\ref{sec:exp-metadata}）。
+
+\subsubsection{模型}
+
+评测覆盖四个模型以检验方法对模型族的迁移性：
+Llama-3.1-8B-Instruct、Llama-3.1-70B-Instruct、Qwen2.5-72B-Instruct、
+Mistral-7B-Instruct-v0.3。前两者为同族不同规模，用于检验规模迁移；Qwen2.5 与 Mistral 为
+不同训练语料与架构配置，用于检验跨族迁移。
+
+\subsubsection{数据集}
+
+长上下文任务覆盖检索、问答、多跳推理与长文困惑度四类：
+LongBench 与 LongBench-v2（多任务长文理解）、$\infty$Bench（超长文本）、
+RULER（合成检索与多跳，可控长度）、Needle-in-a-Haystack（单针检索，长度可控）、
+PG-19 与 wikitext-103（语言建模困惑度）。其中 RULER 与 NIAH 的长度可精确控制，
+是绘制"误差--上下文长度"曲线的首选。
+
+\subsubsection{基线}
+
+三个基线：Ring Attention（精确序列并行的代表，作为精度上界与性能参照）、
+FastKV（共享压缩，即所有目的端复用同一压缩结果，用于隔离"目的端条件化"的贡献）、
+APB（全网共享 anchor 的压缩方案）。三者与 DCC-KV 的差异在通信语义上是清晰的：
+Ring Attention 不压缩，FastKV 压缩但不条件化，APB 压缩且共享锚点，
+DCC-KV 压缩且逐边条件化。
+
+\subsubsection{超参数与随机性}
+
+关键超参数为代表 Query 数 $M$、投影维度 $d_p$、压缩预算 $B_{s,r}$、
+正则系数 $\lambda_\beta$ 与 $\lambda_v$。所有实验固定随机种子（默认 42，备选 123 / 1024 / 7），
+每个数据点至少重复 10 次，报告 median 与 p5/p95，并给出 bootstrap 95\% 置信区间。
+
+\subsection{评测协议与元数据规范}
+\label{sec:exp-metadata}
+
+为避免"实验条件不可追溯"导致的结论不可复现，每次 run 由 \texttt{ExperimentMetadata}
+记录：\texttt{run\_id}、\texttt{git\_commit}、\texttt{pytorch\_version}、
+\texttt{model\_name}、\texttt{context\_length}、\texttt{gpu\_count}、\texttt{seed}、
+\texttt{budget\_ratio}、\texttt{sync\_async}、\texttt{num\_repr\_queries}、
+\texttt{projection\_dim}、\texttt{lambda\_beta}、\texttt{lambda\_value}、
+\texttt{rope\_extension\_used} 与 \texttt{rope\_extension\_disclosed}。
+
+其中后两项的设计值得说明：若为达到目标上下文长度而使用了 RoPE 外推，必须显式披露。这一约束
+的目的是防止把"位置编码外推带来的效果"误归因为压缩机制的贡献。凡 \texttt{rope\_extension\_used}
+为真而 \texttt{rope\_extension\_disclosed} 为假的 run，其结果不进入主表。
+
+结果聚合由 \texttt{RunResult.from\_values} 完成，统一产出 median、p5/p95 与
+bootstrap 95\% CI。该实现意味着所有报告数字必须来自多次 run 的分布，而非单次运行值。
+
+\subsection{已验证的 CPU 实验}
+\label{sec:exp-cpu}
+
+以下四组实验对应仓库中已存在的测试，均可在纯 CPU 环境复现。
+
+\subsubsection{E0：顺序无关性}
+
+\textbf{目的}：验证式~(26) 的交换律与结合律在有限精度下成立，即异步乱序归并与顺序归并的
+结果差异处于浮点舍入量级。
+
+\textbf{方法}：构造 $K$ 个随机块（长度与 $d_v$ 各异），各自生成在线 Softmax 状态，然后
+（i）按原顺序归并，（ii）随机置换后归并，（iii）按树形分组归并，比较三者输出。
+
+\textbf{已有证据}：\texttt{verify\_order\_invariance} 在 $K=8$、20 次随机试验下返回真；
+\texttt{test\_order\_invariance} 与 \texttt{test\_merge\_two\_states} 通过，两状态归并与
+单次 dense 计算的差异在 \texttt{FP64} 下低于 $10^{-6}$。
+
+\textbf{待补}：需把"置换数量"与"归并树形状"作为自变量，报告最大相对误差随二者的变化曲线，
+以界定异步实现的数值安全边界。
+
+\subsubsection{E1：紧凑 KV 构造的接口与形状不变量}
+
+\textbf{目的}：确认 $C_k^{s\to r}$、$\beta^{s\to r}$、$C_v^{s\to r}$ 的形状与预算约束一致，
+且随机构造可复现。
+
+\textbf{已有证据}：\texttt{build\_compact\_kv} 在 $B=64$、$d_h=d_v=32$ 下返回
+\texttt{keys} $(64,32)$、\texttt{logit\_bias} $(64,)$、\texttt{values} $(64,32)$、
+\texttt{selected\_indices} $(64,)$；Top-$B$ 选择返回的索引互不重复；
+相同种子下代表 Query 选择完全一致。
+
+\subsubsection{E2：压缩保真度}
+
+\textbf{目的}：测量 $\epsilon_{\text{mass}}$ 与 $\epsilon_{\text{out}}$ 在受控压缩比下的
+经验分布。
+
+\textbf{方法}：固定 $L=256$、$d_h=d_v=32$、$\mathrm{FP64}$，扫描
+$B \in \{8, 16, 32, 64, 128\}$，对每个 $B$ 计算紧凑块与完整块在代表 Query 上的
+质量误差与输出误差，并与 Dense 全注意力对比。
+
+\textbf{已有证据}：\texttt{test\_fast\_kv\_vs\_dense\_within\_tolerance} 在 $B=64$ 下
+测得压缩方法与 Dense 的最大绝对偏差 $< 0.1$；基线 APB 在更激进压缩下偏差 $< 0.3$。
+这两个数字给出了压缩误差在随机张量设定下的量级参照。
+
+\textbf{待补}：现有测试只断言"小于阈值"，未报告误差随 $B$ 的变化趋势。需要补充的是
+$\epsilon_{\text{mass}}(B)$ 与 $\epsilon_{\text{out}}(B)$ 的完整曲线，用于验证
+\S\ref{sec:analysis-error} 中性质 2 的预测（无偏置时质量被系统性低估）。
+
+\subsubsection{E3：边级条件化 vs 共享压缩}
+
+\textbf{目的}：为 H1 与 H2 提供数值侧证。
+
+\textbf{方法}：在相同预算下比较 DCC-KV（逐边条件化）与 FastKV（共享压缩）相对 Dense 的
+误差。H1 断言同一源块对不同目的端的紧凑 KV 显著不同，以 KL 散度 $> 0.5$ 为判据。
+
+\textbf{已有证据}：\texttt{test\_dcc\_kv\_lower\_error\_than\_shared} 在 $B=32$ 的强压缩
+设定下同时计算两种方法的误差。需要如实说明：该测试的当前断言是对二者的误差\emph{分别}
+设上界（均 $< 0.5$），\textbf{并未断言 DCC-KV 严格优于 FastKV}。测试注释中亦注明
+"CPU mock 不一定严格"。因此这一项目前只构成接口与量级验证，不构成 H2 的证据。
+
+\textbf{待补}：需要（i）把断言从"各自有界"提升为"配对比较且 DCC-KV 显著更优"，
+（ii）把 $B$ 与目的端 Query 分布差异作为自变量扫描，（iii）把 KL 散度量化为 H1 的直接证据。
+这是与本文核心主张最相关、也最需要补强的一环。
+
+\subsubsection{E4：分布式等价性}
+
+\textbf{目的}：验证同步版 DCC-KV 与完整分布式注意力在数值上一致，且变长消息在真实多进程
+环境下正确传递。
+
+\textbf{已有证据}：Ring Attention 与 Dense 的最大偏差 $< 10^{-5}$（$L=256$，四块，
+$\mathrm{FP64}$）；同步版 DCC-KV 与 Dense 的偏差断言阈值为 $10^{-2}$；
+两进程 gloo 后端下 \texttt{all\_reduce}、\texttt{broadcast} 与变长
+\texttt{all\_to\_all\_v} 的数值结果均逐元素正确。
+
+\textbf{说明}：$10^{-2}$ 与 $10^{-5}$ 的差异反映了压缩引入的近似误差，而非实现错误。
+该阈值本身即是一个可报告的结论：在 $L=256$、$B=64$ 的设定下，同步 DCC-KV 相对精确注意力的
+最大绝对偏差在 $10^{-2}$ 量级。
+
+\subsection{待执行的 GPU 实验}
+\label{sec:exp-gpu}
+
+以下实验依赖 GPU 与多卡环境，尚未执行。协议如下，结果补齐后填入对应表格。
+
+\subsubsection{E5：消融实验}
+
+消融设计覆盖组件与预算两个维度。
+
+\paragraph{A1 通信集大小。}扫描有效边数 $|\mathcal{E}_s|$，观察构造开销与通信开销随设备数
+的分配比例，用于检验式~\eqref{eq:cost-build} 中 $|\mathcal{E}_s|$ 倍构造代价的实际影响。
+
+\paragraph{A2 压缩预算。}在 5 档预算下测量任务指标与通信量，绘制精度--通信量帕累托前沿。
+该曲线是本文最核心的可视化结果：它同时呈现压缩收益与精度代价，并与 FastKV、APB 的同类
+曲线叠加比较。
+
+\paragraph{A3 组件拆分。}四个变体：完整 DCC-KV、（i）移除质量偏置 $\beta$、
+（ii）移除 Value 回归（直接取所选 Key 对应的原始 Value）、（iii）二者同时移除
+（退化为纯 Key 选择）。按 H3，移除 $\beta$ 应导致 $\ge 0.5$ 点退化，移除 Value 回归应导致
+$\ge 1.0$ 点退化。
+
+\paragraph{A5 异步 vs 同步。}固定其他条件，比较异步流水与同步实现的 p50 延迟。按 H4，
+异步应带来 $\ge 1.05\times$ 的 p50 加速。此外应同时报告
+$T_{\text{comm}} / T_{\text{comp}}$ 的实测值，以便按式~\eqref{eq:speedup-bound} 判断
+实测加速比与理论差距的归因。
+
+\subsubsection{E6：主表与可扩展性}
+
+主表为 $3$ 模型 $\times$ $5$ 上下文长度 $\times$ $2$ GPU 数 $\times$ $2$ 同步模式
+$\times$ $3$ 基线，共 $144$ 个数据点，每点 $\ge 10$ 次 run。报告指标包括任务精度、
+prefill 延迟（p50 与 p95）、端到端吞吐与跨设备通信量。
+
+可扩展性按 H5 检验：设备数翻倍时加速应 $\ge 1.5\times$。若未达标，需按
+\S\ref{sec:exp-negative} 的规范转为负结果讨论。
+
+\subsubsection{E7：负结果与适用边界}
+\label{sec:exp-negative}
+
+按仓库发布清单的要求，以下四种条件必须显式报告结果，无论其是否符合预期：
+
+\emph{短上下文（$L < 4$K）。}此时 $B/L$ 不再小，压缩的固定开销（代表 Query 交换与逐边
+构造）占比上升，预期 DCC-KV 无收益甚至劣于精确注意力。这一边界需明确给出，而非回避。
+
+\emph{低预算（$B < 1\%$）。}此时 $\epsilon_{\text{mass}}$ 与 $\epsilon_{\text{out}}$ 均
+显著增大，用于确定方法的可用压缩下界。
+
+\emph{强检索任务。}检索任务对精确的 token 级定位敏感，压缩可能系统性地丢失关键条目。
+这是对"误差不随块数发散"这一性质的压力测试。
+
+\emph{batch = 1。}此时计算侧难以饱和，$T_{\text{comp}}$ 偏小，
+式~\eqref{eq:speedup-bound} 预测异步收益受限。该场景直接检验流水的收益边界。
+
+\subsubsection{E8：数值稳定性}
+
+把 \S\ref{sec:exp-cpu} 的 E0 扩展到 $\mathrm{FP16}$/$\mathrm{BF16}$、$K \ge 32$ 个块与
+更深的归并树结构，测量顺序无关性在低精度下的失效边界。该实验的结果决定异步实现能否在
+真实推理精度下安全使用，是工程可行性的关键一环。
+
+\subsection{结果报告规范}
+
+本节确立三条报告规范，用于约束后续结果的呈现方式。
+
+\textbf{第一，区分主张来源。}凡涉及紧凑 KV 构造机制（Key 选择、质量偏置、Value 回归）的
+实验结果，应在叙述中明确标注该机制源自 Attention Matching，DCC-KV 的贡献在于把它条件化到
+有向边上。涉及异步通信与顺序无关归并的结果才是本文原创主张的证据。
+
+\textbf{第二，区分已执行与待执行。}如表~\ref{tab:exp-status}，每项实验的状态必须显式标注。
+凡属"待执行"的项目，正文中不得出现未标注的具体数值。
+
+\textbf{第三，负结果与正结果同等报告。}按发布清单，若 H2 / H3 / H4 / H5 中任一未达标，
+主张即按预设阈值收敛，并在本节如实报告。这一机制的作用是防止在结果不利时事后调整主张范围。
+
+\begin{table}[t]
+\centering
+\small
+\caption{实验状态总览。"CPU" 表示可在纯 CPU 环境复现，"GPU" 表示依赖多卡环境。}
+\label{tab:exp-status}
+\begin{tabular}{llll}
+\toprule
+编号 & 内容 & 环境 & 状态 \\
+\midrule
+E0 & 顺序无关性（$\mathrm{FP64}$） & CPU & 已有证据 \\
+E1 & 构造接口与形状不变量 & CPU & 已有证据 \\
+E2 & 压缩保真度（单点） & CPU & 部分证据 \\
+E3 & 边级条件化 vs 共享压缩 & CPU & 仅量级验证 \\
+E4 & 分布式等价性 & CPU（gloo） & 已有证据 \\
+E5 & 消融 A1/A2/A3/A5 & GPU & 待执行 \\
+E6 & 主表与可扩展性 & GPU & 待执行 \\
+E7 & 负结果与适用边界 & GPU & 待执行 \\
+E8 & 低精度数值稳定性 & GPU & 待执行 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{本节小结}
+
+本节的实验设计有两个特点值得指出。第一，它把"可验证"与"待验证"严格分离：E0--E4 给出的是
+接口正确性、数值等价性与顺序无关性的证据，这些证据不依赖 GPU，因而是当前状态下唯一可对外
+声明的结论；E5--E8 给出的是完整协议，其结果决定了本文关于精度与性能的主张能否成立。
+第二，它把与本文核心主张最相关的检验（E3）明确标为"仅量级验证"——当前测试并未断言
+DCC-KV 优于共享压缩。这一诚实标注是必要的：若把"两者误差都有界"读作"边级条件化更优"，
+就是把尚未测得的结论当作已有证据。
+
+因此，本节当前能支撑的结论限于：紧凑 KV 构造流程在实现层面自洽且可复现；在线 Softmax
+归并算子在 $\mathrm{FP64}$ 下满足顺序无关性；变长 All-to-All 消息在多进程环境下正确传递；
+同步版分布式注意力与 Dense 的偏差处于压缩误差量级。关于任务质量、通信收益、多卡可扩展性
+以及与基线的优劣对比，均待 GPU 实验完成后报告。

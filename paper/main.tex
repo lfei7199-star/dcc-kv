@@ -1,0 +1,443 @@
+% =============================================================================
+% DCC-KV: Destination-Conditioned Compact KV Communication
+% 主稿骨架 — 组装版
+%
+% 说明：
+%   第 1--4 章（摘要、引言、相关工作、问题定义、方法、Algorithm 1）已由用户在
+%   桌面 AuthorKit27 (1).pdf 中完成。本文件按 ACM AuthorKit 模板重建其 LaTeX 骨架，
+%   使全文可编译；第 5--8 章为本轮续写内容，位于 sections/ 目录。
+%
+%   若用户已有原始 .tex 源文件，应以原始文件替换第 1--4 章正文，仅保留本文新增
+%   的第 5--8 章与 figures/、refs.bib。
+%
+% 编译：xelatex main.tex && bibtex main && xelatex main.tex && xelatex main.tex
+%      （含中文，必须用 xelatex/lualatex + ctex）
+% =============================================================================
+
+\documentclass[sigconf,nonacm]{acmart}
+
+% --- 中文支持 ---------------------------------------------------------------
+% 注意：acmart 与 ctex 存在 \baselinestretch 冲突，故直接用 xeCJK。
+% 字体为本机已有字体（Windows 简体中文环境）。若在其他平台编译，
+% 请把下面的字体名替换为该系统已安装的 CJK 字体。
+\usepackage{xeCJK}
+\setCJKmainfont{SimSun}[BoldFont=SimHei]
+\setCJKsansfont{Microsoft YaHei}
+\setCJKmonofont{FangSong}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+
+\graphicspath{{figures/}}
+
+% --- 自定义命令：与 PDF 前半部分保持一致 -------------------------------------
+\newcommand{\Attn}{\mathrm{Attn}}
+\newcommand{\TopK}{\mathrm{TopK}}
+\newcommand{\softmax}{\mathrm{softmax}}
+\newcommand{\Er}{\mathcal{E}_r}
+\newcommand{\Br}{\mathcal{B}_r}
+\newcommand{\Es}{\mathcal{E}_s}
+\newcommand{\Ds}{\mathcal{D}}
+\newcommand{\Cm}{\mathcal{C}}
+\newcommand{\eps}{\varepsilon}
+
+% =============================================================================
+\begin{document}
+
+\title{DCC-KV：面向超长文本协同推理的目的端条件化紧凑 KV 通信}
+
+% TODO: 替换为真实作者信息（仓库 README 中仍为占位符 YOUR_USERNAME / author@example.com）
+\author{作者姓名}
+\affiliation{%
+  \institution{作者单位}
+  \country{China}}
+\email{author@example.com}
+
+\begin{abstract}
+超长文本推理通常通过序列并行将上下文切分至多个设备，但精确全局注意力要求在设备间循环或聚合
+完整的 Key--Value（KV）块，使通信量和远程注意力计算随上下文长度线性增长。已有 KV 缓存压缩
+方法主要在单设备内依据局部或历史注意力保留重要条目，难以直接回答一个分布式场景中的关键问题：
+同一源端上下文应当向具有不同 Query 分布的目的设备发送什么信息？本文提出 DCC-KV
+（Destination-Conditioned Compact KV Communication），一种面向长上下文协同推理的训练无关
+框架。每个目的设备首先从本地 Query 中选取少量代表样本，并通过 Ring 通信传播其注意力需求；
+随后，每个源设备针对不同目的设备分别构造方向非对称的紧凑 KV。受 MIT 团队 Attention Matching
+\cite{zweiger2026attentionmatching} 的启发，我们采用 Key 选择、注意力质量校准与 Value 回归
+构造紧凑表示。本文的核心创新在于面向变长紧凑 KV 设计异步 All-to-Allv 执行机制：远程块到达后
+立即参与注意力计算，并通过满足交换律与结合律的 Online Softmax 状态增量归并，从而使通信与
+计算重叠，且计算结果不依赖消息到达顺序。相较于传输完整 KV，DCC-KV 将每条通信边的数据量从
+$O(L_s(d_h+d_v))$ 降至 $O(B_{s,r}(d_h+d_v))$，其中 $B_{s,r} \ll L_s$。本文给出完整算法、
+误差分析及面向长文本检索、问答与多跳推理的实验方案，为带宽受限的多 GPU 或异构设备协同推理
+提供一种查询感知的近似注意力路径。
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+   <concept><concept_id>10003752.10003809</concept_id>
+     <concept_desc>Theory of computation~Distributed algorithms</concept_desc>
+     <concept_significance>500</concept_significance></concept>
+   <concept><concept_id>10010147.10010178</concept_id>
+     <concept_desc>Computing methodologies~Natural language processing</concept_desc>
+     <concept_significance>500</concept_significance></concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Theory of computation~Distributed algorithms}
+\ccsdesc[500]{Computing methodologies~Natural language processing}
+
+\keywords{超长文本推理；协同推理；序列并行；KV 缓存压缩；分布式注意力}
+
+\maketitle
+
+% =============================================================================
+\section{引言}
+\label{sec:intro}
+
+长文档问答、代码仓库分析和多轮智能体推理要求语言模型处理数十万乃至更长的上下文。尽管
+FlashAttention \cite{dao2022flashattention} 等工作降低了单设备注意力的显存访存开销，完整
+上下文仍可能超过单卡容量。序列并行由此成为扩展上下文长度的重要路径：输入沿序列维度被划分到
+多个设备，每个设备保留局部 Query、Key 和 Value，并通过跨设备通信恢复全局注意力。
+
+Ring Attention \cite{liu2023ring} 通过循环传递 KV 块计算精确注意力，并将通信与块级计算
+重叠；DistFlashAttn \cite{li2024distflash}、Striped Attention \cite{brandon2023striped}
+和 USP \cite{fang2024usp} 进一步改进了负载均衡或并行拓扑。这些方法避免了近似误差，但每个
+设备最终仍需处理所有相关远程 KV。设源设备 $s$ 持有长度为 $L_s$ 的序列块，则其向一个目的
+设备发送完整 KV 的数据量为 $O(L_s(d_h + d_v))$。当上下文增长或互联带宽有限时，KV 传输和
+远程注意力逐渐成为推理瓶颈。
+
+另一条研究路线通过 KV 选择、驱逐或合并减少缓存规模。H2O \cite{zhang2023h2o}、
+Scissorhands \cite{liu2023scissorhands}、SnapKV \cite{li2024snapkv} 与
+PyramidKV \cite{cai2024pyramidkv} 均利用注意力稀疏性保留关键状态；Quest \cite{tang2024quest}
+则强调关键 KV 与当前 Query 有关。更近期的 Attention Matching
+\cite{zweiger2026attentionmatching} 不仅选择 Key，还显式匹配压缩前后的注意力质量与输出，
+从而将上下文压缩为可参与后续注意力的潜在表示。然而，现有压缩方法主要面向单设备缓存管理，
+通常为所有后续 Query 构造一个共享压缩结果。分布式协同推理中的目的设备持有不同序列块，其
+Query 分布也不相同；同一个源端 KV 块对不同目的端的重要部分因而未必一致。
+
+本文研究如下问题：在不交换完整 KV 的前提下，如何让每个设备获得与其本地 Query 相适配的远程
+上下文，并保持不同上下文块在全局 Softmax 中的正确竞争关系？我们的核心观察是，协同推理中的
+通信不应只压缩源端拥有什么，还应显式编码目的端需要什么。据此，我们提出 DCC-KV。目的设备先
+发送少量代表 Query 作为需求摘要；源设备据此为每条有向通信边构造专属紧凑 KV，并分别保持该源
+块的注意力质量和语义输出。最终，各块通过可结合的 Online Softmax 状态进行全局归一化。
+
+本文的工作内容与原创边界如下：
+\begin{itemize}
+\item 在协同推理场景中采用目的端条件化的 KV 通信抽象：对每条有向边 $s \to r$，源设备依据
+      目的设备的代表 Query 构造专属紧凑缓存，使 $C^{s \to r_1}$ 与 $C^{s \to r_2}$ 可以不同。
+\item 紧凑 KV 构造受 MIT 团队 Attention Matching \cite{zweiger2026attentionmatching} 启发，
+      沿用其 Key 选择、质量偏置和 Value 回归思想；\textbf{该压缩机制不作为本文的原创贡献}。
+\item 本文原创设计变长紧凑 KV 的异步 All-to-Allv 通信实现，使已到达远程块的注意力计算与
+      其余消息传输并行，并利用 Online Softmax 合并算子的交换律与结合律消除对消息接收顺序的
+      依赖。
+\item 给出全局注意力的块分解、误差界与通信/计算复杂度分析，并设计覆盖长文本检索、多跳推理
+      和端到端性能的实验协议。
+\end{itemize}
+
+% =============================================================================
+\section{相关工作}
+\label{sec:related}
+
+\subsection{长上下文分布式注意力}
+
+Ring Attention \cite{liu2023ring} 将序列块分布在环形设备拓扑上，在传递 KV 的同时执行块级
+注意力，使可处理长度随设备数扩展。DistFlashAttn \cite{li2024distflash} 针对训练中的通信、
+因果负载不均和重计算进行联合优化；Striped Attention \cite{brandon2023striped} 通过条带化
+token 分配改善因果注意力的设备利用率；USP \cite{fang2024usp} 统一 Ring 与 Ulysses 风格的
+序列并行。上述方法的主要目标是高效实现精确注意力。
+
+推理阶段允许以可控近似换取更低开销。Star Attention \cite{acharya2024star} 通过共享锚块和
+块局部注意力降低上下文编码成本；APB \cite{huang2025apb} 在序列并行框架中压缩并传递关键上
+下文块。与这些方法相比，DCC-KV 不为所有目的端复用同一远程摘要，而是由每个目的端的 Query
+分布决定每条通信边上的紧凑表示；同时显式校准块级注意力质量，使压缩块可与本地完整 KV 在统一
+Softmax 下组合。
+
+\subsection{KV 缓存压缩与查询感知稀疏性}
+
+H2O \cite{zhang2023h2o} 根据累计注意力保留 heavy hitters，Scissorhands
+\cite{liu2023scissorhands} 利用重要性持续性控制缓存预算，SnapKV \cite{li2024snapkv} 从提示
+末端观察窗口推断后续生成所关注的 KV 位置，PyramidKV \cite{cai2024pyramidkv} 根据层间信息
+漏斗分配非均匀缓存预算。这些工作说明，少量 KV 条目往往主导注意力输出，但直接丢弃低分条目会
+同时改变块内语义和块间归一化质量。StreamingLLM \cite{xiao2024streamingllm} 则揭示了
+attention sink 现象并给出流式场景下的保留策略。
+
+Quest \cite{tang2024quest} 指出 KV 关键性依赖当前 Query，并以页级 Key 统计量估计待加载
+页面。DCC-KV 与其共享查询感知动机，但关注跨设备通信：目的端通过代表 Query 向源端暴露需求，
+源端再离线于该次注意力计算构造可传输的紧凑表示。
+
+MIT 团队提出的 Attention Matching \cite{zweiger2026attentionmatching} 将 KV 压缩表述为同时
+匹配注意力输出和注意力质量的问题，并用 Key 选择、非负拟合及 Value 回归构造紧凑缓存。受其
+启发，本文采用相同的基本思想构造目的端条件化紧凑 KV，而\textbf{不将压缩方法本身视为原创
+贡献}。本文的主要区别在于通信执行层：针对有向设备边上的变长消息设计异步 All-to-Allv 调度，
+并以顺序无关的 Online Softmax 状态归并实现通信--计算重叠。
+
+\subsection{协同推理}
+
+Petals \cite{borzunov2023petals} 展示了利用分散设备协同执行大模型推理与微调的可行性，其
+重点是跨参与方分配模型层、路由请求并容忍节点动态性。本文研究互补的序列维度协作：设备运行
+相同层的不同上下文块，协作对象不是模型层间激活，而是同层注意力所需的远程 KV。该设定尤其
+适合单节点多 GPU、机架内多节点或带宽受限的边缘集群。
+
+% =============================================================================
+\section{问题定义}
+\label{sec:problem}
+
+\subsection{分布式上下文}
+
+给定长度为 $L$ 的序列 $X$，将其划分至 $N$ 个设备：
+\begin{equation}
+X = [X_0; X_1; \ldots; X_{N-1}], \qquad L = \sum_{i=0}^{N-1} L_i .
+\end{equation}
+对某一 Transformer 层和 KV Head，设备 $i$ 本地持有
+\begin{equation}
+Q_i \in \mathbb{R}^{L_i \times d_h},\quad
+K_i \in \mathbb{R}^{L_i \times d_h},\quad
+V_i \in \mathbb{R}^{L_i \times d_v}.
+\end{equation}
+以下推导针对单个 KV Head；多层、多头情况可独立执行并分配不同预算。
+
+令 $\Ds = \{0,\ldots,N-1\}$。目的设备 $r$ 需要关注的远程源集合记为 $\Er$。双向注意力下可取
+$\Er = \Ds \setminus \{r\}$；连续分块的因果注意力下，若块索引与序列顺序一致，则
+$\Er = \{s \mid s < r\}$。所有有效有向边组成
+\begin{equation}
+\mathcal{E} = \{(s,r) \mid s \in \Er\}.
+\end{equation}
+
+\subsection{块级注意力分解}
+
+对目的设备 $r$ 上的单个 Query $q$，源块 $s$ 的非归一化注意力质量与局部输出分别为
+\begin{align}
+M_s(q) &= \sum_{j=1}^{L_s} \exp\!\left(\frac{q K_{s,j}^\top}{\sqrt{d_h}}\right), \\
+O_s(q) &= \frac{\sum_{j=1}^{L_s} \exp\!\left(q K_{s,j}^\top / \sqrt{d_h}\right) V_{s,j}}{M_s(q)} .
+\end{align}
+于是完整全局注意力可写为
+\begin{equation}
+\Attn(q) = \frac{\sum_{s \in \Br} M_s(q) \, O_s(q)}{\sum_{s \in \Br} M_s(q)} ,
+\end{equation}
+其中 $\Br = \{r\} \cup \Er$。该分解揭示了压缩远程块必须保留的两个量：块在全局分母中的质量
+$M_s$，以及给定进入该块后返回的语义输出 $O_s$。只匹配归一化后的局部输出而忽略质量，会破坏
+不同源块之间的相对权重。
+
+% =============================================================================
+\section{方法}
+\label{sec:method}
+
+\subsection{总体框架}
+
+对每条有效边 $(s,r)$，DCC-KV 构造
+\begin{equation}
+C^{s \to r} = \left(C_k^{s \to r},\; \beta^{s \to r},\; C_v^{s \to r}\right),
+\end{equation}
+其中
+\begin{equation}
+C_k^{s \to r} \in \mathbb{R}^{B_{s,r} \times d_h},\quad
+\beta^{s \to r} \in \mathbb{R}^{B_{s,r}},\quad
+C_v^{s \to r} \in \mathbb{R}^{B_{s,r} \times d_v},
+\end{equation}
+且 $B_{s,r} \ll L_s$。$\beta$ 是加入紧凑 Key Logit 的质量补偿偏置。由于构造过程以目的端
+Query 为条件，通常有 $C^{s \to r_1} \neq C^{s \to r_2}$。
+
+框架包含三个逻辑步骤：目的设备提取并交换代表 Query；源设备针对每条边构造紧凑 KV；设备通过
+异步 All-to-Allv 交换变长消息，并在消息到达时增量计算和归并注意力状态。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig1_architecture.pdf}
+\caption{DCC-KV 的总体架构。目的设备仅发送少量代表 Query $\widehat{Q}_r$（虚线，经 Ring
+交换）；每个源设备针对每条有向边 $(s,r)$ 独立构造紧凑 KV $C^{s\to r}$（实线）。由于构造以
+目的端 Query 为条件，同一源块对不同目的端产生不同表示
+（$C^{s\to r_1} \neq C^{s\to r_2}$）。}
+\label{fig:arch}
+\end{figure}
+
+\subsection{代表 Query 选择}
+
+直接交换 $Q_r \in \mathbb{R}^{L_r \times d_h}$ 会产生随本地序列长度 $L_r$ 线性增长的通信量。
+设备 $r$ 因而仅发送 $M \ll L_r$ 个真实 Query。为降低样本选择开销，所有设备由共享随机种子
+生成 Rademacher 矩阵 $P \in \mathbb{R}^{d_p \times d_h}$（$d_p \ll d_h$），并在归一化投影
+空间中计算距离：
+\begin{equation}
+P_{a,b} \sim \frac{1}{\sqrt{d_p}}\{\pm 1\},\quad
+z_{r,u} = \frac{P q_{r,u}}{\|P q_{r,u}\|_2 + \eps},\quad
+D(z_{r,u}, z_{r,v}) = 1 - z_{r,u}^\top z_{r,v}.
+\end{equation}
+共享生成使 $P$ 无需传输；投影表示仅用于近似 Query 间的方向差异。
+
+我们采用最远点采样覆盖 Query 分布。以最新 Query 为初始锚点
+$\mathcal{S}_r^{(1)} = \{L_r\}$，第 $m$ 轮执行
+\begin{equation}
+\Delta_{r,u}^{(m)} = \min_{v \in \mathcal{S}_r^{(m)}} D(z_{r,u}, z_{r,v}),\quad
+u_{m+1} = \arg\max_{u \notin \mathcal{S}_r^{(m)}} \Delta_{r,u}^{(m)},\quad
+\mathcal{S}_r^{(m+1)} = \mathcal{S}_r^{(m)} \cup \{u_{m+1}\},
+\end{equation}
+直至 $|\mathcal{S}_r^{Q}| = M$。最终取回原始高维表示
+$\widehat{Q}_r = Q_r[\mathcal{S}_r^{Q}, :] \in \mathbb{R}^{M \times d_h}$，而非传输投影
+向量。选择复杂度为 $O(L_r d_h d_p + M L_r d_p)$。
+
+所有 $\widehat{Q}_r$ 形状相同，适合使用 $N-1$ 轮 Ring All-Gather。第 $p$ 轮设备 $i$ 向
+$[i+1]_N$ 转发当前 Query 摘要，并从 $[i-1]_N$ 接收另一摘要。通信后，源设备 $s$ 获得所有满足
+$(s,r) \in \mathcal{E}$ 的 $\widehat{Q}_r$。
+
+\subsection{目的端条件化紧凑 KV}
+
+本节的紧凑 KV 构造受 MIT 团队 Attention Matching \cite{zweiger2026attentionmatching} 启发。
+我们将其质量匹配与输出匹配思想用于每条有向设备边 $(s,r)$，以目的端代表 Query 为条件生成通信
+消息；\textbf{Key 选择、质量偏置拟合与紧凑 Value 回归并非本文独立提出的压缩算法}。
+
+\subsubsection{紧凑 Key 选择}
+
+源设备 $s$ 以目的端代表 Query 计算块内注意力，并用跨 Query 的 RMS 响应对 Key 排序：
+\begin{align}
+A^{s \to r} &= \softmax\!\left(\frac{\widehat{Q}_r K_s^\top}{\sqrt{d_h}}\right) \in \mathbb{R}^{M \times L_s},\\
+u_j^{s \to r} &= \sqrt{\frac{1}{M}\sum_{a=1}^{M}\left(A_{a,j}^{s \to r}\right)^2},\\
+\mathcal{S}_K^{s \to r} &= \TopK\!\left(\{u_j^{s \to r}\}_{j=1}^{L_s},\; B_{s,r}\right),
+\end{align}
+\begin{equation}
+C_k^{s \to r} = K_s\!\left[\mathcal{S}_K^{s \to r}, :\right].
+\end{equation}
+RMS 聚合保留了仅对少量代表 Query 具有高响应的 Key。
+
+\subsubsection{注意力质量偏置拟合}
+
+仅保留 Key 子集会减小远程块对全局 Softmax 分母的贡献。对代表 Query $\widehat{q}_{r,a}$，定义
+完整块的 Logit 与非归一化质量，以及紧凑 Key 的响应矩阵：
+\begin{equation}
+\ell_{a,k}^{s \to r} = \frac{\widehat{q}_{r,a} K_{s,k}^\top}{\sqrt{d_h}},\qquad
+m_a^{s \to r} = \sum_{k=1}^{L_s} \exp\!\left(\ell_{a,k}^{s \to r}\right),\qquad
+G_{a,j}^{s \to r} = \exp\!\left(\frac{\widehat{q}_{r,a} (C_k^{s \to r})_{j}^\top}{\sqrt{d_h}}\right),
+\end{equation}
+其中 $m^{s \to r} \in \mathbb{R}^{M}$，$G^{s \to r} \in \mathbb{R}^{M \times B_{s,r}}$。令
+$w_j = \exp(\beta_j) \ge 0$，则带偏置紧凑块的质量为 $\widehat{m} = Gw$。我们通过非负岭回归
+拟合
+\begin{equation}
+w^* = \arg\min_{w \ge 0} \left\|G^{s \to r} w - m^{s \to r}\right\|_2^2
+      + \lambda_\beta \left\|w - \mathbf{1}\right\|_2^2,\qquad
+\beta_j^{s \to r} = \log\!\left(\max\{w_j^*, \eps\}\right).
+\end{equation}
+$w_j$ 表示紧凑 Key 所承载的等效注意力质量，可聚合若干被删除 Key 的指数响应；正则项在拟合
+信息不足时将其收缩至无偏置状态 $w = \mathbf{1}$。非负约束保证 $w$ 可映射为 Logit 偏置。
+实现中应以逐行最大值平移计算指数项，并在拟合目标中保留相应的行缩放，以避免数值溢出。
+
+\subsubsection{紧凑 Value 拟合}
+
+质量匹配只恢复远程块的 Softmax 权重，不能补偿删除 Value 引起的内容误差。我们在代表 Query
+上分别计算完整块输出和带偏置紧凑块的归一化权重：
+\begin{equation}
+Y^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r K_s^\top}{\sqrt{d_h}}\right) V_s \in \mathbb{R}^{M \times d_v},
+\end{equation}
+\begin{equation}
+X^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r (C_k^{s \to r})^\top}{\sqrt{d_h}} + \mathbf{1}_M (\beta^{s \to r})^\top\right) \in \mathbb{R}^{M \times B_{s,r}}.
+\end{equation}
+紧凑 Value 由多输出岭回归求得：
+\begin{equation}
+(C_v^{s \to r})^* = \arg\min_{C_v} \left\|X^{s \to r} C_v - Y^{s \to r}\right\|_F^2
+                   + \lambda_v \|C_v\|_F^2
+                   = \left(X^\top X + \lambda_v I\right)^{-1} X^\top Y .
+\end{equation}
+因此 $C_v^{s \to r}$ 一般不等于所选 Key 对应的原始 Value；每个紧凑 Value 可共同吸收多个被
+删除 Value 在代表 Query 上的输出贡献。质量拟合与 Value 拟合分别逼近块级分母和条件输出。对
+任一代表 Query，原始块的未归一化输出可分解为
+\begin{equation}
+\underbrace{\sum_{k=1}^{L_s} e^{\ell_{a,k}^{s \to r}} V_{s,k}}_{\text{全局 Softmax 分子贡献}}
+= \underbrace{m_a^{s \to r}}_{\text{块级质量}}
+  \underbrace{\left(\sum_{k=1}^{L_s} \frac{e^{\ell_{a,k}^{s \to r}}}{m_a^{s \to r}} V_{s,k}\right)}_{\text{条件输出}},
+\end{equation}
+这说明同时拟合 $m$ 与 $Y$ 可分别恢复远程块对全局注意力分母和分子的贡献。
+
+\subsection{异步 All-to-Allv 通信与顺序无关的 Online Softmax}
+
+不同有向边采用不同预算 $B_{s,r}$，因此 $C^{s \to r}$ 的长度随源--目的设备对变化。本文采用
+循环错位的 All-to-Allv 调度：在第 $p \in \{1,\ldots,N-1\}$ 轮，设备 $s$ 向 $r = [s+p]_N$
+发送 $C^{s \to r}$，并从 $[s-p]_N$ 接收消息；若对应边无效，则将发送长度置为零。实现时先
+交换每条边的长度与缓冲区偏移，再为各轮提交非阻塞收发。与等待全部通信完成后统一计算不同，
+我们使用独立的通信流与计算流，并以逐块完成事件建立依赖：任一远程块到达后，计算流立即启动该
+块的注意力计算，通信流则继续接收其余消息，由此形成
+\begin{equation}
+\text{接收 } C^{s_1 \to r} \;\parallel\; \text{计算 } C^{s_0 \to r} \;\parallel\; \text{发送 } C^{r \to t}
+\end{equation}
+的流水。\textbf{该实现是本文区别于既有紧凑 KV 方法的核心系统设计。}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig2_async_pipeline.pdf}
+\caption{异步 All-to-Allv 流水。上：通信流与计算流相互独立，远程块到达后立即启动该块的
+注意力计算，无需等待全部消息。下：与"等全部消息到达再统一计算"的同步实现对比；理想流水下
+总耗时由两阶段中较慢者支配，而非二者之和。}
+\label{fig:async}
+\end{figure}
+
+消息的异步到达要求注意力归并与接收顺序无关。对任一块 $b$，令其 Logit 与 Value 为
+$\{g_{b,j}, v_{b,j}\}_{j=1}^{T_b}$，其中本地块和远程块分别使用
+\begin{equation}
+g_{r,j} = \frac{q K_{r,j}^\top}{\sqrt{d_h}},\qquad
+g_{s \to r,j} = \frac{q (C_k^{s \to r})_{j}^\top}{\sqrt{d_h}} + \beta_j^{s \to r}.
+\end{equation}
+每个块独立生成 Online Softmax 状态
+\begin{equation}
+S_b = (m_b, l_b, o_b),\quad
+m_b = \max_j g_{b,j},\quad
+l_b = \sum_j e^{g_{b,j} - m_b},\quad
+o_b = \sum_j e^{g_{b,j} - m_b} v_{b,j}.
+\end{equation}
+对两个状态 $S_a$ 与 $S_b$，定义归并算子 $\oplus$：
+\begin{align}
+m_{ab} &= \max(m_a, m_b),\\
+l_{ab} &= e^{m_a - m_{ab}} l_a + e^{m_b - m_{ab}} l_b,\\
+o_{ab} &= e^{m_a - m_{ab}} o_a + e^{m_b - m_{ab}} o_b,\\
+S_a \oplus S_b &= (m_{ab}, l_{ab}, o_{ab}).
+\end{align}
+该算子等价于对两个块的非归一化 Softmax 分子和分母求和，因而满足
+\begin{equation}
+S_a \oplus S_b = S_b \oplus S_a,\qquad
+(S_a \oplus S_b) \oplus S_c = S_a \oplus (S_b \oplus S_c).
+\end{equation}
+因此，目的设备可按远程消息的实际到达顺序增量更新
+\begin{equation}
+S_r^{\text{global}} = S_r \oplus \bigoplus_{s \in \Er} S^{s \to r},\qquad
+\widehat{\Attn}_r(q) = \frac{o_r^{\text{global}}}{l_r^{\text{global}}} .
+\end{equation}
+交换律保证结果与块的接收顺序无关，结合律允许任意分组或树形归并；只要所有有效块恰好处理一次，
+异步执行与等待全部消息后统一计算在数学上等价。与此同时，本地完整 KV 与远程紧凑 KV 始终共享
+同一全局 Softmax 分母。
+
+\begin{algorithm}[t]
+\caption{DCC-KV 的单层单 KV Head 流程}
+\label{alg:dcckv}
+\begin{algorithmic}[1]
+\Require 本地 $\{Q_i, K_i, V_i\}_{i=0}^{N-1}$，代表数 $M$，预算 $\{B_{s,r}\}$
+\Ensure 每个设备 $r$ 的协同注意力输出 $O_r$
+\ForAll{设备 $r$（并行）}
+  \State 投影 $Q_r$，以最远点采样得到 $\widehat{Q}_r$
+\EndFor
+\State 通过 Ring 交换所有有效目的端的 $\widehat{Q}_r$
+\ForAll{有效边 $(s,r) \in \mathcal{E}$（并行）}
+  \State 用 eq.~(14) 选取 $C_k^{s \to r}$
+  \State 用 eq.~(16) 拟合 $\beta^{s \to r}$
+  \State 用 eq.~(19) 重构 $C_v^{s \to r}$
+  \State 打包 $C^{s \to r} = (C_k^{s \to r}, \beta^{s \to r}, C_v^{s \to r})$
+\EndFor
+\ForAll{目的设备 $r$（并行）}
+  \State 计算本地状态 $S_r$，并提交变长消息的非阻塞 All-to-Allv 收发
+  \ForAll{已到达的 $C^{s \to r}$（按任意顺序）}
+    \State 计算 $S^{s \to r}$，并用 eq.~(25) 立即归并
+  \EndFor
+  \State 所有接收完成后，用 eq.~(27) 输出 $O_r$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+% =============================================================================
+% 以下为本文续写的章节（第 5--8 章）
+% =============================================================================
+\input{sections/05-analysis}
+\input{sections/06-experiment}
+\input{sections/07-discussion}
+
+% =============================================================================
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{refs}
+\label{sec:refs}
+
+\end{document}

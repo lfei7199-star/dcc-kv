@@ -1,0 +1,47 @@
+% =============================================================================
+% 图 3：端到端误差的来源与误差界
+% 编译：xelatex fig3_error_decomposition.tex
+% =============================================================================
+\documentclass[tikz,border=4pt]{standalone}
+\input{preamble}
+
+\begin{document}
+\begin{tikzpicture}[node distance=0mm, every node/.style={outer sep=1pt}]
+
+  \node[font=\small, anchor=west] at (0, 30) {\textbf{端到端误差的三个来源}};
+
+  % 第一行：Query -> 代表 Query 摘要
+  \node[blk, minimum width=22mm, minimum height=9mm, anchor=west] (q) at (0, 18)
+       {Query $q$};
+  \node[blk, fill=yellow!14, minimum width=36mm, minimum height=9mm, anchor=west]
+       (r1) at (30, 18) {代表 Query 摘要 $\epsilon_{\text{repr}}$};
+  \draw[flow] (q.east) -- (r1.west);
+
+  % 第二行：两个匹配环节（并列，带汇聚）
+  \node[blk, fill=red!8, minimum width=36mm, minimum height=9mm, anchor=west]
+       (r2) at (0, 3) {质量匹配 $\epsilon_{\text{mass}}$};
+  \node[blk, fill=red!8, minimum width=36mm, minimum height=9mm, anchor=west]
+       (r3) at (44, 3) {输出匹配 $\epsilon_{\text{out}}$};
+
+  % 从 r1 分叉到 r2 / r3
+  \draw[flow] ([xshift=6mm]r1.south) -- ++(0,-4mm) -| (r2.north);
+  \draw[flow] ([xshift=14mm]r1.south) -- ++(0,-4mm) -| (r3.north);
+
+  % 第三行：输出偏差（两路汇聚）
+  \node[blk, fill=blue!9, minimum width=68mm, minimum height=9mm, anchor=west]
+       (out) at (6, -12) {$\widehat{\mathrm{Attn}}(q)$ 相对精确注意力的偏差};
+  \draw[flow] (r2.south) -- ++(0,-3mm) -| ([xshift=-14mm]out.north);
+  \draw[flow] (r3.south) -- ++(0,-3mm) -| ([xshift=14mm]out.north);
+
+  % 误差界（置于右侧，宽度受限以免拉伸包围盒）
+  \node[draw=black!45, rounded corners=2pt, fill=gray!7, inner sep=6pt,
+        font=\scriptsize, align=left, anchor=north west, text width=62mm] at (86, 22)
+  {$\left\|\widehat{\mathrm{Attn}} - \mathrm{Attn}\right\|_2
+     \le \dfrac{\epsilon_{\text{out}}}{S}
+     + \dfrac{2\epsilon_{\text{mass}}}{S}\max_s \|O_s\|_2$\\[2pt]
+   $S(q)=\sum_{s}M_s(q)$ 为全局 Softmax 分母。\\[1pt]
+   两项均以 $S$ 归一化，故误差不随设备数发散；
+   $\epsilon_{\text{repr}}$ 通过前两项间接体现。};
+
+\end{tikzpicture}
+\end{document}
