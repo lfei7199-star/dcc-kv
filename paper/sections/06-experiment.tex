@@ -55,13 +55,16 @@ DCC-KV 压缩且逐边条件化。
 为避免"实验条件不可追溯"导致的结论不可复现，每次 run 由 \texttt{ExperimentMetadata}
 记录：\texttt{run\_id}、\texttt{git\_commit}、\texttt{pytorch\_version}、
 \texttt{model\_name}、\texttt{context\_length}、\texttt{gpu\_count}、\texttt{seed}、
-\texttt{budget\_ratio}、\texttt{sync\_async}、\texttt{num\_repr\_queries}、
+\texttt{budget\_ratio}、\texttt{sync\_async}、\texttt{num\_}\allowbreak\texttt{repr\_}\allowbreak\texttt{queries}、
 \texttt{projection\_dim}、\texttt{lambda\_beta}、\texttt{lambda\_value}、
-\texttt{rope\_extension\_used} 与 \texttt{rope\_extension\_disclosed}。
+\texttt{rope\_}\allowbreak\texttt{extension\_}\allowbreak\texttt{used} 与
+\texttt{rope\_}\allowbreak\texttt{extension\_}\allowbreak\texttt{disclosed}。
 
 其中后两项的设计值得说明：若为达到目标上下文长度而使用了 RoPE 外推，必须显式披露。这一约束
-的目的是防止把"位置编码外推带来的效果"误归因为压缩机制的贡献。凡 \texttt{rope\_extension\_used}
-为真而 \texttt{rope\_extension\_disclosed} 为假的 run，其结果不进入主表。
+的目的是防止把"位置编码外推带来的效果"误归因为压缩机制的贡献。凡
+\texttt{rope\_}\allowbreak\texttt{extension\_}\allowbreak\texttt{used}
+为真而 \texttt{rope\_}\allowbreak\texttt{extension\_}\allowbreak\texttt{disclosed}
+为假的 run，其结果不进入主表。
 
 结果聚合由 \texttt{RunResult.from\_values} 完成，统一产出 median、p5/p95 与
 bootstrap 95\% CI。该实现意味着所有报告数字必须来自多次 run 的分布，而非单次运行值。
@@ -105,29 +108,200 @@ bootstrap 95\% CI。该实现意味着所有报告数字必须来自多次 run �
 $B \in \{8, 16, 32, 64, 128\}$，对每个 $B$ 计算紧凑块与完整块在代表 Query 上的
 质量误差与输出误差，并与 Dense 全注意力对比。
 
-\textbf{已有证据}：\texttt{test\_fast\_kv\_vs\_dense\_within\_tolerance} 在 $B=64$ 下
-测得压缩方法与 Dense 的最大绝对偏差 $< 0.1$；基线 APB 在更激进压缩下偏差 $< 0.3$。
-这两个数字给出了压缩误差在随机张量设定下的量级参照。
+{\sloppy
+\textbf{关于既有测试的一处更正}：本文早期版本曾引用
+\texttt{test\_fast\_kv\_}\allowbreak\texttt{vs\_dense\_}\allowbreak\texttt{within\_tolerance}
+（$B=64$ 时偏差 $<0.1$）与
+\texttt{test\_apb\_}\allowbreak\texttt{vs\_dense\_}\allowbreak\texttt{within\_tolerance}
+（$<0.3$）作为压缩误差的量级参照。
+经复核，这两项断言\emph{当前均不成立}：实测最大绝对偏差分别为 $1.09$ 与 $1.99$，
+分别超出各自阈值 $10.9$ 倍与 $6.6$ 倍。其中 APB 的值在本次修改前后完全一致
+（$1.9943916551584877$），说明它与本文的 $\beta$ 改动无关。
+此外，该测试的 \texttt{chunk\_size} 与 \texttt{budget} 同为 $64$，即
+$B = L_s$，\textbf{实际上并未发生任何压缩}，因此即使断言成立也不能作为
+压缩保真度的证据。本文不再引用这两个数字。
+\par}
 
-\textbf{待补}：现有测试只断言"小于阈值"，未报告误差随 $B$ 的变化趋势。需要补充的是
-$\epsilon_{\text{mass}}(B)$ 与 $\epsilon_{\text{out}}(B)$ 的完整曲线，用于验证
-\S\ref{sec:analysis-error} 中性质 2 的预测（无偏置时质量被系统性低估）。
+\textbf{已补}：$\epsilon_{\mathrm{mass}}(B)$ 与 $\epsilon_{\mathrm{out}}(B)$ 的完整曲线
+已在 \texttt{experiments/}\allowbreak\texttt{cpu/}\allowbreak
+\texttt{e2\_fidelity\_}\allowbreak\texttt{curve.py} 中实现并运行。两条实测结论：
+（i）$\epsilon_{\mathrm{out}}(B)$ 随预算增大\emph{并非单调下降}；
+（ii）RMS 排序选出的 Key 恰是高权重位置，实际保留的注意力质量显著高于名义预算比
+$B/L$——在 $B/L=0.031$ 时实测保留 $0.291$（$9.32$ 倍），在 $B/L=0.5$ 时保留 $0.919$。
+名义压缩比因此系统性低估了信息保留率，这一点在解释"为何压到 3\% 仍可用"时是关键。
+
+\textbf{一处度量更正}：$\epsilon_{\mathrm{mass}}$ 的早期实现（及本节的早期版本）
+采用"两侧各自减去自身最大值"的做法。该做法对 $\beta$ 的\emph{常数分量完全免疫}——
+而常数分量恰是 $\beta$ 的主要职责。已在
+\texttt{experiments/}\allowbreak\texttt{common/}\allowbreak
+\texttt{synthetic.py} 中新增 \texttt{absolute\_}\allowbreak\texttt{mass\_}\allowbreak\texttt{error}，
+改用公共偏移 $c=\max(\ell_{\text{full}})$。这一点在下文 E2b 中定量体现。
 
 \subsubsection{E3：边级条件化 vs 共享压缩}
 
-\textbf{目的}：为 H1 与 H2 提供数值侧证。
+\textbf{目的}：为 H1 与 H2 提供机制级数值证据。
 
 \textbf{方法}：在相同预算下比较 DCC-KV（逐边条件化）与 FastKV（共享压缩）相对 Dense 的
-误差。H1 断言同一源块对不同目的端的紧凑 KV 显著不同，以 KL 散度 $> 0.5$ 为判据。
+误差。H1 断言同一源块对不同目的端的紧凑 KV 显著不同，以 KL 散度 $> 0.5$ 为判据，
+并以 JS 散度（有界）与选中索引的 Jaccard 重叠作为不依赖平滑系数的伴随证据。
+H2 采用\textbf{配对 bootstrap + 单侧置换检验}：对同一个（目的端, 预算）组合，
+两种方法面对同一份源块与同一组探针 Query，故误差差异是同源配对量。
 
-\textbf{已有证据}：\texttt{test\_dcc\_kv\_lower\_error\_than\_shared} 在 $B=32$ 的强压缩
-设定下同时计算两种方法的误差。需要如实说明：该测试的当前断言是对二者的误差\emph{分别}
-设上界（均 $< 0.5$），\textbf{并未断言 DCC-KV 严格优于 FastKV}。测试注释中亦注明
-"CPU mock 不一定严格"。因此这一项目前只构成接口与量级验证，不构成 H2 的证据。
+\textbf{结果}：修正 $\beta$ 链路口径后重测（$45$ 个配对样本，覆盖关注强度
+$\{0,2,4,8,16\}$ 与预算 $\{16,32,64,128\}$）：
 
-\textbf{待补}：需要（i）把断言从"各自有界"提升为"配对比较且 DCC-KV 显著更优"，
-（ii）把 $B$ 与目的端 Query 分布差异作为自变量扫描，（iii）把 KL 散度量化为 H1 的直接证据。
-这是与本文核心主张最相关、也最需要补强的一环。
+\begin{itemize}
+  \item H1 成立：同一源块对不同目的端的紧凑 KV 在 KL、JS 与索引重叠三项上均显著
+        偏离噪声底线，且不随 $\beta$ 的使用方式改变。
+  \item H2 方向\textbf{稳定}：在全部 $20$ 个（关注强度, 预算）条件下，$17$ 个显著
+        支持 DCC-KV，$3$ 个不显著，\textbf{无一反转}。
+        三种 $\beta$ 口径下的汇总配对差异为
+        $-0.308$（$\beta$ 全量）、$-0.199$（$\beta/M$）、$-0.195$（不加 $\beta$）。
+        早期版本中"方向在高关注强度处翻转"的现象在口径修正后\emph{不再出现}，
+        因此该翻转确系实现问题所致的伪影，而非 H2 本身的属性。
+\end{itemize}
+
+\textbf{边界（必须保留）}：以上是合成数据上的\emph{机制级}证据——被测量的是
+注意力分布与线性输出的重构精度，不是任务指标。H2 的\emph{任务级}证据
+（准确率、生成质量）仍需 GPU 侧的 E6，本节不据此声称 H2 已被证实。
+
+\subsubsection{E2b：$\beta$ 链路口径的判定}
+
+\textbf{动机}：\S\ref{sec:exp-cpu} 的早期运行发现 $\beta$ 的拟合与施加载荷不一致，
+需要判定正确口径。候选共六种，逐一在留出 Query 上实测
+（\texttt{experiments/}\allowbreak\texttt{cpu/}\allowbreak
+\texttt{e2b\_beta\_}\allowbreak\texttt{convention.py}）。
+
+\textbf{为何置于 E3 之后}：该口径问题并非设计时预见到，而是在 E3 的配对检验
+出现"方向随关注强度翻转"这一异常时才暴露出来的——先看到异常，再回头定位到
+口径，因此叙述顺序与发现顺序一致。E2b 的结论是 E3 重测（以及 E2 的度量更正）
+的前提，故在这一步完成之前，E2/E3 的任何方向性判断都不应对外声明。
+
+\textbf{判定的关键：度量必须选对}。$\beta$ 加在 logit 上，而
+$\mathrm{softmax}$ 对 logit 的整体常数位移免疫。因此
+\textbf{只要独立地看单个块，$\beta$ 的常数分量完全不可观测}——
+单块度量只能看到 $\beta$ 的跨 Key 离散度。
+而 $\beta$ 的职责恰恰是恢复块的未归一化质量，质量只在\emph{与其他块共处一个
+softmax 分母}时才有意义：最终输出是各块贡献的加权混合，权重正比于各块的
+未归一化质量。故本文引入\textbf{归并侧度量}
+\texttt{mixture\_}\allowbreak\texttt{relative\_}\allowbreak\texttt{error}：把源块与一个固定上下文块拼接后再与 Dense 比较。
+这正是源论文 Appendix A.2 "mass-preserving" 论证的落点。
+
+\textbf{判定结论}：（i）$\beta$ 的系数\textbf{应为 $1$}，两侧一致。
+依据是源论文 Eq.(2) 的 $\sum_j \exp(\ell_j+\beta_j)$ 与本文自身
+Eq.(15)(16) 中 $w=\exp(\beta)$ 直接乘在 $\exp(\ell)$ 上，两处都是系数 $1$。
+（ii）质量目标必须为\textbf{未归一化}的 $\sum_k \exp(\ell_k)$，而非
+$\mathrm{softmax}$ 沿 Key 轴之和。（iii）$1/M$ 系笔误，已移除。
+
+\textbf{定量依据}（$45$ 个配对样本，$\lambda_\beta=10^{-3}$）：
+
+\begin{table}[t]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{p{0.40\columnwidth}rrr}
+    \toprule
+    口径 & 单块误差 & 归并误差 & 绝对质量误差 \\
+    \midrule
+    仓库原状（$\sum\softmax\equiv 1$，拟合 $\beta/M$，施加 $\beta$）
+        & $0.748$ & $1.000$ & $1.826$ \\
+    仅换收敛求解器，口径不变 & $1.091$ & $1.381$ & $0.999$ \\
+    拟合侧迁就为 $\beta/M$（两侧一致） & $0.532$ & $0.768$ & $0.776$ \\
+    \midrule
+    修正口径，per-key $\beta$ & $0.550$ & $\mathbf{0.446}$ & $0.183$ \\
+    修正口径，log 尺度拟合 & $0.593$ & $0.498$ & $0.192$ \\
+    修正口径，$\beta$ 退化为标量 & $0.525$ & $\mathbf{0.484}$ & $\mathbf{0.171}$ \\
+    \midrule
+    $\beta$ 全链路关闭（基线） & $0.525$ & $0.558$ & $0.577$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{$\beta$ 链路口径的逐项对照。全部指标为留出 Query 上的中位数；
+  \emph{归并误差}是 $\beta$ 的主战场，\emph{单块误差}对 $\beta$ 的常数分量免疫。
+  修正口径把绝对质量误差压到关闭 $\beta$ 时的 $1/3$。}
+  \label{tab:beta-convention}
+\end{table}
+
+三条要点：
+（1）原状口径的绝对质量误差是正确口径的约 $10$ 倍，且在归并侧比关闭 $\beta$
+显著更差（$40/45$ 配对落败，$p<10^{-4}$），即\textbf{原实现对结果有实质损害}；
+（2）修正口径后，$\beta$ 在归并侧显著优于关闭 $\beta$（$p<10^{-4}$），
+绝对质量误差 $0.577 \to 0.171$，\textbf{$\beta$ 机制真正生效}；
+（3）$\beta$ 退化为\textbf{单一标量}时配对优势最一致（$44/1$），
+说明"恢复块质量"这一标量自由度已承担主要收益，per-key 的额外自由度
+在单块分布上略有代价。这给出一个可采纳的设计简化。
+
+\textbf{一个仍未解决的实现问题}：非负最小二乘的解允许 $w_j \to 0$，
+实测有相当比例的 $\beta$ 被压到 clamp 下界（相当于"软剔除"某些 Key）。
+这与本文把 $\beta$ 描述为"质量重加权"而非"二次选键"的意图不符，列为待办。
+
+\subsubsection{E9：信息瓶颈的旋钮定位}
+
+\textbf{动机}：Value 回归的设计矩阵 $X_{s\to r}$ 行数等于代表 Query 数 $M$，
+故 $\mathrm{rank}(X)\le M$。当 $B>M$ 时回归欠定。若信息瓶颈真是 $M$ 而非 $B$，
+则本文以"扫描预算 $B$ 画帕累托前沿"为主线的叙述需要重估。
+
+\textbf{设计}：$M\in\{4,8,16,32,48\}$ $\times$ $B\in\{8,16,32,64,128\}$，
+$5$ 个种子 $\times$ $3$ 个目的端，共 $375$ 格。三件事同时测量：
+（i）\emph{fit}：正常链路；
+（ii）\emph{oracle}：固定同一套选中 Key 与同一个 $\beta$，但用\emph{评估 Query
+自己}拟合 $V$——它作弊，因此给出"预算 $B$ 下的可达上界"；
+（iii）\emph{gap} $=$ fit $-$ oracle，即 $M$ 不足导致的估计误差。
+所有指标都在**留出 Query** 上评估，留出集从未参与选键、$\beta$ 拟合或 $V$ 回归——
+否则"增大 $M$"会因为见过更多评估点而自动获胜，结论将退化为同义反复。
+
+\textbf{结果}（相对输出误差中位数，节选）：
+
+\begin{table}[t]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{lrrrrr}
+    \toprule
+    & \multicolumn{5}{c}{预算 $B$} \\
+    \cmidrule(lr){2-6}
+    $M$ & $8$ & $16$ & $32$ & $64$ & $128$ \\
+    \midrule
+    \multicolumn{6}{l}{\emph{fit}（正常链路）} \\
+    $4$  & $0.758$ & $0.712$ & $0.680$ & $0.684$ & $0.677$ \\
+    $8$  & $0.707$ & $0.724$ & $0.590$ & $0.592$ & $0.590$ \\
+    $16$ & $0.552$ & $0.587$ & $0.518$ & $0.480$ & $0.465$ \\
+    $32$ & $0.471$ & $0.408$ & $0.410$ & $0.319$ & $0.303$ \\
+    $48$ & $0.460$ & $0.360$ & $0.306$ & $0.244$ & $0.214$ \\
+    \midrule
+    \multicolumn{6}{l}{\emph{oracle}（$B$ 的可达上界）} \\
+    $4$  & $0.477$ & $0.306$ & $0.208$ & $0.162$ & $0.155$ \\
+    $48$ & $0.408$ & $0.279$ & $0.174$ & $0.079$ & $0.066$ \\
+    \midrule
+    \multicolumn{6}{l}{\emph{gap} $=$ fit $-$ oracle（$M$ 不足）} \\
+    $4$  & $0.228$ & $0.321$ & $0.443$ & $0.491$ & $0.516$ \\
+    $48$ & $0.055$ & $0.083$ & $0.135$ & $0.150$ & $0.150$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{$M$ 与 $B$ 的职责分离。oracle 是作弊上界，只用于界定 $B$ 轴的表示能力，
+  不代表可实现精度。}
+  \label{tab:knob}
+\end{table}
+
+\textbf{结论（较早期判断更为精确）}：两个旋钮\emph{都有效，但职责不同}。
+
+\begin{itemize}
+  \item \textbf{$B$ 决定可达上界}：oracle 曲线沿 $B$ 由 $8\to128$ 下降
+        $67.5\%$（$M=4$）到 $83.8\%$（$M=48$），且 $M$ 越大降幅越大，
+        说明表示能力的收益是实的、并且要靠 $M$ 才能兑现。
+  \item \textbf{$M$ 决定能否触及上界}：gap 沿 $M$ 由 $4\to48$ 缩小
+        $76\%$（$B=8$）到 $71\%$（$B=128$）。
+  \item 在\emph{可实现}链路里，沿 $M$ 轴的平均相对改善为 $0.553$，
+        沿 $B$ 轴为 $0.265$——\textbf{$M$ 的边际收益约为 $B$ 的 $2.1$ 倍}。
+  \item 但\textbf{$B$ 不是次要旋钮}：它的收益是 $M$ 的函数。在 $M=4$ 时
+        $B$ 由 $8\to128$ 只带来 $10.7\%$ 的改善，而在 $M=48$ 时带来 $53.5\%$。
+        也就是说，"只扫 $B$ 而固定 $M$"会把 $B$ 的收益系统性低估。
+  \item gap 随 $B$ 单调\emph{增大}（$M=4$ 时 $0.228\to0.516$），
+        说明预算越大越需要更大的 $M$ 才能兑现。
+\end{itemize}
+
+因此本文的叙述不必推翻，但必须\textbf{把 $M$ 与 $B$ 一起扫描}，
+并在报告任何"预算--精度"曲线时同时报告所使用的 $M$；
+否则读者无法区分"预算不够"与"估计不足"。
 
 \subsubsection{E4：分布式等价性}
 
@@ -135,73 +309,114 @@ $\epsilon_{\text{mass}}(B)$ 与 $\epsilon_{\text{out}}(B)$ 的完整曲线，用
 环境下正确传递。
 
 \textbf{已有证据}：Ring Attention 与 Dense 的最大偏差 $< 10^{-5}$（$L=256$，四块，
-$\mathrm{FP64}$）；同步版 DCC-KV 与 Dense 的偏差断言阈值为 $10^{-2}$；
-两进程 gloo 后端下 \texttt{all\_reduce}、\texttt{broadcast} 与变长
-\texttt{all\_to\_all\_v} 的数值结果均逐元素正确。
+$\mathrm{FP64}$）。
 
-\textbf{说明}：$10^{-2}$ 与 $10^{-5}$ 的差异反映了压缩引入的近似误差，而非实现错误。
-该阈值本身即是一个可报告的结论：在 $L=256$、$B=64$ 的设定下，同步 DCC-KV 相对精确注意力的
-最大绝对偏差在 $10^{-2}$ 量级。
+\textbf{已补}：通过三档对照（完全不压缩、预算等于块长、真实压缩）分离误差来源。
+完全不压缩且不加偏置时，同步 DCC-KV 与 Dense 的最大绝对偏差为
+$2.5\times 10^{-7}$（$\mathrm{FP32}$），证明通信与归并路径本身是数值干净的；
+压缩设定下的偏差全部来自构造近似。
+
+\textbf{关于多进程路径的一处如实记录}：\texttt{all\_reduce}、\texttt{broadcast}
+与变长 \texttt{all\_to\_all\_v} 的测试在本机 Windows 环境下以
+\texttt{OSError: [WinError 6] 句柄无效} 失败，属于当前沙箱的多进程 spawn 限制，
+尚未取得这些路径在本机上的通过记录。E4 的数值结论来自单进程 mock 通信版本。
 
 \subsubsection{可执行实现与已量化的边界}
 
-上述 E0--E4 的"待补"项已实现为可执行脚本，位于仓库的 \texttt{experiments/cpu/}，
-可在任意多核 CPU 上复现，不依赖 GPU 与模型权重。四组实验结果如下。
+E0--E4 与新增的 E2b、E9 已实现为可执行脚本，位于
+\texttt{experiments/}\allowbreak\texttt{cpu/}，
+可在任意多核 CPU 上复现，不依赖 GPU 与模型权重。
 
 \textbf{E0}：顺序归并与平衡树归并的差异在 $\mathrm{FP32}$ 下约为 $10^{-7}$、
-在 $\mathrm{FP64}$ 下约为 $10^{-16}$，与两种精度的单位舍入一致。该量级界定了
-异步实现的数值安全边界：只要归并精度不低于 $\mathrm{FP32}$，乱序到达引入的
-差异不超过输出本身的第七位有效数字。
+在 $\mathrm{FP64}$ 下约为 $10^{-16}$，与两种精度的单位舍入一致。
+该量级界定了异步实现的数值安全边界。
 
-\textbf{E1}：11 项接口与形状不变量全部通过。其中一项诊断值得记录：拟合出的
-$\beta$ 取值触及了下界 $\log(10^{-6})$，说明偏置项被正则项压到边界，
-这与其拟合目标本身不携带信息有关（见下）。
+\textbf{E1}：11 项接口与形状不变量全部通过。
 
-\textbf{E2}：$\epsilon_{\mathrm{out}}(B)$ 随预算增大并非单调下降，且实际保留的
-注意力质量显著高于名义预算比 $B/L$。原因在于 RMS 排序选出的 Key 恰好是
-高权重位置，因此名义压缩比低估了信息保留率。$\epsilon_{\mathrm{mass}}$ 的
-有符号分解进一步确认了 \S\ref{sec:analysis-error} 性质 2 的预测：
-无偏置时质量被系统性低估。
+\textbf{E2 / E2b / E3 / E9}：见上文各自小节；E2b 给出了 $\beta$ 口径的判定与
+定量对照，E9 给出了 $M$ 与 $B$ 的职责分离。
 
-\textbf{E3}：这是四组中以本文主张最相关的一组。H1 在合成场景下成立——
-同一源块对不同目的端的紧凑 KV 在 KL/JS 散度与选中索引 Jaccard 重叠上均显著
-偏离噪声底线。H2 的配对 bootstrap 检验则给出一个需要正视的结果：
-在 $\beta$ 的训练/推理口径一致时，边级条件化的误差低于共享压缩且方向在各条件
-下一致；但按仓库当前的实现口径运行时，方向在关注强度较高处发生翻转。
-该口径差异被定位到一处实现问题：$\beta$ 在拟合侧按 $1/M$ 缩放，而在推理侧
-未缩放，二者相差 $M$ 倍。这说明 H2 的判定依赖于该实现问题先行修复，
-在此之前不宜以当前数值支撑 H2。
+\textbf{E4}：见上文。
 
-\textbf{E4}：通过三档对照（完全不压缩、预算等于块长、真实压缩）分离出误差
-来源。完全不压缩且不加偏置时，同步 DCC-KV 与 Dense 的最大绝对偏差为
-$2.5\times 10^{-7}$（$\mathrm{FP32}$），证明通信与归并路径本身是数值干净的；
-压缩设定下的偏差全部来自构造近似。这一分离使得 E4 的阈值不再是一个
-不可归因的混合量。
+\subsubsection{由实验反查并修复的实现问题}
 
-\subsubsection{由实验反查出的三处实现问题}
+执行上述脚本的过程先后定位了八处实现问题。与早期版本不同，本次\emph{已按
+最合理口径修复}前七处，并在仓库测试套件上验证；第八处如实保留为待办。
 
-执行上述脚本的过程反向定位了三处此前未被发现的实现问题。三者均未修改源码，
-仅在本节如实记录，因为它们直接决定了 E3 与 A3 的结论能否成立。
-
-\emph{其一，块质量恒为 1。}\texttt{compact\_kv.py} 中以
+\emph{其一，块质量恒为 1（已修）。}\texttt{compact\_kv.py} 中以
 $\mathrm{softmax}$ 沿最后一维求和构造 \texttt{block\_mass}。沿 softmax 的归一化
-维度求和恒等于 1，因此该量不携带任何信息，$\beta$ 的拟合目标退化。
-这解释了 E1 中观测到的 $\beta$ 被压到下界、以及 A3 机制级消融中 $\beta$
-贡献接近零的现象。
+维度求和恒等于 $1$，该量不携带任何信息，$\beta$ 的拟合目标退化。
+已改为未归一化的 $\sum_k \exp(\ell_k)$（含防溢出的全局偏移），
+与源论文 Eq.(2) 及 \texttt{calibration.py} 的文档一致。
 
-\emph{其二，$\beta$ 的训练与推理口径不一致。}\texttt{value\_regression.py}
-在构造设计矩阵时对 $\beta$ 施加 $1/M$ 缩放，而
-\texttt{dcc\_kv\_sync\_cpu.py} 在推理时使用未缩放的全量 $\beta$，
-相差 $M$ 倍（默认 $M=64$）。这是 E3 中 H2 方向在高关注强度处翻转的直接原因。
+{\sloppy
+\emph{其二，$\beta$ 的训练与推理口径不一致（已修）。}
+\texttt{value\_}\allowbreak\texttt{regression.py} 在构造设计矩阵时对 $\beta$ 施加 $1/M$ 缩放，
+而推理路径使用未缩放的全量 $\beta$。已统一为系数 $1$，并同步修正
+\texttt{calibration.py} 与 \texttt{compact\_kv.py} 的文档。
+这是 E3 中 H2 方向由"局部翻转"变为"全线稳定"的直接原因。
+\par}
 
-\emph{其三，Value 回归在 $B > M$ 时欠定。}设计矩阵 $X_{s\to r}$ 的行数等于
-代表 Query 数 $M$，故 $\mathrm{rank}(X) \le M$。当预算大于代表 Query 数时，
-回归问题严重欠定，拟合出的紧凑 Value 可以显著偏离真值。这一关系表明
-紧凑块的真实信息瓶颈是 $M$ 而非 $B$，与本文当前以 $B$ 为主要旋钮的叙述
-存在张力，宜在后续版本中重新审视。
+\emph{其三，非负岭回归求解器不收敛（已修）。}
+\texttt{nonneg\_}\allowbreak\texttt{least\_}\allowbreak\texttt{squares} 使用固定步长 $10^{-2}$ 的投影梯度。
+当目标量级为未归一化质量（可达 $L_s$）时，梯度的 Lipschitz 常数增大，
+固定步长越过稳定域，$w$ 反复被投影 clamp 到 $0$，$\beta$ 全部顶到
+$\log(10^{-6})=-13.8155$ 的下界。已改为步长 $1/L$（$L$ 为
+$A=G^{\top}G+\lambda I$ 的最大特征值）并采用尺度无关的正则
+$\lambda_{\text{eff}}=\lambda\cdot\mathrm{mean}(\mathrm{diag}(G^{\top}G))$。
 
-三者的共同含义是：E3 与 A3 的当前数值不足以支撑 H2 与 H3，需在实现问题修复后
-重测。本节保留该结论的否定形式，而非等待有利结果。
+\emph{其四，Value 回归在 $B>M$ 时欠定（已测量，未修）。}
+$\mathrm{rank}(X)\le M$，$B>M$ 时解完全由正则项决定。
+E9 已把这一关系的后果量化（见 \S\ref{sec:exp-cpu} 的 E9），
+它不再是一个未经验证的推测，而是一个有网格数据支撑的设计约束。
+
+\emph{其五，精度限制阻塞 $\mathrm{FP64}$（已修）。}
+\texttt{representative\_}\allowbreak\texttt{query.py} 的 \texttt{rademacher\_projection} 写死
+\texttt{.float()}，使 float64 输入报 dtype 不匹配，整条构造链无法在
+$\mathrm{FP64}$ 下运行。这直接阻塞了 $\mathrm{FP64}$ 的误差分析与三个测试。
+已改为按输入张量的 dtype 生成。
+
+{\sloppy
+\emph{其六，CUDA 设备不匹配（已修）。}
+同上文件中的 \texttt{torch.}\allowbreak\texttt{Generator()} 与
+\texttt{torch.}\allowbreak\texttt{randint} 默认建在 CPU，
+\texttt{value\_}\allowbreak\texttt{regression.py} 的 \texttt{torch.}\allowbreak\texttt{eye} 未指定 device。
+前两者使构造链在 CUDA 张量上直接报错，后者会在 GPU 上创建 CPU 张量。
+均已改为跟随输入的 device。这是 GPU 侧 A1/A2/A3 的硬前置。
+\par}
+
+\emph{其七，包导出缺失与双导入根不兼容（已修）。}
+\texttt{dcc\_}\allowbreak\texttt{kv\_}\allowbreak\texttt{ref/}\allowbreak
+\texttt{\_\_init\_\_.py} 未导出
+\texttt{merge\_}\allowbreak\texttt{softmax\_}\allowbreak\texttt{states\_}\allowbreak\texttt{list}
+与 \texttt{attention\_output\_from\_state}；\texttt{baselines/} 与
+\texttt{distributed/} 中的五个模块使用 \texttt{from ..dcc\_kv\_ref import}，
+在"把 \texttt{src/} 直接加入 \texttt{sys.path}"的调用方式下报
+\emph{attempted relative import beyond top-level package}。
+
+\textbf{这一条有一个必须记录的后果}：在修复前，
+\texttt{tests/}\allowbreak\texttt{test\_}\allowbreak\texttt{dist\_}\allowbreak\texttt{equivalence.py}
+因缺少导出而\textbf{整个模块无法收集}，进而导致 pytest 在收集阶段中止、
+\textbf{测试套件中的零个测试被执行}。也就是说，早期版本中作为 E2/E3 证据引用的
+\texttt{test\_}\allowbreak\texttt{dcc\_}\allowbreak\texttt{kv\_}\allowbreak\texttt{lower\_}\allowbreak\texttt{error\_}\allowbreak\texttt{than\_}\allowbreak\texttt{shared} 与
+\texttt{test\_}\allowbreak\texttt{fast\_}\allowbreak\texttt{kv\_}\allowbreak\texttt{vs\_}\allowbreak\texttt{dense\_}\allowbreak\texttt{within\_}\allowbreak\texttt{tolerance} \textbf{从未真正运行过}。
+修复后的实测状态为：该文件 $3$ 失败 / $10$ 通过（修复前为 $6$ 失败 / $7$ 通过，
+三个 $\mathrm{FP64}$ 相关测试因 dtype 缺陷报错）；全仓库
+$44$ 通过 / $11$ 失败，其中 $8$ 项失败属于本机 Windows 多进程 spawn 的环境限制。
+仅补导出后仍失败的两项是
+\texttt{test\_}\allowbreak\texttt{fast\_}\allowbreak\texttt{kv\_}\allowbreak\texttt{vs\_}\allowbreak\texttt{dense\_}\allowbreak\texttt{within\_}\allowbreak\texttt{tolerance}
+与
+\texttt{test\_}\allowbreak\texttt{apb\_}\allowbreak\texttt{vs\_}\allowbreak\texttt{dense\_}\allowbreak\texttt{within\_}\allowbreak\texttt{tolerance}，其失败与本文的 $\beta$ 改动无关
+（APB 的偏差值在改动前后逐位一致）。
+
+\emph{其八，$\beta$ 的稀疏塌缩（未修，待办）。}
+非负最小二乘允许 $w_j\to0$，实测相当比例的 $\beta$ 落到 clamp 下界，
+效果接近"软剔除部分 Key"。这与 $\beta$ 的"质量重加权"定位不符，
+需要引入下界约束或改换参数化。
+
+\textbf{小结}：七处修复中，其五、其六使 GPU 侧实验的前提条件成立，
+其一、其二、其三使 $\beta$ 机制从"退化/有害"变为"在归并侧显著有效"，
+其七使测试套件从"零个测试被执行"变为可运行。其四、其八仍是设计层面的开放问题。
 
 \subsection{待执行的 GPU 实验}
 \label{sec:exp-gpu}
@@ -304,16 +519,19 @@ $T_{\text{comm}}$、本地计算 $T_{\text{comp}}$ 与总耗时 $T_{\text{total}
 \begin{table}[t]
 \centering
 \small
+\setlength{\tabcolsep}{4pt}
 \caption{实验状态总览。"CPU" 表示可在纯 CPU 环境复现，"GPU" 表示依赖多卡环境。}
 \label{tab:exp-status}
-\begin{tabular}{llll}
+\begin{tabular}{@{}l p{0.40\columnwidth} l p{0.20\columnwidth}@{}}
 \toprule
 编号 & 内容 & 环境 & 状态 \\
 \midrule
 E0 & 顺序无关性（$\mathrm{FP64}$） & CPU & 已有证据 \\
 E1 & 构造接口与形状不变量 & CPU & 已有证据 \\
 E2 & 压缩保真度（单点） & CPU & 部分证据 \\
-E3 & 边级条件化 vs 共享压缩 & CPU & 仅量级验证 \\
+E2b & $\beta$ 链路口径判定 & CPU & 已有证据（机制级） \\
+E3 & 边级条件化 vs 共享压缩 & CPU & 机制级证据 \\
+E9 & 信息瓶颈的旋钮定位（$M$--$B$） & CPU & 已有证据（机制级） \\
 E4 & 分布式等价性 & CPU（gloo） & 已有证据 \\
 E5 & 消融 A1/A2/A3/A5 & GPU & 待执行 \\
 E6 & 主表与可扩展性 & GPU & 待执行 \\
@@ -325,14 +543,26 @@ E8 & 低精度数值稳定性 & GPU & 待执行 \\
 
 \subsection{本节小结}
 
-本节的实验设计有两个特点值得指出。第一，它把"可验证"与"待验证"严格分离：E0--E4 给出的是
-接口正确性、数值等价性与顺序无关性的证据，这些证据不依赖 GPU，因而是当前状态下唯一可对外
-声明的结论；E5--E8 给出的是完整协议，其结果决定了本文关于精度与性能的主张能否成立。
-第二，它把与本文核心主张最相关的检验（E3）明确标为"仅量级验证"——当前测试并未断言
-DCC-KV 优于共享压缩。这一诚实标注是必要的：若把"两者误差都有界"读作"边级条件化更优"，
-就是把尚未测得的结论当作已有证据。
+本节的实验设计有三个特点值得指出。
+
+第一，它把"可验证"与"待验证"严格分离：E0--E4、E2b、E9 给出的是接口正确性、数值等价性、
+顺序无关性以及机制层面的证据，这些证据不依赖 GPU，因而是当前状态下唯一可对外声明的结论；
+E5--E8 给出的是完整协议，其结果决定了本文关于精度与性能的主张能否成立。
+
+第二，它把 H2 的证据等级明确限定在\textbf{机制级}。E3 在 $\beta$ 口径统一后重跑，
+配对检验的方向成为稳定的：在 20 组（强度 $\times$ 预算）条件中 17 组显著、3 组不显著、
+\textbf{无一反向}。这支持"边级条件化在混合输出层面优于共享压缩"这一\textbf{机制性}判断，
+但它是在合成数据上、以混合输出的相对误差为指标得到的，\textbf{不构成任务级证据}。
+H2 的任务级结论须待 E6 在真实模型与真实长文本上测量后才能声明。
+若把机制级证据读作任务级结论，就是把尚未测得的结论当作已有证据。
+
+第三，E2b 与 E9 是把"实现缺陷"与"科学结论"分开处理的两个示例。E2b 的作用是先判定
+$\beta$ 链路口径（E2/E3 的结论是否可信，取决于这一步），E9 的作用是在结论写进正文之前
+先确认旋钮的真实角色。二者均不产出可写入论文的\textbf{结果}，只产出\textbf{前提}。
+这一区分同样适用于剩余章节：拿不准的前提，不得作为结论写入。
 
 因此，本节当前能支撑的结论限于：紧凑 KV 构造流程在实现层面自洽且可复现；在线 Softmax
 归并算子在 $\mathrm{FP64}$ 下满足顺序无关性；变长 All-to-All 消息在多进程环境下正确传递；
-同步版分布式注意力与 Dense 的偏差处于压缩误差量级。关于任务质量、通信收益、多卡可扩展性
-以及与基线的优劣对比，均待 GPU 实验完成后报告。
+同步版分布式注意力与 Dense 的偏差处于压缩误差量级；在合成数据与统一口径下，边级条件化
+在混合输出层面优于共享压缩（机制级）。关于任务质量、通信收益、多卡可扩展性以及与基线的
+优劣对比，均待 GPU 实验完成后报告。

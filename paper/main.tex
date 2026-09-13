@@ -332,9 +332,11 @@ X^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r (C_k^{s \to r})^\top}{\sqrt{d_
 \end{equation}
 紧凑 Value 由多输出岭回归求得：
 \begin{equation}
-(C_v^{s \to r})^* = \arg\min_{C_v} \left\|X^{s \to r} C_v - Y^{s \to r}\right\|_F^2
-                   + \lambda_v \|C_v\|_F^2
-                   = \left(X^\top X + \lambda_v I\right)^{-1} X^\top Y .
+\begin{split}
+(C_v^{s \to r})^* &= \arg\min_{C_v} \left\|X^{s \to r} C_v - Y^{s \to r}\right\|_F^2
+                   + \lambda_v \|C_v\|_F^2 \\
+                  &= \left(X^\top X + \lambda_v I\right)^{-1} X^\top Y .
+\end{split}
 \end{equation}
 因此 $C_v^{s \to r}$ 一般不等于所选 Key 对应的原始 Value；每个紧凑 Value 可共同吸收多个被
 删除 Value 在代表 Query 上的输出贡献。质量拟合与 Value 拟合分别逼近块级分母和条件输出。对
@@ -376,10 +378,10 @@ g_{s \to r,j} = \frac{q (C_k^{s \to r})_{j}^\top}{\sqrt{d_h}} + \beta_j^{s \to r
 \end{equation}
 每个块独立生成 Online Softmax 状态
 \begin{equation}
-S_b = (m_b, l_b, o_b),\quad
-m_b = \max_j g_{b,j},\quad
-l_b = \sum_j e^{g_{b,j} - m_b},\quad
-o_b = \sum_j e^{g_{b,j} - m_b} v_{b,j}.
+\begin{split}
+S_b &= (m_b, l_b, o_b),\quad m_b = \max_j g_{b,j},\quad l_b = \sum_j e^{g_{b,j} - m_b},\\
+o_b &= \sum_j e^{g_{b,j} - m_b} v_{b,j}.
+\end{split}
 \end{equation}
 对两个状态 $S_a$ 与 $S_b$，沿用在线 Softmax 的归并算子 $\oplus$ \cite{milakov2018online}：
 \begin{align}
