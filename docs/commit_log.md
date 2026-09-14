@@ -3,9 +3,11 @@
 > 本文件按提交顺序倒序记录 `dcc-kv` 仓库的每一次提交：动机、改动清单、验证证据、遗留项。
 > 与 `docs/git_strategy.md`（规范）互补 —— 那份说「应该怎么提交」，这份说「实际提交了什么、验没验证过」。
 >
-> 生成时间：2026-09-15 00:15 (GMT+8)
-> 当前 HEAD：`541f7c6`（分支 `paper/sections-5-8`，连同本次日志提交一并推送；
-> 本文件本次补记为紧随其后的 docs 提交 —— 自 `main`（`8a1d275`）分叉以来的第 23 次提交）
+> 生成时间：2026-09-15 00:45 (GMT+8)
+> 当前 HEAD：`bee3388`（分支 `paper/sections-5-8`，连同本次日志提交一并推送；
+> 本文件本次补记为紧随其后的 docs 提交 —— 自 `main`（`8a1d275`）分叉以来的第 24 次提交）
+>
+> 更正：上一版此处把 `38b2da6` 记作"第 23 次"，实为第 22 次（`541f7c6` 为第 21 次）。
 
 ---
 
@@ -13,6 +15,7 @@
 
 | # | 短哈希 | 日期 | 作者 | 类型 | 文件数 | +行 | −行 |
 |---|---|---|---|---|---|---|---|
+| 20 | `bee3388` | 2026-09-15 00:40 | Saluneo | fix(gpu)+docs | 8 | 597 | 58 |
 | 19 | `541f7c6` | 2026-09-15 00:12 | Saluneo | fix(gpu) | 5 | 120 | 17 |
 | 18 | `b0c6bab` | 2026-09-14 23:59 | Saluneo | fix(gpu) | 10 | 521 | 99 |
 | 17 | `b10ea0e` | 2026-09-14 23:36 | Saluneo | fix(tests) | 9 | 694 | 121 |
@@ -32,17 +35,116 @@
 | 3 | `8a1d275` | 2026-09-08 09:15 | Mavis | fix(requirements) | 1 | 6 | 6 |
 | 2 | `fcd9718` | 2026-09-08 07:40 | Mavis | docs | 5 | 463 | 0 |
 | 1 | `7ebff65` | 2026-09-08 06:36 | Mavis | feat | 43 | 5382 | 0 |
-| | | | | **合计** | **157 次文件变更** | **20117** | **618** |
+| | | | | **合计** | **165 次文件变更** | **20714** | **676** |
 
-仓库当前规模：94 个受版本控制文件，其中 58 个 `.py`、10 个 `.tex`。
+仓库当前规模：95 个受版本控制文件，其中 58 个 `.py`、10 个 `.tex`、15 个 `.md`。
 
 分支与推送状态：
 
 ```
-* paper/sections-5-8   →  origin/paper/sections-5-8   （907d356..541f7c6 共 21 个提交，
+* paper/sections-5-8   →  origin/paper/sections-5-8   （907d356..bee3388 共 21 个提交，
                                                         连同本次日志提交一并推送）
   main                 →  origin/main                  （未动）
 ```
+
+---
+
+## 20. `bee3388` — 折叠 E6 的 sync/async 轴、标注 A2 的异源精度轴、消除 KV 裁剪的显存峰值
+
+**日期**：2026-09-15 00:40 | **类型**：fix(gpu)+docs | **规模**：8 文件，+597/−58
+
+### 动机
+
+用户就上一轮的记账提出三点：「C11 中所缺素材是否重要」「C20/C21 按最合理的方式来即可」
+「最后给出一份文件夹说明文档」。本条处理前两项并交付第三项；C11 的评估结论同时
+改变了该账目的性质（见 §P.2）。
+
+### 改动清单
+
+**C20 —— E6 的 sync/async 轴对单卡方法不是自变量（改为折叠）**
+
+原实现有两处问题叠加。其一，`sync_mode_applicable` **硬编码为 `False`**（对所有点），
+那不是"按规则判定"而是"把结论写死"——dcc_kv 的 GPU 实现就绪后，它的异步行仍会被标成
+"该轴不适用"，把"还没测"固化成"没这条轴"。其二，脚本仍为 `dense` / `kv_budget_shared`
+各生成 sync、async 两行，而这两行**逐位相同**；表里"两行数字一模一样"会被读成
+"异步没有收益"——把「这条轴不存在」错当成「这条轴上的测量结果为零」。
+
+- 新增 `sync_axis_applies(method)`：判据为 `METHOD_SPECS[...]["gpu_required"] > 1`，
+  即"该方法是否存在跨设备通信"；
+- 主循环改为先遍历 method、再按 `a.sync_modes if 适用 else [SYNC_MODE_NA]` 展开，
+  对单卡方法**折叠**该轴；新增常量 `SYNC_MODE_NA = "n/a"`（刻意不用 `"sync"` 顶上，
+  那会被读成一个真实的测量条件）；
+- 新增 `planned_points(a)`：按每个方法各自的轴累加，替代原先
+  `模型数 × 长度数 × 同步模式数 × 方法数` 的一把乘。后者会把**永不生成**的数据点算进
+  计划数，计划数与实测数从此对不上，而差额会被误读成"漏跑"；
+- `print_plan` 与 payload 同步输出展开/折叠的方法清单、虚增点数，以及
+  `n_points_planned_naive_product` 供对照；`measure_point` / `blocked_point` / 错误行
+  三处均改用推导值。
+
+**C21(a) —— A2 的精度轴与通信轴不同源**
+
+x 轴是 DCC-KV 的逐边预算（每条边各自选 $B$ 个 Key），y 轴却来自
+`_hf.apply_kv_budget` 的**共享** top-$B$ 裁剪（所有 Query 共用同一组保留位置，既无
+$\beta$ 也无 Value 回归）。两者只共享"$B$ 是同一个标量"这一层耦合，不是同一条曲线上的两点。
+
+- 结果行与 payload 显式记录 `comm_axis_source`、`accuracy_axis_source`、
+  `axes_are_same_method=False`、`pareto_frontier_valid=False`；
+- caveat 改为明确"即使 `--backend hf` 跑通，得到的也是「预算–精度参考曲线」，
+  **不能**称作帕累托前沿；同源前沿需要 CompactKV → GPU attention kernel"。
+
+**C21(b) —— `apply_kv_budget` 的显存峰值（正面回应 C22 的顾虑）**
+
+原实现 `kf = k.float()` 为算一个 $[S]$ 排序键而**瞬时复制整份 K cache**：
+8B / 32K / bf16 下单层约 68 MiB、32 层约 2.1 GiB，转 fp32 再要 4.3 GiB，V 还在旁边。
+
+C22 当时把它记为"**未改**"，理由是"任何分块累加都会改变求和顺序、进而可能改变保留位置
+与准确率，不宜在无 GPU 复核的情况下动"。本轮先验证该理由是否成立，再动手：
+
+- 新增 `_pooled_key_energy()`：沿 $S$ 维分块、在 fp32 中逐块累加，峰值额外显存只与
+  chunk 有关、与 $S$ 无关；
+- 实测（以 `torch.equal` **逐位**断言，不用 `allclose`）：
+  - 能量归约沿 $(B,H,d)$ 维、分块沿 $S$ 维，**两者正交**，每个 $s$ 位置参与归约的
+    元素集合与顺序都不变；
+  - `chunk >= 2` 时与整张计算**逐位相同**（覆盖 2 / 7 / 64 / 999 / 8192 / 100000）；
+  - `chunk == 1` 会让 PyTorch 对 `[B,H,1,d]` 走另一条归约 kernel，产生 1 ULP 级差异
+    （bf16 下约 $3.6\times10^{-7}$）；
+  - **保留位置对任何 chunk（含 1）都逐位一致**。
+  ⇒ 原顾虑**不成立**；"省显存"与"不改变任务指标"在此可以解耦。
+
+**文档不一致（顺带修掉）**
+
+- `docs/release_checklist.md` §3 仍写着"3 模型 × 5 长度 × … = 144"，而
+  $3\times5\times2\times2\times3 = 180$ 不自洽——是 `72af7db` 那次修正的**漏网副本**，
+  已改为 4 档并注明来源；
+- **H2 的判据在下游有两处不同写法**：`docs/reproducibility.md` §6 写"质量提升 ≥ 1.5 pp"，
+  `docs/release_checklist.md` §4 写"prefill 加速 ≥ 1.10×"。二者应是同一假设的两个侧面，
+  但**合并方式无法证实**（blueprint v1.1 §3 原件不在仓库内，见 C11）。两处均已加注，
+  并标明该表只是**下游快照**、不是权威原件。
+
+**新增**
+
+- `docs/FILE_MAP.md`（260 行）：全仓库文件说明。逐个交代 95 个受控文件的作用与内容，
+  含一分钟导航、三条贯穿全仓库的硬约束、外部依赖缺失清单、不入库内容清单、维护约定；
+- `README.md`：项目结构树补上 `experiments/` 与 `paper/`（原树完全没有这两块，也未含
+  `docs/commit_log.md`、`docs/ssh_setup.md`）；文档导航加入 `FILE_MAP.md` 与
+  `commit_log.md`；"上级文档"节标注 5 份外部文件缺失，并说明 README 写 `references.bib`
+  26 条而仓库内实为 17 条。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 全套测试 | **178 passed / 0 failed / 2 xfailed / 7 deselected**（上轮 171；+7 项新锚点） |
+| 新锚点构成 | E6 轴折叠规则 3 项、`planned_points` 按轴累加 1 项、分块等价性 2 项（能量逐位 + 保留位置稳定）、`apply_kv_budget` 选位一致 1 项 |
+| `e6 --plan` 实参核对 | 6 方法 × 3 模型 × 4 长度 ⇒ **120** 点（旧口径虚增 24）；收窄到 3 方法 ⇒ **48** 点；展开/折叠清单与虚增数均正确 |
+| 静态检查 | `py_compile -W error::SyntaxWarning` 全部通过；控制字符 0 处、TAB 0 处 |
+| 逐位等价 | `chunk ∈ {2,7,64,999,8192,100000}` 与整张计算 `torch.equal` 为真 |
+
+### 遗留
+
+- 本机无 CUDA，E5–E8 **仍未产生任何 GPU 数值**（见 §Q）；
+- C11 五份仓库外文档仍缺（本轮补记了原先漏掉的 `M2_pre_launch_checklist.md`）；
+- 更正上一版头部的序号笔误（`38b2da6` 实为第 22 次提交，非第 23 次）。
 
 ---
 
@@ -1328,7 +1430,7 @@ PyPI 索引中已不存在 `2.3.0+cpu`，安装直接失败。改为 `torch>=2.6
 
 ## P. 各提交遗留项汇总（待决策）
 
-### P.1 已在 `5b5ce98` / `511ca1e` / `539ed8c` / `1a4fb06` / `0856e32` / `0a50b35` / `b10ea0e` / `b0c6bab` / `541f7c6` 中解决
+### P.1 已在 `5b5ce98` / `511ca1e` / `539ed8c` / `1a4fb06` / `0856e32` / `0a50b35` / `b10ea0e` / `b0c6bab` / `541f7c6` / `bee3388` 中解决
 
 | 项 | 原性质 | 解决方式 |
 |---|---|---|
@@ -1344,6 +1446,9 @@ PyPI 索引中已不存在 `2.3.0+cpu`，安装直接失败。改为 `torch>=2.6
 | **C10** `test_fast_kv_vs_dense_within_tolerance`（实测 $1.09$ vs 阈值 $0.1$）与 `test_apb_vs_dense_within_tolerance`（$1.99$ vs $0.3$）失败 | 既有独立问题 | `b10ea0e` 逐项定位后**全部修复**。两条根因：（1）**口径不自洽**——压缩在整块（含未来 token）上标定，因果分支却按位置前缀切片，量与量之间本不可比 $\Rightarrow$ 断言改在**非因果**口径下检验（FastKV $0.2397$ < $0.30$、APB $0.6030$ < $0.70$），因果路径以 2 个 xfail 记录；（2）**APB 位置序缺陷**——`torch.topk` 返回 mass 降序索引（实测 `[22,0,19,8,27,33]`），旧码却用 `[:end_in_chunk]` 当位置前缀，修正后因果 $1.9944\to1.6868$。另新增 $B=L_s$ 精确性锚点（偏差 $2.2\times10^{-16}$）。落盘脚本 `experiments/cpu/c10_baseline_diagnosis.py` |
 | **C13** `e5` 用**全局 rank** 当设备索引（`torch.device(f"cuda:{rank}")` ×4：A1/A2/A5 的输入张量与 `worker` 的 `load_model`） | 实现缺陷（多节点必崩） | `541f7c6` 新增 `_env.local_rank_of` / `_env.local_device`，四处统一改走后者，`dist_init` 内部复用同一函数。单节点下 `rank == LOCAL_RANK`，故此前未暴露；多节点下 `cuda:8` 是非法设备序号 |
 | **C14** 两条流水线在**计时窗口内**做集合通信（`barrier_and_sync`），异步版的 device-wide 同步把正在飞的下一块传输也等掉 | 实现缺陷（会让 H4 被误判为未达标） | `541f7c6` 流水线内只用 `device_sync()`（异步版只在 `comp` 段收尾做一次），集合 barrier 交回窗口之前；`no_barrier` fixture 改为会报错的哨兵，并新增 3 项锚点 |
+| **C20** E6 的 `sync/async` 轴对单卡方法**不是自变量** | 网格设计 | `bee3388` 把标注由写死 `False` 改为按 `gpu_required > 1`（是否存在跨设备通信）**推导**，并对这类方法**折叠**该轴：只生成一行、`sync_async = "n/a"`（新增常量 `SYNC_MODE_NA`）。新增 `planned_points()` 按各方法自身的轴累加计划点数，替代会虚增数据点的简单相乘；`print_plan` 与 payload 同步给出展开/折叠清单与虚增数 |
+| **C21** A2 / E6 的"精度–通信量"**两轴不同源** | 方法论 | `bee3388` 在结果行与 payload 显式记录两轴各自来源、`axes_are_same_method=False`、`pareto_frontier_valid=False`，caveat 明确"只能叫预算–精度参考曲线，不能叫帕累托前沿"。同源前沿须待 `CompactKV → GPU attention kernel` |
+| **C22** `_hf.apply_kv_budget` 的 `kf = k.float()` 会**瞬时复制整份 KV cache** | 资源 | `bee3388` 改为沿 $S$ 维分块累加（新增 `_pooled_key_energy`）。动手前先检验原"分块会改变保留位置"的顾虑，结论**不成立**：能量归约沿 $(B,H,d)$ 维、分块沿 $S$ 维，二者正交；`chunk >= 2` 与整张计算逐位相同，保留位置对**任何** chunk（含 1）都逐位一致。已立 2 项逐位锚点 |
 
 用户对 H2 的指令是"拿不准的结论和结果不能写入论文"，已落实为：§6 只声称
 H2 具备**机制级**证据（合成数据 + 混合输出误差），任务级结论明确留待 E6。
@@ -1352,10 +1457,7 @@ H2 具备**机制级**证据（合成数据 + 混合输出误差），任务级�
 
 | 项 | 来源 | 性质 | 阻塞什么 |
 |---|---|---|---|
-| **C20** E6 的 `sync/async` 轴对两个可测量方法（`dense` / `kv_budget_shared`）**不是自变量**：它们不涉及跨设备通信，两行数值必然逐位相同 | `b0c6bab` | 网格设计 | 已加 `sync_mode_applicable=False` 标注，但表里仍会出现两行同值；是否把该轴对这两个方法折叠掉，需用户定 |
-| **C21** A2 / E6 的"精度–通信量"**两轴不同源**：x 轴是 DCC-KV 逐边压缩比，y 轴却是"共享 top-$B$ 缓存裁剪"后的准确率（`_hf.apply_kv_budget`），没有 β 也没有 Value 回归 | `b0c6bab` | 方法论 | 在 `CompactKV → GPU attention kernel` 就绪前，**不能**把这条曲线称作 DCC-KV 的帕累托前沿；`_hf` 模块文档已说明，但结果行的 caveat 没写 |
-| **C22** `_hf.apply_kv_budget` 的 `kf = k.float()` 会**瞬时复制整份 KV cache**（32K 上下文 8B 模型约 4.3 GB → 再 8.6 GB） | `b0c6bab` | 资源 | 未改：任何分块累加都会改变求和顺序、进而可能改变保留位置与准确率，不宜在无 GPU 复核的情况下动；但"最小 40 GB 显存"这一档位依赖它 |
-| **C11** 仓库外配套文档缺失：`../dcc_kv_plan/research_execution_blueprint_v1.md`、`experiment_matrix.yaml` v1.2.0、`references.bib`（README 称 26 条）、`contribution_boundary_section.md` | `7ebff65` | 素材缺失 | 与既有规划的一致性核对。全盘搜索确认仓库内外均不存在这四个文件，**须由用户／外部提供** |
+| **C11** 仓库外配套文档缺失：`../dcc_kv_plan/research_execution_blueprint_v1.md`、`experiment_matrix.yaml` v1.2.0、`references.bib`（README 称 26 条，仓库内实为 17 条）、`contribution_boundary_section.md`、`M2_pre_launch_checklist.md` | `7ebff65` | 素材缺失 | 与既有规划的一致性核对。`bee3388` 复核后判定：blueprint §3/§4 的内容已大体抄入仓库（`docs/reproducibility.md` §6、`docs/release_checklist.md` §4、`src/experiment_metadata.py`），故**不阻塞开发**；但**无法做一致性核对**，且危害已具体显现——H2 的判据在两份下游文档里写法不同（1.10× vs 1.5 pp），两处已加注。用户 2026-09-15 确认其手边亦无这些文件 |
 | **C12** `src/distributed/comm.py` 的 `all_to_all_v`：`recv_sizes` 为必填参数，却被交换出的真实 size 取代，声明与实际不一致时**不报错** | `b10ea0e` | 接口契约缺陷（静默容错） | 掩盖调用方的错误声明——本轮 `all_to_all_v` 测试那组自相矛盾的 `recv_sizes` 即被它掩盖。是否改为「不一致即报错」待定 |
 
 ### P.3 待用户决策
@@ -1379,6 +1481,8 @@ H2 具备**机制级**证据（合成数据 + 混合输出误差），任务级�
   **仍未在 GPU 上跑过**，因此"脚本能跑"不等于"结论成立"
 - E6 主表 → H5（设备数翻倍加速 ≥1.5×）的证据；主表中四个需多卡的方法**当前均被阻断**，
   因此 **E6 当前不能用于支撑 H5**
+- `bee3388` 折叠 E6 的 sync/async 轴后，默认网格的计划点数由 144 变为 120（单卡方法
+  不再生成两行同值数据）。这是**计划口径的更正**，不产生任何新证据；E6 仍未执行
 - 与基线（Ring / FastKV / APB）的任何对比优势
 - **H2 的任务级结论**（准确率 / 生成质量）—— 机制级证据已有（见 `511ca1e`），
   两者不可混同
