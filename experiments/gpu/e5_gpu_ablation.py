@@ -4,7 +4,7 @@
 与论文 §6.4 的对应
 ------------------
     A1  通信集大小   —— 扫描有效边数 |E_s|，拆解 构造开销 : 通信开销 的比例
-    A2  压缩预算     —— 5 档预算下的 精度–通信量 帕累托前沿
+    A2  压缩预算     —— 预算–精度**参考曲线**（不是帕累托前沿：两轴不同源）
     A3  组件拆分     —— full / no_beta / no_value / no_both 的任务指标差
     A5  异步 vs 同步 —— p50 延迟、T_comm/T_comp、实测加速比与理论上界
 
@@ -67,6 +67,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from experiments.common import hypotheses as H        # noqa: E402
 from experiments.common import report as R          # noqa: E402
 from experiments.gpu import _comm, _env, _hf          # noqa: E402
 from src.dcc_kv_ref import CompactKV, build_compact_kv  # noqa: E402
@@ -249,7 +250,13 @@ def llm_caveat(a: Dict[str, Any], ctx: Dict[str, Any]) -> str:
 # =============================================================================
 
 def a2_budget_sweep(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """5 档预算下测通信量与任务指标，绘制帕累托前沿。"""
+    """5 档预算下测通信量与任务指标，绘制「预算–精度参考曲线」。
+
+    注意：本函数的两个轴**不同源** —— 横轴是 DCC-KV 的逐边预算，纵轴是共享
+    top-B 裁剪下的任务准确率。因此画出的只是参考曲线，**不能**称作帕累托
+    前沿（返回值里 `pareto_frontier_valid=False`）。同源前沿需要
+    `CompactKV -> GPU attention kernel` 就绪。
+    """
     dtype = _env.dtypes_for(a["precision"])
     itemsize = dtype.itemsize
     dev = _env.local_device(rank)
@@ -442,7 +449,8 @@ def a5_async_vs_sync(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, An
         print(f"  p50 async = {c.median:8.3f} ms   [{c.ci_95_lower:.3f}, {c.ci_95_upper:.3f}]")
         print(f"  T_comm/T_comp = {tc.median:.3f}/{tp.median:.3f} = {ratio_comm_over_comp:.3f}")
         print(f"  实测加速 = {speedup:.4f}x   理论上界 = {theoretical:.4f}x")
-        print(f"  H4 判据（≥1.05x）：{'达标' if speedup >= 1.05 else '未达标'}")
+        print(f"  H4 判据（≥{H.H4_MIN_P50_SPEEDUP}x）："
+              f"{'达标' if H.h4_pass(speedup) else '未达标'}")
 
     return {
         "experiment": "A5",
@@ -460,7 +468,8 @@ def a5_async_vs_sync(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, An
             "t_comm_ms": tc.median,
             "t_comp_ms": tp.median,
             "t_comm_over_t_comp": ratio_comm_over_comp,
-            "h4_pass": bool(speedup >= 1.05),
+            "h4_pass": H.h4_pass(speedup),
+            "h4_threshold_used": H.H4_MIN_P50_SPEEDUP,
         }],
         "caveat": (
             "计算侧由 make_comp_work 生成的稠密注意力式算子模拟，"

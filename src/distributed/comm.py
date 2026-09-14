@@ -190,12 +190,21 @@ class DistributedComm:
             messages: 准备发给各 rank 的消息列表（长度必须为 world_size）
             send_sizes: 准备发给各 rank 的第 0 维大小（默认从 messages 推断）
             recv_sizes: 准备从各 rank 接收的第 0 维大小（必须预先知道！）
+                该声明必须与对端**实际发送**的量一致；不一致时抛 ValueError，
+                不会静默采用实际值（见下方 Step 1b）。
 
         Returns:
             接收到的消息列表
 
+        Raises:
+            ValueError: messages / send_sizes / recv_sizes 长度或取值不自洽，
+                或 recv_sizes 的声明与对端实际发送量不一致。
+
         注意：recv_sizes 是必需的，因为 DCC-KV 的 Bs,r 是发送方决定的；
         接收方需要预先知道对方会发多少（通过 budget 配置共享）。
+        既然两侧都按同一份 budget 配置推演，声明的 recv_sizes 就应当等于
+        交换出来的真实 size —— 二者不符即说明配置不同源，属于必须暴露的
+        错误，而不是可以由实现代为纠正的细节。
         """
         self._check_init()
 
@@ -223,6 +232,10 @@ class DistributedComm:
             )
 
         if self.mock:
+            # mock 不做真实交换，因此**无法**校验 recv_sizes 的声明与对端实际
+            # 发送量是否一致 —— 这是 mock 模式的已知盲区：声明写错在这里不会
+            # 报错，只在真实 backend 下暴露。凡是要断言声明一致性的测试，
+            # 必须走 mock=False（见 tests/test_smoke.py 的 2 进程 gloo 用例）。
             return [
                 VarLenMessage(
                     payload=torch.zeros(
@@ -249,6 +262,21 @@ class DistributedComm:
             input_split_sizes=[1] * self.world_size,
         )
         actual_recv_sizes = recv_sizes_t.tolist()
+
+        # Step 1b: 声明必须与实际一致 —— 不一致即报错，不得静默采用实际值。
+        #
+        # 静默采用会让「各 rank 的 budget 配置不同源」这类错误一路跑通，并产出
+        # 看起来正常的实验数据；而 DCC-KV 的 B_{s,r} 由发送方决定，接收方声明的
+        # recv_sizes 就是它对全局预算配置的理解。两者不符意味着配置本身不同源，
+        # 此后的任何数值都不可信。
+        declared_recv_sizes = [int(s) for s in recv_sizes]
+        if actual_recv_sizes != declared_recv_sizes:
+            raise ValueError(
+                "all_to_all_v: recv_sizes 声明与实际不符："
+                f"声明 {declared_recv_sizes}，对端实际发送 {actual_recv_sizes}。"
+                "各 rank 必须共享同一份 budget 配置；不一致通常意味着 "
+                "budget/环境未同步，或 sizes 向量的 rank 顺序写反。"
+            )
 
         # Step 2: 拼接 send buffer
         send_buffer = torch.cat([m.payload for m in messages], dim=0)

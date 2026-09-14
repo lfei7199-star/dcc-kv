@@ -294,6 +294,47 @@ def _worker_dist_comm_all_to_all_v(rank, args):
     return f"rank_{rank}_ok"
 
 
+def _worker_dist_comm_recv_sizes_mismatch(rank, args):
+    """mp.spawn 启动的子进程：**故意声明错误的 recv_sizes**，应在交换后被拒。
+
+    修复前（bee3388 之前），实现会静默采用 Step 1 交换出的真实 size，于是
+    「各 rank 的 budget 配置不同源」这种错误一路跑通并产出看似正常的数值。
+    现在要求声明与实际一致，不一致即 ValueError。
+
+    构造：两个 rank **都**声明错 —— 这样两边都会停在 Step 1b，不会有哪个
+    rank 走进 Step 4 的集合通信去等一个已经退出的对端。
+        rank 0：实际收 [2, 3]（rank0 发的 2 个 + rank1 发的 3 个），声明 [2, 2]
+        rank 1：实际收 [3, 2]，声明 [3, 3]
+    """
+    setup_distributed(rank, args["world_size"], backend="gloo")
+    comm = DistributedComm(backend="gloo", mock=False)
+    comm.init(rank=rank, world_size=args["world_size"])
+
+    if rank == 0:
+        my_messages = [
+            VarLenMessage(payload=torch.tensor([10.0, 11.0])),
+            VarLenMessage(payload=torch.tensor([20.0, 21.0, 22.0])),
+        ]
+        my_send_sizes = [2, 3]
+        my_recv_sizes = [2, 2]  # 错：实际会从 rank 1 收到 3 个
+    else:
+        my_messages = [
+            VarLenMessage(payload=torch.tensor([100.0, 101.0, 102.0])),
+            VarLenMessage(payload=torch.tensor([200.0, 201.0])),
+        ]
+        my_send_sizes = [3, 2]
+        my_recv_sizes = [3, 3]  # 错：实际会从 rank 0 收到 2 个
+
+    try:
+        comm.all_to_all_v(
+            my_messages, send_sizes=my_send_sizes, recv_sizes=my_recv_sizes
+        )
+    finally:
+        comm.cleanup()
+        cleanup_distributed()
+    return f"rank_{rank}_should_have_raised"
+
+
 @pytest.mark.distributed
 def test_launch_dist_two_processes_gloo_all_to_all_v():
     """2 进程 gloo backend：变长 all-to-allv 数值正确性（M2 关键测试）。"""
@@ -307,6 +348,26 @@ def test_launch_dist_two_processes_gloo_all_to_all_v():
         backend="gloo",
         master_port="29503",
     )
+
+
+@pytest.mark.distributed
+def test_launch_dist_two_processes_gloo_all_to_all_v_rejects_bad_recv_sizes():
+    """recv_sizes 声明与对端实际不符时必须报错（C12 的回归锚点）。
+
+    修复前该用例会**跑通**（实现静默采用了交换出的真实 size）；修复后子进程
+    抛 ValueError，由 launch_dist 的 error_queue 转成主进程的 RuntimeError。
+    """
+    if os.cpu_count() < 2:
+        pytest.skip("Need at least 2 CPU cores")
+
+    with pytest.raises(RuntimeError, match="recv_sizes"):
+        launch_dist(
+            _worker_dist_comm_recv_sizes_mismatch,
+            nproc_per_node=2,
+            args={"world_size": 2},
+            backend="gloo",
+            master_port="29504",
+        )
 
 
 # ============================================================================

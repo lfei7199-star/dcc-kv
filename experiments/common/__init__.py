@@ -2,6 +2,8 @@
 
 - `synthetic`：合成场景生成、完整注意力参考、误差与分布度量
 - `report`：结果汇总（median/p5/p95/bootstrap CI）、配对检验、落盘
+- `beta_variants`：β 的口径变体与对照
+- `hypotheses`：H1–H5 的阈值与判定（**单一事实源**）
 
 仅依赖 torch + numpy，可在纯 CPU 环境运行。
 """

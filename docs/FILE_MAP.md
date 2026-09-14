@@ -1,7 +1,8 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（94 个受控文件 = 58 `.py` / 10 `.tex` / 14 `.md` / 6 `.sh` / 1 `.bib`），
+> 统计口径：`git ls-tree -r HEAD`（97 个受控文件 = 60 `.py` / 10 `.tex` / 15 `.md` / 6 `.sh` / 1 `.bib`，
+> 另 5 个为 `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
 > 不含编译产物、实验产物与本地素材（见 §9）。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
 
@@ -72,7 +73,7 @@
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
 | `__init__.py` | 17 | 导出 `DistributedComm`、`VarLenMessage`、`launch_dist`、`setup_distributed`、`cleanup_distributed` |
-| `comm.py` | 339 | `DistributedComm`：gloo(CPU) / nccl(GPU) 切换对上层透明的统一接口。`VarLenMessage`：变长消息封装 |
+| `comm.py` | 367 | `DistributedComm`：gloo(CPU) / nccl(GPU) 切换对上层透明的统一接口。`VarLenMessage`：变长消息封装。`all_to_all_v` 的 `recv_sizes` **声明与对端实际发送量不符即抛 `ValueError`**（不静默纠正） |
 | `launch_dist.py` | 280 | 多进程启动器。⚠️ `import datetime` 位于文件末尾（约 L264）但 L100 已使用（待决 C7） |
 | `full_attention_cpu.py` | 195 | 精确注意力的 CPU 参考实现（精度上界） |
 | `dcc_kv_sync_cpu.py` | 210 | DCC-KV 的 CPU **同步**版。只做数值等价性验证，**没有 GPU attention kernel** —— 这是 A3、E6 的关键阻断点 |
@@ -105,9 +106,10 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `__init__.py` | 7 | 声明 `common` 包 |
+| `__init__.py` | 9 | 声明 `common` 包 |
 | `synthetic.py` | 826 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等） |
 | `report.py` | 203 | 结果汇总：`summarize`（median / p5 / p95 / bootstrap CI）、配对检验、`save_json` / `save_csv` |
+| `hypotheses.py` | 255 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设） |
 | `beta_variants.py` | 652 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解） |
 
 ### 3.2 `experiments/cpu/` —— 机制级实验（任意多核机器可复现，无需权重/NCCL）
@@ -138,7 +140,7 @@
 | `_env.py` | 618 | 环境闸门（`probe` / `enforce`，不达标退出码 3）、计时（`benchmark_ms`；窗口内只做 `device_sync()`，集合 barrier 留窗口外）、设备绑定（`local_rank_of` / `local_device`，取 `LOCAL_RANK`）、`CUDA_CONSTRUCTION_DEFECTS` 历史清单、元数据构造 |
 | `_comm.py` | 437 | 变长 All-to-Allv（阻塞 / 异步）、同步与异步流水线（`run_sync_pipeline` / `run_async_pipeline`）、分块 `_split_chunks`（逐 dst 取片，尺寸自洽）、体积口径（`make_uniform_plan`） |
 | `_hf.py` | 436 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时、KV 字节数 |
-| `e5_gpu_ablation.py` | 609 | **A1** 通信集大小、**A2** 压缩预算扫描、**A3** 组件拆分（被阻断，拒绝产假数字）、**A5** 异步 vs 同步 |
+| `e5_gpu_ablation.py` | 641 | **A1** 通信集大小、**A2** 压缩预算扫描、**A3** 组件拆分（被阻断，拒绝产假数字）、**A5** 异步 vs 同步（H4 判据走 `hypotheses.h4_pass`） |
 | `e6_main_table.py` | 441 | 主表与可扩展性。`gpu_count` 记为**方法要求**而非自由轴；sync/async 轴对单卡方法**折叠**（不生成两行相同的数） |
 | `e7_negative_results.py` | 485 | 负结果四条件：短上下文 / 低预算 / 强 retrieval / batch=1 |
 | `e8_low_precision.py` | 335 | 低精度（FP16/BF16）归并算子与失效边界 |
@@ -152,11 +154,12 @@
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
 | `__init__.py` | 2 | 声明测试包 |
-| `test_smoke.py` | 416 | 冒烟测试：核心 API 的形状与数值 sanity |
+| `test_smoke.py` | 477 | 冒烟测试：核心 API 的形状与数值 sanity（含 `recv_sizes` 声明不符必须报错的 2 进程 gloo 锚点） |
 | `test_phase_a.py` | 239 | Phase A（多进程 + 通信原语）验收 |
 | `test_dist_equivalence.py` | 402 | 分布式等价性（含 2 进程 gloo 真实测试，标记 `distributed`） |
 | `test_var_len_msg.py` | 97 | 变长消息协议 |
 | `test_experiment_metadata.py` | 100 | 元数据与结果 schema 的字段契约 |
+| `test_hypotheses.py` | 176 | **H1–H5 阈值表的锚点**：H2 的双条件口径（2026-09-15 裁决）、H1 用严格大于而其余用闭区间、`UNJUDGED` 缺口记录、以及"e5 不得硬编码 H4 阈值"的源码级断言 |
 | `test_gpu_pipeline.py` | 400+ | **纯 CPU 的 GPU 侧口径锚点**：分块尺寸自洽、逐 dst 恰好覆盖一次、两条流水线的 sizes 接线、计时窗口不含集合 barrier、`local_device` 用 LOCAL_RANK、E6 的轴折叠规则、`apply_kv_budget` 分块累加的数值等价性。**不需要 GPU，也不需要进程组** |
 
 `tests/gpu/`（默认跳过）：
@@ -235,9 +238,11 @@
 | `../dcc_kv_plan/contribution_boundary_section.md` | `README.md` | 原创边界声明。其内容已吸收进 `README.md` 的"不主张的内容"节与论文 §6，风险较低 |
 | `../dcc_kv_plan/M2_pre_launch_checklist.md` | `README.md` | M2 启动前检查项（**C11 原先漏记的一份**） |
 
-**当前已因此显现的具体危害**：H2 的判据在两处下游文档里写法不同 ——
-`docs/reproducibility.md` §6 写"质量提升 ≥ 1.5 个百分点"，`docs/release_checklist.md` §4 写
-"prefill 加速 ≥ 1.10×"。二者应是同一假设的两个侧面，但**合并方式无法证实**（两处均已加注说明）。
+**当前已因此显现的具体危害**：H2 的判据一度在两处下游文档里写法不同 ——
+`docs/reproducibility.md` §6 只写了质量侧，`docs/release_checklist.md` §4 写全了两个侧面。
+2026-09-15 按后者（较完整的一版）**定稿为逻辑与**（两条同时满足），两处已对齐，
+阈值的机器可读版本落在 `experiments/common/hypotheses.py`。
+**仍未闭合的一环**：「质量相近」这一前提的判定主体与阈值，仓库内没有定义。
 
 ---
 

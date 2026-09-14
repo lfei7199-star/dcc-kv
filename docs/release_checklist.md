@@ -63,11 +63,12 @@
 ## 4. failure_thresholds 校核（blueprint §3）
 
 - [ ] H2：相对共享压缩的质量提升 ≥ 1.5 pp，**且**在质量相近前提下 prefill
-      加速 ≥ 1.10×？或按 failure_thresholds 收敛 claim
-      > 口径说明：本条的性能侧（≥ 1.10×）与 `reproducibility.md` §6 的质量侧
-      > （≥ 1.5 pp）是同一假设的两个侧面，但**合并方式无法证实** ——
-      > 原件 blueprint v1.1 §3 不在仓库内（见 `commit_log.md` C11），
-      > 投稿前须取回原件核对。
+      加速 ≥ 1.10×；未达则按 failure_thresholds 收敛 claim
+      > 口径说明（2026-09-15 定稿）：质量侧（≥ 1.5 pp）与性能侧（≥ 1.10×）是
+      > 同一假设的两个侧面，**合并方式为逻辑与** —— 两条同时满足才算达标。
+      > 阈值的机器可读版本见 `experiments/common/hypotheses.py`（唯一事实源）。
+      > 仍有一环未闭合：「质量相近」这一**前提**的判定主体与阈值未定义
+      > （原案 blueprint v1.1 §3 不在仓库内，见 `commit_log.md` C11）。
 - [ ] H3：β / V 回归各组件不可缺？或收敛 claim
 - [ ] H4：异步 vs 同步 p50 加速 ≥ 1.05×？或弱化"异步"
 - [ ] H5：扩展性符合分析？或讨论限制
