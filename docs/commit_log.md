@@ -36,7 +36,8 @@
 分支与推送状态：
 
 ```
-* paper/sections-5-8   →  origin/paper/sections-5-8   （12 个提交已推送，同步）
+* paper/sections-5-8   →  origin/paper/sections-5-8   （14 个提交已推送：907d356..cad6c06；
+                                                        本次日志校正为紧随其后的 docs 提交）
   main                 →  origin/main                  （未动）
 ```
 
