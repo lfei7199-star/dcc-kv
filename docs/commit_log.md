@@ -3,9 +3,9 @@
 > 本文件按提交顺序倒序记录 `dcc-kv` 仓库的每一次提交：动机、改动清单、验证证据、遗留项。
 > 与 `docs/git_strategy.md`（规范）互补 —— 那份说「应该怎么提交」，这份说「实际提交了什么、验没验证过」。
 >
-> 生成时间：2026-09-14 23:45 (GMT+8)
-> 当前 HEAD：`b10ea0e`（分支 `paper/sections-5-8`，**已推送至 origin**；
-> 本文件本次补记为紧随其后的 docs 提交，即分支上第 18 次提交）
+> 生成时间：2026-09-15 00:15 (GMT+8)
+> 当前 HEAD：`541f7c6`（分支 `paper/sections-5-8`，连同本次日志提交一并推送；
+> 本文件本次补记为紧随其后的 docs 提交 —— 自 `main`（`8a1d275`）分叉以来的第 23 次提交）
 
 ---
 
@@ -13,6 +13,8 @@
 
 | # | 短哈希 | 日期 | 作者 | 类型 | 文件数 | +行 | −行 |
 |---|---|---|---|---|---|---|---|
+| 19 | `541f7c6` | 2026-09-15 00:12 | Saluneo | fix(gpu) | 5 | 120 | 17 |
+| 18 | `b0c6bab` | 2026-09-14 23:59 | Saluneo | fix(gpu) | 10 | 521 | 99 |
 | 17 | `b10ea0e` | 2026-09-14 23:36 | Saluneo | fix(tests) | 9 | 694 | 121 |
 | 16 | `0a50b35` | 2026-09-14 22:29 | Saluneo | fix(exp) | 6 | 78 | 35 |
 | 15 | `0856e32` | 2026-09-14 21:51 | Saluneo | feat(beta) | 12 | 1058 | 77 |
@@ -30,17 +32,242 @@
 | 3 | `8a1d275` | 2026-09-08 09:15 | Mavis | fix(requirements) | 1 | 6 | 6 |
 | 2 | `fcd9718` | 2026-09-08 07:40 | Mavis | docs | 5 | 463 | 0 |
 | 1 | `7ebff65` | 2026-09-08 06:36 | Mavis | feat | 43 | 5382 | 0 |
-| | | | | **合计** | **142 次文件变更** | **19476** | **502** |
+| | | | | **合计** | **157 次文件变更** | **20117** | **618** |
 
-仓库当前规模：93 个受版本控制文件，其中 57 个 `.py`、10 个 `.tex`。
+仓库当前规模：94 个受版本控制文件，其中 58 个 `.py`、10 个 `.tex`。
 
 分支与推送状态：
 
 ```
-* paper/sections-5-8   →  origin/paper/sections-5-8   （17 个提交已推送：907d356..b10ea0e；
-                                                        本次日志补记为紧随其后的 docs 提交）
+* paper/sections-5-8   →  origin/paper/sections-5-8   （907d356..541f7c6 共 21 个提交，
+                                                        连同本次日志提交一并推送）
   main                 →  origin/main                  （未动）
 ```
+
+---
+
+## 19. `541f7c6` — 补齐 `b0c6bab` 审计遗漏的两处缺陷：多节点设备索引、窗口内集合同步
+
+### 动机
+
+`b0c6bab` 的审计停在「模块内自洽」，没有再往外看一层：**设备索引是从哪里取的**、
+**这条流水线被谁包在计时窗口里**。顺着这两条线复查，又查出两处缺陷，第二处会让
+A5 的核心观测量（同步 vs 异步的加速比）恒等于 1.0。
+
+| 类别 | 位置 | 症状 |
+|---|---|---|
+| 设备索引 | `e5_gpu_ablation.py` ×4 | 用**全局 rank** 当设备序号；多节点下 `cuda:8` 是非法设备 |
+| 计时窗口 | `_comm.run_sync_pipeline` / `run_async_pipeline` | 计时段内含 `dist.barrier()`；异步版的 device-wide 同步把正在飞的下一块也等掉 |
+
+### 改动清单
+
+**一、`e5` 用全局 rank 当设备索引**
+
+四处 `torch.device(f"cuda:{rank}")`：A1/A2/A5 的输入张量，以及 `worker` 里
+`load_model` 的 `device`。`rank` 是**全局** rank，而设备索引只能是本节点内的序号 ——
+第 2 个 8 卡节点上的全局 rank $8..15$ 对应的设备是 `cuda:0..7`。单节点下
+`rank == LOCAL_RANK`，巧合正确；多节点下 `cuda:8` 直接是非法序号。而
+`docs/reproducibility.md` 明确把「8×H100 / 双节点」列为目标环境，`e5` 的
+A1/A2/A5 全部需要多卡。
+
+这与 `b0c6bab` 刚在 `_env.dist_init` 里立下的规矩**自相矛盾**：`dist_init` 已经
+用 `torch.cuda.set_device(LOCAL_RANK)` 绑好了设备，`e5` 转手又按全局 rank 覆盖。
+
+新增 `_env.local_rank_of(rank)` 与 `_env.local_device(rank)`，四处统一改走后者；
+`dist_init` 内部也复用 `local_rank_of`，两处口径合成一处。
+
+**二、两条流水线把集合通信放进了计时窗口**
+
+`run_sync_pipeline` / `run_async_pipeline` 在每个计时段收尾调
+`_env.barrier_and_sync()`（$=$ `device_sync` $+$ `dist.barrier`）。而 `b0c6bab`
+刚在 `_env.benchmark_ms` 里确立的规则是「窗口之内只做 `device_sync()`，集合
+barrier 留给窗口之前」；A5 恰恰是 `benchmark_ms(_async_once)` 把**整条流水线**
+包在窗口里，于是窗口内又混进了 $N$ 次 `dist.barrier()`，样本重新被最慢的 rank 支配。
+
+更严重的是异步路径。它的结构是 `issue(i+1) -> wait(i) -> comp(i)`，`comp(i)` 要与
+**正在飞的** chunk $i+1$ 传输重叠才叫 overlap；而 `barrier_and_sync()` 里的
+`torch.cuda.synchronize()` 是 **device-wide** 的，会把 chunk $i+1$ 的集合通信一并
+等掉 —— 两块彻底串行，实测加速比恒为 $1.0$。A5 的 `h4_pass` 判据是
+`speedup >= 1.05`，于是该缺陷会**稳定地把 H4 判成「未达标」**，而根因是
+测量把要测的量消掉了，不是实现慢。
+
+改为：`p_handle.wait()` 之后不再做任何 device-wide 同步（`wait()` 只等这一笔，
+这正是 overlap 得以发生的前提）；每个 `comp` 段收尾只做 `device_sync()`，把本段
+GPU 工作量计入耗时。同步版同样把 barrier 换成 `device_sync`。两条流水线现在都
+不含任何集合通信，rank 对齐由调用方在窗口开始前完成（`benchmark_ms` 会做）。
+
+文档同时写明：异步路径下 `comp_ms` 会吸收尚未完成的下一块传输，是**上界**，
+同步与异步之间只有 `total_ms` 可比 —— A5 也正是只用 `total_ms`。
+
+**三、测试与文档**
+
+- `no_barrier` fixture 由「打桩成空操作」改为**会报错的哨兵**（该调用本身即被
+  禁止），原有两条流水线用例因此从「掩盖问题」变成对本次修复的**主动校验**。
+- 新增三项锚点：`test_pipelines_use_device_sync_never_collective_barrier`、
+  `test_local_device_uses_local_rank_not_global_rank`、
+  `test_e5_binds_device_through_local_device`（源码级：禁止 `cuda:{rank}` 复发）。
+- `experiments/gpu/README.md`：把「计时窗口内不得出现集合通信」写进计时纪律第 2 条，
+  并写明设备索引一律用 `_env.local_device(rank)`。
+
+### 验证
+
+- **全套测试**：$171$ 通过 / $0$ 失败 / $2$ xfailed / $7$ deselected
+  （本次新增 $3$ 项；`b0c6bab` 时为 $168$）。
+- **2 进程 gloo 实跑**：分块 `rows=[8,8] send=[[4,4],[4,4]]` 自洽；
+  `sync total 3.04 / 3.31 ms`（comm $0.89/1.16$、comp $2.14$），
+  `async total 0.79 / 0.88 ms`。**这是 gloo/CPU 探针，通信路径与 NCCL 不同，
+  不能作为 A5 的任何结论**；且参数与 `b0c6bab` 那次不是同一组，前后数值不可
+  直接比较。
+- **静态检查**：`py_compile`（含 `-W error::SyntaxWarning`）通过；`_comm.py` 已无
+  `barrier_and_sync` 调用（仅存于说明性 docstring）；`e5` 已无 `cuda:{rank}`；
+  控制字符扫描 $0$ 处。
+
+### 遗留
+
+- 本机无 CUDA：仍然**没有产生任何 GPU 数值**，A5/H4 的真实加速比必须等目标机。
+- 未改：A5 的 `comp_work` 仍是模拟算子（非真实模型前向），caveat 已写明；
+  见 P.2 的 C20 / C21 / C22。
+
+---
+
+## 18. `b0c6bab` — GPU 侧实验代码审计：修复六类缺陷，补齐 A5 流水线的口径测试
+
+### 动机
+
+用户问"GPU 侧的实验代码完成了吗，再检查一遍是否合理完善"。这次没有只读代码，
+而是**把每条真实路径用 gloo/CPU 复现了一遍**（`mp.spawn` 2 进程、gloo 后端），
+于是查出六类缺陷，其中**前两类是硬阻断** —— 按文档写的方式启动，在真机上
+产不出任何结果：
+
+| 类别 | 位置 | 症状 |
+|---|---|---|
+| 入口脚本 | `experiments/run_gpu.sh` | `bash experiments/run_gpu.sh e8` 直接以 `unrecognized arguments:` 失败 |
+| A5 流水线 | `_comm._split_chunks` | `run_sync_pipeline` 抛 AssertionError、`run_async_pipeline` 抛 `Split sizes doesn't match total dim 0 size` |
+| 精度轴 | `_hf.score_choices` | 选项之间 cache 串味 + RoPE 位置错位（E6/A2/E7 的 y 轴） |
+| 计时口径 | `_env.benchmark_ms` | 每个样本都含一次 `dist.barrier()` |
+| 多节点 | `_env.maybe_spawn` / `dist_init` | 用 LOCAL_RANK 当全局 rank |
+| 构造链路 | `src/dcc_kv_ref/key_selection.py:49` | `budget >= 块长` 分支返回 CPU 索引 |
+
+### 改动清单
+
+**一、入口脚本（`run_gpu.sh`）**
+
+`"${PASSTHRU[@]:-}"` 在数组为空时展开成一个**空字符串**（bash 5.3 实测
+`argc=1`），于是所有"不带透传参数"的调用都把 `""` 递给了 argparse。
+实测复现：
+
+```
+e8_low_precision.py: error: unrecognized arguments:
+```
+
+已把 9 处一律改为 `"${PASSTHRU[@]}"`（bash ≥4.4 下空数组安全展开为 0 个参数），
+并在定义处写明为什么不能用 `:-` 形式。
+
+**二、A5 流水线分块（`_comm._split_chunks`）**
+
+payload 的布局是"按 dst 顺序拼接"，旧实现按**连续行**切段却仍声明
+`[块行数] * world`：`world ≥ 2` 时 `sum(send_sizes)` 恰为块行数的 `world` 倍，
+必然触发 `all_to_all_v` 的自洽检查；即便绕过，块的起始行也落在某个 dst
+片段的内部，行与目的端的对应仍是错的。
+
+2 进程 gloo 实测（修复前）：
+
+```
+[rank0] chunk0: rows=4 send_sizes=[4, 4] sum=8 自洽=False
+[rank*] run_sync_pipeline  AssertionError
+[rank*] run_async_pipeline RuntimeError: Split sizes doesn't match total dim 0 size
+```
+
+改为按 dst 逐段取片再拼接，并**返回每块自己的 send/recv sizes**；
+变长预算下退化为单块（宁可不分块，也不产出错误切分）；非阻塞版补上与阻塞版
+一致的自洽检查（原先缺失，导致错误只退化成 `all_to_all_send` 的内部报错）。
+
+**三、E6/E7 精度轴（`_hf.score_choices`）**
+
+1. **cache 串味**：所有选项共用同一个 `DynamicCache`，而它在前向中**就地追加**
+   ⇒ 第 2 个选项看到的是"前缀 + 第 1 个选项的 continuation"。改为每个选项
+   `copy.deepcopy` 一份裁剪后的 cache（前缀仍只算一次 —— prefill 是 $O(S^2)$，
+   不能按选项重算）。
+2. **RoPE 位置错位**：裁剪后 cache 长度为 $B<S$，`position_ids=None` 会让
+   continuation 的绝对位置被算成 $B..B+T-1$ 而不是 $S..S+T-1$。改为显式传
+   `arange(S, S+T)`。
+
+两处都直接落在"精度–通信量"曲线的纵轴上。
+
+**四、计时窗口（`_env.benchmark_ms`）**
+
+窗口收尾原用 `barrier_and_sync()`，把一次 `dist.barrier()` 算进了**每个**样本，
+且样本值被最慢的 rank 支配 ⇒ `T_comm` 与 `T_comp` 被同等抬高，二者的比值与
+overlap 归因随之失真。新增 `device_sync()`（只做 `torch.cuda.synchronize()`），
+窗口内改用它；rank 对齐交由下一轮迭代**开始前**的 barrier。
+
+**五、多节点 rank（`_env.maybe_spawn` / `dist_init`）**
+
+`maybe_spawn` 原用 `LOCAL_RANK` 当全局 rank：多节点时每个节点都把"本节点
+rank 0"当成全局 0 —— `init_process_group` 的 rank 分配是错的，而且
+`rank == 0` 同时控制"打印"与"落盘"，各节点会并发写同一个结果路径。
+改用 `RANK`；设备绑定由 `dist_init(..., local_rank=None)` 内部从 `LOCAL_RANK` 取。
+
+**六、构造链路的 device 泄漏（`src/dcc_kv_ref/key_selection.py:49`）**
+
+`budget >= L_s` 的短路分支返回 `torch.arange(L_s)`（CPU 索引）。这是
+`_env.CUDA_CONSTRUCTION_DEFECTS` 里第 3 条那类缺陷的最后一处，而旧探测固定用
+`budget=8 < L=64`，**恰好绕开了这个分支**。已补 `device=keys.device`；
+`probe_gpu_construction` 现在两条分支都探，并逐张量校验是否落在目标设备上。
+
+**七、随之更正的三处口径与两处文档漂移**
+
+- `_comm.make_comp_work`：把紧凑块的 **β 列加回 logits**（旧实现只取
+  `recv[:, :d_h]` 与 `recv[:, d_h+1:]`，把 β 直接丢掉 —— 那测的不是 DCC-KV 的
+  算子）；查询矩阵提到闭包外缓存（旧实现每次调用都 `torch.randn`，分配开销
+  落在计时区间内，会系统性抬高 `T_comp`）。
+- **撤回一条过期结论**：`e6_main_table.py` 与 `experiments/README.md` 仍把
+  "论文 §6.4 写 5 上下文长度 $=144$、算不出来"当作**当前状态**复述，而
+  `72af7db`（提交标题即"修正 §6.4 的算术错误"）早已改成 4 档，
+  $3\times4\times2\times2\times3=144$ 自洽。现改为按实参现算数据点数、
+  把这段留作历史；另加一条提示：本脚本方法数默认 6，与论文"3 基线"的 144
+  **数值巧合相等但含义不同**，不可当作同一个 144。
+- `_env.CUDA_CONSTRUCTION_DEFECTS` 的三条 device 缺陷均已在 `5b5ce98` 修复，
+  清单改为**历史**并逐条标注 `status`；`e5` 的 docstring / `A3_MISSING_PREREQUISITES`
+  / `--build-location` 帮助、`e6` 的 `dcc_kv` blocker、两个 README 的"被阻断"
+  表述同步更正 —— 统一口径为"**源码侧已修，是否真可用须由目标机上的
+  `probe_gpu_construction()` 实测**"，本机无 CUDA，不得把静态审计写成已实测。
+- `e6` 的 `apb` blocker 里"APB 编号待二次确认"已关闭（编号有效，见 C8）。
+
+**八、`e6_main_table.py` 的清理**
+
+- `r[chr(97)+chr(99)+chr(99)+chr(117)+chr(114)+chr(97)+chr(99)+chr(121)]`
+  （把 `r['accuracy']` 拆成 `chr()` 拼接，应是转义事故的残留）改回正常写法。
+- 删掉未使用的 `import json` 与从未被读取的 `--allow-cpu-plan-only`。
+- 新增 `sync_mode_applicable` 字段并置 False：`dense` 与 `kv_budget_shared`
+  是单卡测量，sync/async 两行数值必然逐位相同，不加标注会被读成"异步没有收益"。
+
+**九、新增 `tests/test_gpu_pipeline.py`（111 项，纯 CPU）**
+
+分块口径（尺寸自洽、逐 dst 恰好覆盖一次、变长退化、越界报错）、两条流水线的
+接线（用替身集合通信校验 sizes）、计时窗口不含集合 barrier、模拟计算确实用了 β。
+全部不需要 GPU，也不需要进程组，因此能在本机常驻回归。
+
+### 验证
+
+- **全套测试**：$168$ 通过 / $0$ 失败 / $2$ xfailed / $7$ deselected
+  （本轮新增前为 $57$ 通过）。
+- **2 进程 gloo 复现**：修复前两条流水线分别为 `AssertionError` 与
+  `Split sizes doesn't match total dim 0 size`；修复后
+  `sync total 5.36ms (comm 1.50 / comp 3.85)`、`async total 2.21ms`，
+  分块 `rows=4 send=[2,2] recv=[2,2]` 全部自洽、逐 dst 覆盖 $8/8$。
+- **入口脚本**：`run_gpu.sh e8` 现在能走到环境闸门并以退出码 $3$ 结束
+  （本机无 CUDA）；`e5 --print-env`、`e6 --plan`、`e7 --plan` 均可运行。
+- **无回归**：`e0` / `e1`（$11/11$ PASS）重跑正常。
+- **静态检查**：`py_compile`（含 `-W error::SyntaxWarning`）与 `bash -n` 全部通过；
+  变更文件的控制字符扫描 $0$ 处。
+
+### 遗留
+
+- 本机无 CUDA：**本轮只修实现与口径，没有产生任何 GPU 数值**；E5–E8 的
+  任务级与系统级结论仍全部未产生。
+- 已定位但**未改**（需用户定夺）：见 P.2 的 C20 / C21 / C22。
+- 本轮的收尾复查又查出两处（已由 `541f7c6` 修复），见 §19。
 
 ---
 
@@ -1101,7 +1328,7 @@ PyPI 索引中已不存在 `2.3.0+cpu`，安装直接失败。改为 `torch>=2.6
 
 ## P. 各提交遗留项汇总（待决策）
 
-### P.1 已在 `5b5ce98` / `511ca1e` / `539ed8c` / `1a4fb06` / `0856e32` / `0a50b35` / `b10ea0e` 中解决
+### P.1 已在 `5b5ce98` / `511ca1e` / `539ed8c` / `1a4fb06` / `0856e32` / `0a50b35` / `b10ea0e` / `b0c6bab` / `541f7c6` 中解决
 
 | 项 | 原性质 | 解决方式 |
 |---|---|---|
@@ -1115,6 +1342,8 @@ PyPI 索引中已不存在 `2.3.0+cpu`，安装直接失败。改为 `torch>=2.6
 | **C7** `import datetime` 置于文件末尾 | 原判「潜在运行时错误」 | `0a50b35` 移到顶部 import 块。**实测更正**：模块级 import 在 import 期即执行，且 `main()` 不调用 `setup_distributed`，故原状并非运行时错误，属位置不合规 |
 | **C9** β 的稀疏塌缩 | 设计层面开放问题 | `1a4fb06`（E10）判定根因**不在秩**而在 β 离散分量的容量代价；`539ed8c` 采纳源论文 Appendix C.2 的箱约束 $[-3,3]$ 为默认，clamp 率 $0.054\to0$；`0856e32`（E11）把 $\lambda_\beta$ 在全网格上细化扫描后定为 $3\times10^{-2}$。**本项及其派生项 D4 均已关闭** |
 | **C10** `test_fast_kv_vs_dense_within_tolerance`（实测 $1.09$ vs 阈值 $0.1$）与 `test_apb_vs_dense_within_tolerance`（$1.99$ vs $0.3$）失败 | 既有独立问题 | `b10ea0e` 逐项定位后**全部修复**。两条根因：（1）**口径不自洽**——压缩在整块（含未来 token）上标定，因果分支却按位置前缀切片，量与量之间本不可比 $\Rightarrow$ 断言改在**非因果**口径下检验（FastKV $0.2397$ < $0.30$、APB $0.6030$ < $0.70$），因果路径以 2 个 xfail 记录；（2）**APB 位置序缺陷**——`torch.topk` 返回 mass 降序索引（实测 `[22,0,19,8,27,33]`），旧码却用 `[:end_in_chunk]` 当位置前缀，修正后因果 $1.9944\to1.6868$。另新增 $B=L_s$ 精确性锚点（偏差 $2.2\times10^{-16}$）。落盘脚本 `experiments/cpu/c10_baseline_diagnosis.py` |
+| **C13** `e5` 用**全局 rank** 当设备索引（`torch.device(f"cuda:{rank}")` ×4：A1/A2/A5 的输入张量与 `worker` 的 `load_model`） | 实现缺陷（多节点必崩） | `541f7c6` 新增 `_env.local_rank_of` / `_env.local_device`，四处统一改走后者，`dist_init` 内部复用同一函数。单节点下 `rank == LOCAL_RANK`，故此前未暴露；多节点下 `cuda:8` 是非法设备序号 |
+| **C14** 两条流水线在**计时窗口内**做集合通信（`barrier_and_sync`），异步版的 device-wide 同步把正在飞的下一块传输也等掉 | 实现缺陷（会让 H4 被误判为未达标） | `541f7c6` 流水线内只用 `device_sync()`（异步版只在 `comp` 段收尾做一次），集合 barrier 交回窗口之前；`no_barrier` fixture 改为会报错的哨兵，并新增 3 项锚点 |
 
 用户对 H2 的指令是"拿不准的结论和结果不能写入论文"，已落实为：§6 只声称
 H2 具备**机制级**证据（合成数据 + 混合输出误差），任务级结论明确留待 E6。
@@ -1123,6 +1352,9 @@ H2 具备**机制级**证据（合成数据 + 混合输出误差），任务级�
 
 | 项 | 来源 | 性质 | 阻塞什么 |
 |---|---|---|---|
+| **C20** E6 的 `sync/async` 轴对两个可测量方法（`dense` / `kv_budget_shared`）**不是自变量**：它们不涉及跨设备通信，两行数值必然逐位相同 | `b0c6bab` | 网格设计 | 已加 `sync_mode_applicable=False` 标注，但表里仍会出现两行同值；是否把该轴对这两个方法折叠掉，需用户定 |
+| **C21** A2 / E6 的"精度–通信量"**两轴不同源**：x 轴是 DCC-KV 逐边压缩比，y 轴却是"共享 top-$B$ 缓存裁剪"后的准确率（`_hf.apply_kv_budget`），没有 β 也没有 Value 回归 | `b0c6bab` | 方法论 | 在 `CompactKV → GPU attention kernel` 就绪前，**不能**把这条曲线称作 DCC-KV 的帕累托前沿；`_hf` 模块文档已说明，但结果行的 caveat 没写 |
+| **C22** `_hf.apply_kv_budget` 的 `kf = k.float()` 会**瞬时复制整份 KV cache**（32K 上下文 8B 模型约 4.3 GB → 再 8.6 GB） | `b0c6bab` | 资源 | 未改：任何分块累加都会改变求和顺序、进而可能改变保留位置与准确率，不宜在无 GPU 复核的情况下动；但"最小 40 GB 显存"这一档位依赖它 |
 | **C11** 仓库外配套文档缺失：`../dcc_kv_plan/research_execution_blueprint_v1.md`、`experiment_matrix.yaml` v1.2.0、`references.bib`（README 称 26 条）、`contribution_boundary_section.md` | `7ebff65` | 素材缺失 | 与既有规划的一致性核对。全盘搜索确认仓库内外均不存在这四个文件，**须由用户／外部提供** |
 | **C12** `src/distributed/comm.py` 的 `all_to_all_v`：`recv_sizes` 为必填参数，却被交换出的真实 size 取代，声明与实际不一致时**不报错** | `b10ea0e` | 接口契约缺陷（静默容错） | 掩盖调用方的错误声明——本轮 `all_to_all_v` 测试那组自相矛盾的 `recv_sizes` 即被它掩盖。是否改为「不一致即报错」待定 |
 
@@ -1142,7 +1374,9 @@ H2 具备**机制级**证据（合成数据 + 混合输出误差），任务级�
 
 以下内容截至本次统计**仍无实测数据**，任何文档中都不得声称已有结论：
 
-- E5–E8 的 GPU 实测结果（含 A1–A5 的 GPU 版本）—— 本机无 CUDA，仅有执行框架
+- E5–E8 的 GPU 实测结果（含 A1–A5 的 GPU 版本）—— 本机无 CUDA，仅有执行框架。
+  `b0c6bab` 与 `541f7c6` 修掉了这些脚本里八类会阻断或污染结果的缺陷，但
+  **仍未在 GPU 上跑过**，因此"脚本能跑"不等于"结论成立"
 - E6 主表 → H5（设备数翻倍加速 ≥1.5×）的证据；主表中四个需多卡的方法**当前均被阻断**，
   因此 **E6 当前不能用于支撑 H5**
 - 与基线（Ring / FastKV / APB）的任何对比优势
