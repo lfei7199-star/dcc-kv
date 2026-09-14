@@ -23,6 +23,7 @@ from .key_selection import (
     select_topk_keys,
 )
 from .calibration import (
+    DEFAULT_BETA_BOUND,
     nonneg_least_squares,
     fit_logit_bias,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "rms_per_token_score",
     "select_topk_keys",
     # calibration
+    "DEFAULT_BETA_BOUND",
     "nonneg_least_squares",
     "fit_logit_bias",
     # value regression

@@ -17,7 +17,7 @@ import torch
 
 from .representative_query import select_representative_queries
 from .key_selection import select_topk_keys
-from .calibration import fit_logit_bias
+from .calibration import DEFAULT_BETA_BOUND, fit_logit_bias
 from .value_regression import fit_compact_value
 
 
@@ -57,6 +57,7 @@ def build_compact_kv(
     lambda_beta: float = 1e-3,
     lambda_value: float = 1e-3,
     seed: int = 42,
+    beta_bound: Optional[float] = DEFAULT_BETA_BOUND,
 ) -> CompactKV:
     """DCC-KV 顶层 API：构建目的端条件化的紧凑 KV。
 
@@ -76,6 +77,8 @@ def build_compact_kv(
         lambda_beta: λ_β
         lambda_value: λ_v
         seed: 随机种子
+        beta_bound: β 的箱约束半宽（默认 3，源论文 Appendix C.2 对 RMS
+            选键分支的配置）。None 表示不约束，退回 β ≥ log(1e-6) 的旧行为。
 
     Returns:
         CompactKV
@@ -114,6 +117,7 @@ def build_compact_kv(
     beta = fit_logit_bias(
         repr_queries, compact_keys, block_mass,
         lambda_reg=lambda_beta, mass_shift=mass_shift,
+        beta_bound=beta_bound,
     )
 
     # Step 4: V 回归
