@@ -311,18 +311,35 @@ def dist_init(
     `rank` 是**全局** rank，`local_rank` 是本节点内的设备序号；多节点时二者
     不同。设备绑定必须用 local_rank，进程组身份必须用全局 rank —— 混用会让
     每个节点都把"本节点 rank 0"当成全局 0，进程组直接建错。
+
+    设备索引一律走 `local_rank_of`（`local_device` 是它的张量侧封装），
+    调用方不要自己拼 `cuda:{rank}`。
     """
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ["MASTER_PORT"] = str(port)
     if backend == "nccl":
-        lr = local_rank
-        if lr is None:
-            lr = int(os.environ.get("LOCAL_RANK", rank))
+        lr = local_rank if local_rank is not None else local_rank_of(rank)
         torch.cuda.set_device(lr)
     if not torch.distributed.is_initialized():
         torch.distributed.init_process_group(
             backend=backend, rank=rank, world_size=world_size
         )
+
+
+def local_rank_of(rank: int) -> int:
+    """本进程在本节点内的设备序号。
+
+    多节点下全局 rank **不等于**设备索引：第 2 个 8 卡节点上的全局 rank
+    8..15 对应的设备是 cuda:0..7，而不是 cuda:8..15。凡是要取设备的地方
+    都必须经过这里，不要用全局 rank 直接拼 `cuda:{rank}` —— 那在单节点上
+    巧合正确，在多节点上直接是非法设备序号。
+    """
+    return int(os.environ.get("LOCAL_RANK", rank))
+
+
+def local_device(rank: int) -> torch.device:
+    """本进程应使用的 CUDA 设备（索引取自 `local_rank_of`）。"""
+    return torch.device(f"cuda:{local_rank_of(rank)}")
 
 
 def dist_destroy() -> None:
@@ -586,6 +603,8 @@ __all__ = [
     "dist_init",
     "dist_destroy",
     "maybe_spawn",
+    "local_rank_of",
+    "local_device",
     "barrier_and_sync",
     "device_sync",
     "benchmark_ms",

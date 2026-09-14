@@ -17,10 +17,22 @@
 只靠"跑一下看看"是发现不了的。
 
 本文件把口径本身固定下来：分块必须**尺寸自洽**且**逐 dst 恰好覆盖一次**。
+
+同一次收尾审计还修了两处相关缺陷，一并在此立锚：
+
+3. `run_sync_pipeline` / `run_async_pipeline` 曾在每个计时段收尾调
+   `barrier_and_sync()`（含 `dist.barrier()`）；异步版更在 `handle.wait()`
+   之后做了一次 **device-wide** 同步，把正在飞的下一块集合通信也等掉
+   ⇒ overlap 恒为 0、A5 的实测加速比恒为 1.0。现两条流水线内只用
+   `device_sync()`，集合 barrier 一律留给窗口开始之前。
+4. `e5` 曾用 `torch.device(f"cuda:{rank}")` 绑定设备 —— 那是"拿全局 rank
+   当设备序号"：单节点巧合正确，多节点直接是非法序号。现统一走
+   `_env.local_device(rank)`（其索引取自 `LOCAL_RANK`）。
 """
 from __future__ import annotations
 
 import itertools
+import pathlib
 from typing import List, Tuple
 
 import pytest
@@ -53,7 +65,15 @@ def _stub_all_to_all_async(send: torch.Tensor, send_sizes, recv_sizes):
 
 @pytest.fixture
 def no_barrier(monkeypatch):
-    monkeypatch.setattr(_env, "barrier_and_sync", lambda: None)
+    """端口守卫：流水线内部一旦出现集合 barrier 就让用例直接失败。
+
+    旧实现在每个计时段收尾调 `barrier_and_sync()`；这里不做"打桩掩盖"，
+    而是把它换成会报错的哨兵 —— 该调用本身就是要禁止的行为。
+    """
+    def _forbid() -> None:
+        raise AssertionError("流水线内部不得调用 barrier_and_sync（它含 dist.barrier）")
+
+    monkeypatch.setattr(_env, "barrier_and_sync", _forbid)
 
 
 # ============================================================================
@@ -229,3 +249,46 @@ def test_comp_work_applies_beta_and_is_repeatable() -> None:
     recv_beta_zero = recv.clone()
     recv_beta_zero[:, d_h] = 0.0
     assert not torch.allclose(work(recv), work(recv_beta_zero)), "β 列未参与计算"
+
+
+def test_pipelines_use_device_sync_never_collective_barrier(monkeypatch) -> None:
+    """收尾同步必须是 `device_sync()`（只等本设备），不能是 `barrier_and_sync()`。
+
+    这是 A5 能不能测出 overlap 的前提：异步流水在 `handle.wait()` 之后若再来
+    一次 device-wide 同步，第 i 块的 comp 就与第 i+1 块的 comm 串行了。
+    """
+    world, B = 2, 8
+    payload = torch.randn(world * B, F)
+    monkeypatch.setattr(_comm, "all_to_all_v", _stub_all_to_all)
+    monkeypatch.setattr(_comm, "all_to_all_v_async", _stub_all_to_all_async)
+    monkeypatch.setattr(_env, "barrier_and_sync",
+                        lambda: pytest.fail("流水线内出现集合 barrier"))
+
+    n = {"syncs": 0}
+    monkeypatch.setattr(_env, "device_sync",
+                        lambda: n.__setitem__("syncs", n["syncs"] + 1))
+
+    _comm.run_sync_pipeline(payload, [B] * world, [B] * world,
+                            comp_work=lambda r: r.sum(dim=0), n_chunks=2)
+    _comm.run_async_pipeline(payload, [B] * world, [B] * world,
+                             comp_work=lambda r: r.sum(dim=0), n_chunks=2)
+    assert n["syncs"] >= 4, "两条流水线都应在每个计时段收尾做设备同步"
+
+
+def test_local_device_uses_local_rank_not_global_rank(monkeypatch) -> None:
+    """多节点下全局 rank 不是设备序号：rank 8 在第 2 个 8 卡节点上是 cuda:0。"""
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    assert _env.local_rank_of(8) == 3
+    assert str(_env.local_device(8)) == "cuda:3"
+
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    assert _env.local_rank_of(8) == 8
+    assert str(_env.local_device(8)) == "cuda:8"
+
+
+def test_e5_binds_device_through_local_device() -> None:
+    """源码级锚点：e5 里不得再出现 `torch.device(f"cuda:{rank}")`。"""
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "experiments" / "gpu" / "e5_gpu_ablation.py").read_text(encoding="utf-8")
+    assert 'torch.device(f"cuda:{rank}")' not in src
+    assert "_env.local_device(rank)" in src

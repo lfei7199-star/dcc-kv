@@ -157,7 +157,7 @@ def a1_comm_set_size(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, An
     """扫描每个源设备持有的块数 × 目的端数（即 |E_s|），拆分构造/通信开销。"""
     dtype = _env.dtypes_for(a["precision"])
     itemsize = dtype.itemsize
-    dev = torch.device(f"cuda:{rank}")
+    dev = _env.local_device(rank)
     loc = ctx["build_location"]["effective"]
 
     max_blocks = max(a["blocks_per_rank"])
@@ -252,7 +252,7 @@ def a2_budget_sweep(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, Any
     """5 档预算下测通信量与任务指标，绘制帕累托前沿。"""
     dtype = _env.dtypes_for(a["precision"])
     itemsize = dtype.itemsize
-    dev = torch.device(f"cuda:{rank}")
+    dev = _env.local_device(rank)
 
     lm = None
     samples: List[_hf.EvalSample] = []
@@ -372,7 +372,7 @@ def a5_async_vs_sync(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, An
     """固定其他条件，比较异步流水与同步实现的 p50 延迟。"""
     dtype = _env.dtypes_for(a["precision"])
     itemsize = dtype.itemsize
-    dev = torch.device(f"cuda:{rank}")
+    dev = _env.local_device(rank)
     F = a["d_h"] + 1 + a["d_v"]
     B = a["budget"]
 
@@ -468,7 +468,7 @@ def worker(rank: int, world: int, a: Dict[str, Any]) -> None:
         ctx: Dict[str, Any] = {
             "build_location": _resolve_build_location(a, rank),
             "load_lm": lambda: _hf.load_model(a["model"], a["precision"],
-                                              device=f"cuda:{rank}",
+                                              device=str(_env.local_device(rank)),
                                               attn_implementation=a["attn_impl"]),
         }
         if rank == 0:

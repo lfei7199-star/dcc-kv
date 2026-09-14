@@ -224,6 +224,11 @@ def run_sync_pipeline(
 
     分块只是为了与异步版分块口径一致（同样的消息切分），
     但每块"发完即等"，因此不存在重叠。
+
+    同步纪律：**函数内不含任何集合通信**。rank 对齐由调用方在计时窗口开始前
+    完成（`_env.benchmark_ms` 会做）。旧实现在每个计时段收尾调
+    `barrier_and_sync()`，它含一次 `dist.barrier()`，于是窗口里混进了集合
+    同步开销、样本还被最慢的 rank 支配；现改为只做设备同步。
     """
     import time
     chunks = _split_chunks(payload, send_sizes, recv_sizes, n_chunks)
@@ -235,12 +240,12 @@ def run_sync_pipeline(
     for send_c, chunk_send, chunk_recv in chunks:
         c0 = time.perf_counter()
         recv_c = all_to_all_v(send_c, chunk_send, chunk_recv)
-        _env.barrier_and_sync()
+        _env.device_sync()   # 阻塞版已在主机侧同步；这里只保证 NCCL 独立流的收尾
         comm_ms += (time.perf_counter() - c0) * 1000.0
 
         c1 = time.perf_counter()
         comp_work(recv_c)
-        _env.barrier_and_sync()
+        _env.device_sync()   # 计算是异步下发的，要等本设备清空才计得准
         comp_ms += (time.perf_counter() - c1) * 1000.0
 
     total = (time.perf_counter() - t0) * 1000.0
@@ -268,6 +273,18 @@ def run_async_pipeline(
     total 由 sum(comp) 决定，异步收益趋近 comm 的总量；反之收益趋近
     min(sum(comm), sum(comp))。因此本函数同时返回 comm_ms 与 comp_ms，
     使调用方能按式~(speedup-bound) 判断实测加速比的归因是否合理。
+
+    同步纪律（违反则 overlap 恒为 0）
+    ----------------------------------
+    函数内**不得有任何集合通信**。ranks 须在计时窗口开始前对齐
+    （`_env.benchmark_ms` 会做）。尤其是 `p_handle.wait()` 之后不能再调
+    `barrier_and_sync()`：它的 `torch.cuda.synchronize()` 是 device-wide 的，
+    会把刚发起、**正在飞的下一块**集合通信一并等掉 —— 第 i 块的 comp 与
+    第 i+1 块的 comm 于是彻底串行，实测加速比恒为 1.0。这不是"跑得不好"，
+    而是把要测的量本身消掉了。
+    `comp` 段末尾的 `device_sync()` 只用来把本段 GPU 工作量计入耗时：它不
+    破坏已经发生的 overlap，但确实会吸收尚未完成的下一块传输，因此异步
+    路径下 `comp_ms` 是**上界**；同步与异步之间只有 `total_ms` 可比。
     """
     import time
     chunks = _split_chunks(payload, send_sizes, recv_sizes, n_chunks)
@@ -284,13 +301,12 @@ def run_async_pipeline(
 
         if pending is not None:
             p_recv, p_handle = pending
-            p_handle.wait()
-            _env.barrier_and_sync()
+            p_handle.wait()          # 只等这一笔集合通信，不做 device-wide 同步
             comm_ms += (time.perf_counter() - c0) * 1000.0  # 等待 + 发起 合并计入通信
 
             c1 = time.perf_counter()
-            comp_work(p_recv)
-            _env.barrier_and_sync()
+            comp_work(p_recv)        # 与第 i+1 块的通信重叠 —— A5 要测的就是这一段
+            _env.device_sync()
             comp_ms += (time.perf_counter() - c1) * 1000.0
         else:
             comm_ms += comm_issue
@@ -301,11 +317,10 @@ def run_async_pipeline(
         p_recv, p_handle = pending
         c0 = time.perf_counter()
         p_handle.wait()
-        _env.barrier_and_sync()
         comm_ms += (time.perf_counter() - c0) * 1000.0
         c1 = time.perf_counter()
         comp_work(p_recv)
-        _env.barrier_and_sync()
+        _env.device_sync()
         comp_ms += (time.perf_counter() - c1) * 1000.0
 
     total = (time.perf_counter() - t0) * 1000.0

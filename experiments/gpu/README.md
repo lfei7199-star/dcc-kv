@@ -46,6 +46,9 @@ bash experiments/run_gpu.sh all --nproc 4
 | `_comm.py` | 变长 All-to-Allv、同步/异步流水、体积口径 | 模型相关的东西 |
 | `_hf.py` | 模型加载、KV 预算、打分、prefill 计时 | 多卡通信 |
 
+设备索引一律用 `_env.local_device(rank)`，不要写 `torch.device(f"cuda:{rank}")`：
+多节点下全局 rank 不是设备序号（rank 8 在第 2 个 8 卡节点上是 `cuda:0`）。
+
 ## 三条口径纪律
 
 **1. 通信量口径固定。** 一条紧凑边 = `K[B,d_h] + β[B] + V[B,d_v]`，
@@ -53,7 +56,10 @@ bash experiments/run_gpu.sh all --nproc 4
 
 **2. 计时拆成四项，不许混。** `T_build` / `T_comm` / `T_comp` / `T_total`。
 异步的收益只来自 `T_comm` 与 `T_comp` 的重叠；把构造塞进任何一项都会
-让归因失真。
+让归因失真。**计时窗口内不得出现集合通信**：`run_sync_pipeline` /
+`run_async_pipeline` 内部只用 `device_sync()`，rank 对齐留给窗口开始之前
+的 barrier。异步版若在 `handle.wait()` 之后再做一次 device-wide 同步，
+会把正在飞的下一块传输也等掉 —— overlap 恒为 0、A5 的加速比恒为 1.0。
 
 **3. 延迟必须报分布。** 所有计时走 `_env.benchmark_ms`，返回**逐次**样本，
 由 `experiments/common/report.py` 汇总成 median / p5 / p95 / bootstrap CI。
