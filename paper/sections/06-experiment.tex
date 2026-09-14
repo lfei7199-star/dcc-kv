@@ -76,6 +76,13 @@ $\lambda_\beta=3\times10^{-2}$，二者均来自源论文所选项的继承或�
 结果聚合由 \texttt{RunResult.from\_values} 完成，统一产出 median、p5/p95 与
 bootstrap 95\% CI。该实现意味着所有报告数字必须来自多次 run 的分布，而非单次运行值。
 
+一处口径必须写明，否则表格不可复现：\S\ref{sec:exp-e10} 与 \S\ref{sec:exp-e11} 中
+跨格汇总的「中位数」一律是\textbf{上中位数}——把 $n$ 个逐格值升序排列后取第
+$\lfloor n/2\rfloor+1$ 小者（$n=180$ 时取第 $91$ 小），与落盘脚本中的
+\texttt{\_med} 实现一致。这与 \texttt{statistics.median}（偶数样本取中间两值之平均）
+\textbf{不同}：按后者复算同一批 $180$ 格，$\lambda_\beta=10^{-3}$ 的留出归并误差
+会得到 $0.432$ 而非表中的 $0.435$。故引用这两节的表格时，须按上中位数复现。
+
 \subsection{已验证的 CPU 实验}
 \label{sec:exp-cpu}
 

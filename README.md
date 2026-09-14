@@ -2,7 +2,7 @@
 
 **D**estination-**C**onditioned **C**ompact **KV** Communication for Long-Context Collaborative Inference.
 
-> **GitHub**: https://github.com/YOUR_USERNAME/dcc-kv （私人仓库）
+> **GitHub**: https://github.com/lfei7199-star/dcc-kv （私人仓库）
 > **Status**: M0-M1 done, M2 pending GPU
 > **License**: Apache 2.0
 
@@ -76,7 +76,7 @@ dcc_kv/
 ```bash
 pip install -r requirements.txt
 # CPU-only：
-pip install torch==2.3.0+cpu --index-url https://download.pytorch.org/whl/cpu
+pip install "torch>=2.6.0" --index-url https://download.pytorch.org/whl/cpu  # 论文实验环境：2.11.0+cpu
 ```
 
 ### 跑测试

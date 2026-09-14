@@ -72,8 +72,15 @@ from experiments.common import beta_variants as BV     # noqa: E402
 
 E3_LO, E3_HI = math.exp(-3.0), math.exp(3.0)
 
-#: 默认 $\lambda_\beta$（仓库现状）
+#: 本次扫描运行时的仓库默认值（**历史记录**，见下方 SCAN_REF_SPEC）
 DEFAULT_LAMBDA = 1e-3
+
+#: 扫描参照规格：固定为 E10 所用的旧默认 $\lambda_\beta=10^{-3}$
+#:
+#: 为什么写死而不跟随 src 的当前默认：表 4 与配对检验都是「各档 vs 参照」，
+#: 若参照随 src 默认值漂移，则 src 默认一改、重跑后日志的参照就变，
+#: 论文中引用的 $\Delta$（相对旧默认 $10^{-3}$）便无法从落盘日志复现。
+SCAN_REF_SPEC: str = "box_lam1em3"
 
 #: 待扫的 λ 阶梯（覆盖 E10 只到 $10^{-1}$ 的缺口，向上延伸到 10）
 LAMBDA_LADDER: Tuple[float, ...] = (
@@ -258,6 +265,14 @@ def evaluate_cell(
 # =============================================================================
 
 def _med(rows: List[Dict[str, Any]], field: str) -> float:
+    r"""上中位数：升序后取第 ``n // 2`` 个（$n$ 为偶数时\emph{不}取中间两值的平均）。
+
+    与 E10 的 ``_med`` 口径一致（两套管线的互校正依赖这一点），
+    也与 ``statistics.median`` 不同：$n=180$ 时本函数取第 $91$ 小值。
+    论文引用本脚本的中位数时须声明该口径，否则按 ``statistics.median``
+    复算会得到不同数字（如 $\lambda_\beta=10^{-3}$ 的归并误差
+    $0.4354$ 对上 $0.4318$）。
+    """
     vals = sorted(r[field] for r in rows if r[field] == r[field])
     if not vals:
         return float("nan")
@@ -285,7 +300,7 @@ def _cell_rows(rows: List[Dict[str, Any]], spec: str,
 
 def print_ladder(rows: List[Dict[str, Any]]) -> None:
     print("=" * 126)
-    print("表 1：λ 阶梯（箱约束 [−3,3] 固定打开；各规格在 180 格上取中位数）")
+    print("表 1：λ 阶梯（箱约束 [−3,3] 固定打开；各规格在 180 格上取上中位数）")
     print("  箱绑定率 = 顶在 ±3 边界的坐标占比；clamp率 = 顶在 log(1e-6) 的坐标占比")
     print("=" * 126)
     print(f"{'规格':<18}{'λ_β':>7}{'箱绑定率':>10}{'clamp率':>9}{'β_std':>8}"
@@ -322,7 +337,7 @@ def print_ladder(rows: List[Dict[str, Any]]) -> None:
 def print_regime_split(rows: List[Dict[str, Any]]) -> None:
     print()
     print("=" * 126)
-    print("表 2：分域 —— B≤M（回归超定）与 B>M（回归欠定）；每域内取中位数")
+    print("表 2：分域 —— B≤M（回归超定）与 B>M（回归欠定）；每域内取上中位数")
     print("=" * 126)
     print(f"{'规格':<18}{'λ_β':>7}{'域':<6}{'n':>4}{'留出输出':>10}{'留出归并':>10}"
           f"{'B_eff/B':>9}{'V残差':>8}{'β_std':>8}{'箱绑定率':>10}")
@@ -423,10 +438,11 @@ def print_argmin_table(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 def print_win_counts(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     print()
     print("=" * 126)
-    print("表 4：逐格与当前默认（箱 + λ=1e-3）比较，统计「更优」的格数")
-    print("  域内按 (M,B) 的中位数比较；「更优」= 误差更小")
+    print(f"表 4：逐格与固定参照 {SCAN_REF_SPEC}（箱 + λ=1e-3，即扫描前的旧默认）"
+          f"比较，统计「更优」的格数")
+    print("  域内按 (M,B) 的上中位数比较；「更优」= 误差更小")
     print("=" * 126)
-    base = f"box_lam{_lam_tag(DEFAULT_LAMBDA)}"
+    base = SCAN_REF_SPEC
     cells = _cells(rows)
     out: Dict[str, Any] = {}
     print(f"{'规格':<18}{'λ_β':>7}{'B≤M 胜/负':>14}{'B>M 胜/负':>14}{'合计':>10}")
@@ -547,7 +563,7 @@ def print_crosscheck(rows: List[Dict[str, Any]],
         return {"all_ok": None, "skipped": True}
     print()
     print("=" * 126)
-    print("管线互校：本脚本与 E10 在同规格上的中位数对照（E10 值取自其 summary.json）")
+    print("管线互校：本脚本与 E10 在同规格上的上中位数对照（E10 值取自其 summary.json）")
     print("=" * 126)
     out: Dict[str, Any] = {}
     ok_all = True
@@ -581,8 +597,9 @@ def run_paired(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     print()
     print("=" * 126)
     print("配对检验（逐 (seed,dest,M,B) 配对；A 优于 B ⇔ A 误差更小）")
+    print(f"  参照 B = 固定规格 {SCAN_REF_SPEC}（箱 + λ=1e-3，扫描前的旧默认）")
     print("=" * 126)
-    base = f"box_lam{_lam_tag(DEFAULT_LAMBDA)}"
+    base = SCAN_REF_SPEC
     paired: Dict[str, Any] = {}
 
     def keyed(spec: str, field: str,
@@ -660,6 +677,10 @@ def main(argv: List[str] | None = None) -> int:
         args.queries_per_dest = 64
         args.M, args.budgets = [8, 16], [8, 32]
 
+    assert SCAN_REF_SPEC in LAMBDA_SPECS, (
+        f"固定参照 {SCAN_REF_SPEC} 不在规格表中 —— "
+        f"改 LAMBDA_LADDER / LAM_TAGS 时必须同步"
+    )
     n_cells = len(args.M) * len(args.budgets) * args.num_dest * args.seeds
     print("=" * 126)
     print("E11：λ_β 的细化扫描与分域定位（箱约束 [−3,3] 固定打开）")
@@ -716,9 +737,19 @@ def main(argv: List[str] | None = None) -> int:
         "spec_order": list(SPEC_ORDER),
         "lambda_ladder": list(LAMBDA_LADDER),
         "default_lambda": DEFAULT_LAMBDA,
+        "scan_ref_spec": SCAN_REF_SPEC,
+        "scan_ref_note": (
+            "表 4 与配对检验的参照规格固定为 box_lam1em3（扫描前的旧默认 "
+            "λ_β=1e-3），不随 src 的当前默认值变化，以保证论文引用的 Δ 可复现。"
+            "default_lambda 字段只是本次运行的时点记录。"
+        ),
+        "aggregation_note": (
+            "表 1/2/3 的中位数一律为「上中位数」：n 个值升序后取第 n//2 个"
+            "（n 为偶数时不取中间两值的平均）。与 _med() 实现一致。"
+        ),
         "config": {k: v for k, v in vars(args).items() if not k.startswith("_")},
         "argmin_stats": argmin_stats,
-        "win_counts_vs_default": win_counts,
+        "win_counts_vs_scan_ref": win_counts,
         "asymptote_check": asymptote,
         "crosscheck_vs_e10": crosscheck,
         "paired": paired,

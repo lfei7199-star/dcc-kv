@@ -1,7 +1,9 @@
 % =============================================================================
-% 图 5：lambda_beta 的归并误差曲线存在内部最优
+% 图 5：lambda_beta 的留出归并误差曲线存在内部最优
 % 编译：xelatex fig5_lambda_curve.tex
-% 数据来源：results/cpu/e11/summary.json（180 格上的中位数，箱约束 [-3,3] 固定打开）
+% 数据来源：results/cpu/e11/summary.json（180 格上的上中位数，箱约束 [-3,3] 固定打开）
+%   横轴为对数刻度：每十倍 12mm，次刻度标在 3x10^k 档位上（与扫描阶梯一致）。
+%   x = (log10(lambda) + 3) * 12 ；y = (v - 0.41) * 350，v 为留出归并误差。
 % =============================================================================
 \documentclass[tikz,border=4pt]{standalone}
 \input{preamble}
@@ -9,45 +11,51 @@
 \begin{document}
 \begin{tikzpicture}[x=1mm,y=1mm,every node/.style={font=\scriptsize}]
 
-  % 坐标轴
-  \draw[black!70, line width=0.5pt] (0,0) -- (68,0);
+  % 坐标轴（横轴 0..74，数据点 0..72）
+  \draw[black!70, line width=0.5pt] (0,0) -- (74,0);
   \draw[black!70, line width=0.5pt] (0,0) -- (0,46);
 
-  % y 轴：归并误差
+  % y 轴：留出归并误差
   \foreach \v/\y in {0.41/0, 0.44/10.5, 0.47/21, 0.50/31.5, 0.53/42} {
     \draw[black!45] (-1.5,\y) -- (0,\y);
     \node[anchor=east] at (-2.0,\y) {$\v$};
   }
-  \node[anchor=west] at (2,43.5) {归并误差};
+  \node[anchor=west] at (2,43.5) {留出归并误差};
 
-  % x 轴：lambda_beta（序数刻度，等距）
+  % x 轴：对数刻度，每十倍 12mm
   \foreach \x/\l in {0/{$10^{-3}$}, 12/{$10^{-2}$}, 24/{$10^{-1}$},
-                     36/{$1$}, 48/{$10$}, 60/{$10^{2}$}, 66/{$10^{3}$}} {
+                     36/{$1$}, 48/{$10$}, 60/{$10^{2}$}, 72/{$10^{3}$}} {
     \draw[black!45] (\x,0) -- (\x,-1.5);
     \node[anchor=north] at (\x,-2.2) {\l};
   }
-  \node[anchor=north] at (33,-9) {$\lambda_\beta$};
+  % 次刻度：扫描阶梯里的 3x10^k 档位
+  \foreach \x in {5.72, 17.72, 29.72, 41.72, 53.72} {
+    \draw[black!35] (\x,0) -- (\x,-0.9);
+  }
+  \node[anchor=north] at (36,-9) {$\lambda_\beta$（对数刻度）};
 
   % 参照线：标量 beta 与关闭 beta
-  \draw[gray, dashed, line width=0.4pt] (0,1.4) -- (68,1.4);
+  \draw[gray, dashed, line width=0.4pt] (0,1.33) -- (74,1.33);
   \node[anchor=west, gray] at (50,2.3) {标量 $\beta$};
-  \draw[gray, dashed, line width=0.4pt] (0,37.1) -- (68,37.1);
+  \draw[gray, dashed, line width=0.4pt] (0,37.03) -- (74,37.03);
   \node[anchor=west, gray] at (50,35.5) {关闭 $\beta$};
 
-  % 默认值竖线
-  \draw[red!70!black, dashed, line width=0.4pt] (18,0) -- (18,42);
+  % 默认值竖线（lambda = 3e-2 的对数位置）
+  \draw[red!70!black, dashed, line width=0.4pt] (17.72,0) -- (17.72,42);
   \node[anchor=west, red!70!black] at (19,41.5) {默认 $\lambda_\beta=3\times10^{-2}$};
 
-  % 曲线与数据点
+  % 曲线与数据点（12 档，位置上按对数刻度）
   \draw[blue!70!black, line width=0.9pt]
-     (0,8.8) -- (6,7.7) -- (12,6.0) -- (18,3.9) -- (24,2.5) -- (30,2.8)
-     -- (36,3.2) -- (42,11.2) -- (48,16.8) -- (54,25.9) -- (60,34.3) -- (66,36.1);
-  \foreach \x/\y in {0/8.8, 6/7.7, 12/6.0, 18/3.9, 24/2.5, 30/2.8,
-                     36/3.2, 42/11.2, 48/16.8, 54/25.9, 60/34.3, 66/36.1} {
+     (0,8.89) -- (5.72,7.60) -- (12,5.78) -- (17.72,3.99) -- (24,2.59)
+     -- (29.72,2.94) -- (36,3.05) -- (41.72,11.24) -- (48,16.70)
+     -- (53.72,26.01) -- (60,34.34) -- (72,35.95);
+  \foreach \x/\y in {0/8.89, 5.72/7.60, 12/5.78, 17.72/3.99, 24/2.59,
+                     29.72/2.94, 36/3.05, 41.72/11.24, 48/16.70,
+                     53.72/26.01, 60/34.34, 72/35.95} {
     \fill[blue!70!black] (\x,\y) circle (0.7);
   }
 
-  % 内部最优标注
+  % 内部最优标注（lambda = 1e-1 处）
   \node[anchor=west, blue!70!black] at (25.5,4.4) {内部最优};
 
 \end{tikzpicture}

@@ -26,6 +26,7 @@ import sys
 import socket
 import logging
 import argparse
+import datetime
 import traceback
 from typing import Callable, Any, Optional
 
@@ -258,7 +259,3 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     main()
-
-
-# 需要在文件顶部 import（避免 setup_distributed 中 NameError）
-import datetime

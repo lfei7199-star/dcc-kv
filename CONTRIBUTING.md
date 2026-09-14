@@ -94,7 +94,7 @@ Tests: tests/test_var_len_msg.py (5 tests)
 ```bash
 # 装依赖
 pip install -r requirements.txt
-pip install torch==2.3.0+cpu --index-url https://download.pytorch.org/whl/cpu
+pip install "torch>=2.6.0" --index-url https://download.pytorch.org/whl/cpu  # 论文实验环境：2.11.0+cpu
 
 # 仅 mock 模式（< 5 秒）
 pytest tests/ -v
