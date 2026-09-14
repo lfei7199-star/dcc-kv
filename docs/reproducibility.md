@@ -5,7 +5,7 @@
 
 ## 1. 代码可获取性
 
-- **仓库**：https://github.com/YOUR_USERNAME/dcc-kv
+- **仓库**：https://github.com/lfei7199-star/dcc-kv
 - **commit hash**：`v1.0.0` （或具体版本）
 - **许可证**：Apache 2.0
 - **匿名版**（如果双盲 review）：https://github.com/anonymous-dcc-kv
@@ -48,7 +48,7 @@
 ### 5.1 一次性安装
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/dcc-kv
+git clone https://github.com/lfei7199-star/dcc-kv
 cd dcc-kv
 git checkout v1.0.0
 pip install -r requirements.txt

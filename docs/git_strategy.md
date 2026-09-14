@@ -249,7 +249,7 @@ git merge --no-ff experiment/M4_8b_baseline
 # 仓库名建议：dcc-kv
 
 # 远程添加
-git remote add origin git@github.com:YOUR_USERNAME/dcc-kv.git
+git remote add origin git@github.com:lfei7199-star/dcc-kv.git
 
 # 推送到 main（首次）
 git push -u origin main
