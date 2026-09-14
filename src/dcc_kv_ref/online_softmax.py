@@ -103,6 +103,16 @@ def merge_softmax_states(
     Returns:
         合并后的状态
     """
+    # ⊕ 的定义要求两侧的 d_v 相同：o 是 sum(exp·V) 的累加量，形状必须一致。
+    # 缺此检查时，形状不匹配会退化为 torch 的广播错误（信息量为零），
+    # 无法判断是调用方用错还是实现出错。这里显式失败。
+    if state_a.o.shape != state_b.o.shape:
+        raise ValueError(
+            "merge_softmax_states 要求两个状态的 d_v 相同，"
+            f"得到 o 形状 {tuple(state_a.o.shape)} 与 {tuple(state_b.o.shape)}；"
+            "不同 d_v 的块不能直接归并。"
+        )
+
     m_ab = torch.maximum(state_a.m, state_b.m)
     exp_a = torch.exp(state_a.m - m_ab)
     exp_b = torch.exp(state_b.m - m_ab)

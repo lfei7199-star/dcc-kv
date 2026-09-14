@@ -120,6 +120,40 @@ def cleanup_distributed() -> None:
         dist.destroy_process_group()
 
 
+def _spawn_wrapper(
+    rank: int,
+    user_fn: Callable,
+    user_args: Any,
+    world_size: int,
+    backend: str,
+    timeout_minutes: int,
+    error_queue: "mp.Queue",
+) -> None:
+    """mp.spawn 的目标函数：每个子进程内初始化分布式、调用用户函数、清理。
+
+    必须定义在模块级。``mp.spawn`` 在 spawn 启动方式下会序列化目标函数，
+    闭包（``launch_dist`` 内的局部函数）无法被 pickle —— 这是原有实现的
+    可移植性缺陷，仅在 fork 平台（Linux 默认）可用。
+
+    异常不向上抛，而是放进 ``error_queue``，让 ``mp.spawn`` 正常 join，
+    由主进程统一读取并转成 RuntimeError。
+    """
+    try:
+        setup_distributed(
+            rank=rank,
+            world_size=world_size,
+            backend=backend,
+            timeout_minutes=timeout_minutes,
+        )
+        user_fn(rank, user_args)
+        cleanup_distributed()
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"[rank {rank}] exception:\n{tb}")
+        error_queue.put((rank, str(e), tb))
+        cleanup_distributed()
+
+
 # -----------------------------------------------------------------------------
 # 启动器主函数
 # -----------------------------------------------------------------------------
@@ -166,38 +200,23 @@ def launch_dist(
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = master_port
 
-    # 用 Manager 收集子进程异常
+    # 用 Queue 收集子进程异常
     error_queue: mp.Queue = mp.Queue()
-
-    def wrapped_fn(rank, args_tuple):
-        """mp.spawn 包装：捕获异常并放入 error_queue。"""
-        (user_args, world_size, be, timeout_min) = args_tuple
-        try:
-            setup_distributed(
-                rank=rank,
-                world_size=world_size,
-                backend=be,
-                timeout_minutes=timeout_min,
-            )
-            result = fn(rank, user_args)
-            cleanup_distributed()
-            return result
-        except Exception as e:
-            tb = traceback.format_exc()
-            logger.error(f"[rank {rank}] exception:\n{tb}")
-            error_queue.put((rank, str(e), tb))
-            cleanup_distributed()
-            # 不 raise，让 mp.spawn 正常 join；主进程从 error_queue 拿到异常
 
     logger.info(
         f"Launching {nproc_per_node} processes via mp.spawn "
         f"(backend={backend}, master={master_addr}:{master_port})"
     )
 
+    # 修正（2026-09-14）：目标函数改为**模块级** _spawn_wrapper。
+    # mp.spawn 在 spawn 启动方式（Windows、macOS 3.8+ 默认）下会 pickle 目标函数
+    # 与 args，闭包无法被 pickle；旧实现把 wrapped_fn 定义在 launch_dist 内部，
+    # 只在 fork 平台可用，spawn 平台一律报
+    # "Can't get local object 'launch_dist.<locals>.wrapped_fn'"。
     try:
         mp.spawn(
-            wrapped_fn,
-            args=(args, nproc_per_node, backend, timeout_minutes),
+            _spawn_wrapper,
+            args=(fn, args, nproc_per_node, backend, timeout_minutes, error_queue),
             nprocs=nproc_per_node,
             join=True,
             daemon=False,

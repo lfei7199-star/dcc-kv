@@ -20,6 +20,22 @@ from distributed.comm import DistributedComm, VarLenMessage
 # ============================================================================
 # A1. launch_dist 接口验收
 # ============================================================================
+def _a1_5_worker(rank, args):
+    """A1.5 worker：必须在**模块级**定义。
+
+    mp.spawn 在 spawn 启动方式（Windows、macOS 3.8+ 默认）下会 pickle 目标函数
+    与 args，闭包 / 局部函数无法被 pickle。原实现把 wrapped_fn 定义在测试函数
+    内部，于是该用例在 spawn 平台必然失败（fork 平台才碰巧可用）。
+
+    注意：launch_dist 的包装已负责 setup/cleanup，worker 内不得重复初始化。
+    """
+    import torch.distributed as dist
+    assert dist.is_initialized(), "launch_dist 应在子进程内完成 setup_distributed"
+    assert dist.get_rank() == rank, f"rank 不匹配: {dist.get_rank()} != {rank}"
+    assert dist.get_world_size() == args["world_size"], "world_size 不匹配"
+    return f"rank_{rank}"
+
+
 class TestLaunchDist:
     """launch_dist 的 5 项接口验收。"""
 
@@ -65,37 +81,27 @@ class TestLaunchDist:
             launch_dist(fn, nproc_per_node=1)
 
     def test_a1_5_multi_process_via_mp_spawn(self):
-        """A1.5 多进程模式：用 mp.spawn 启动（2 进程 gloo）。"""
+        """A1.5 多进程模式：launch_dist 经 mp.spawn 启动 2 进程 gloo。
+
+        修正（2026-09-14）：原实现自己写了一个**局部** wrapped_fn 直接传给
+        mp.spawn，spawn 平台无法 pickle，必然报
+        "Can't get local object 'TestLaunchDist.test_a1_5_...<locals>.wrapped_fn'"。
+        现在直接测 launch_dist 的多进程路径（A1 要验的就是它），worker 用模块级
+        函数；断言放在子进程内，失败会经 error_queue 回传、由 launch_dist 抛
+        RuntimeError，因此"子进程里的断言"同样能让本用例失败。
+        """
         if os.cpu_count() < 2:
             pytest.skip("Need at least 2 CPU cores")
 
-        completed = []
-
-        def fn(rank, args):
-            setup_distributed(rank, args["world_size"], backend="gloo")
-            completed.append(rank)
-            cleanup_distributed()
-            return f"rank_{rank}"
-
-        # launch_dist 内部已经处理 setup/cleanup；这里手动调用一次验证接口
-        # 实际 launch_dist 调用会包一层，fn 里不需要再 setup/cleanup
-        # 我们用直接 mp.spawn 模拟（绕过 launch_dist 的包装）
-        import torch.multiprocessing as mp
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = "29510"
-
-        def wrapped_fn(rank, args):
-            setup_distributed(rank, args["world_size"], backend="gloo")
-            completed.append(rank)
-            cleanup_distributed()
-
-        mp.spawn(
-            wrapped_fn,
-            args=({"world_size": 2},),
-            nprocs=2,
-            join=True,
+        launch_dist(
+            _a1_5_worker,
+            nproc_per_node=2,
+            args={"world_size": 2},
+            backend="gloo",
+            master_port="29510",
         )
-        assert sorted(completed) == [0, 1]
 
 
 # ============================================================================
@@ -144,16 +150,20 @@ class TestDistributedComm:
         self.comm.barrier()  # 不应抛
 
     def test_a2_6_gather_to_dst(self):
-        """A2.6 gather 收集到 dst 进程。"""
+        """A2.6 gather 在 dst 进程返回 world_size 份结果。
+
+        修正（2026-09-14）：原断言 ``result[1] == [1.0]`` 在 mock 下永远不成立
+        ——mock 没有第二个进程，``comm.gather`` 的 mock 分支的约定是返回
+        ``world_size`` 份**本地** tensor（见 comm.py 的 gather）。"rank 1 的值
+        确实是 1.0" 属于真实 backend 语义，由 A3
+        （``test_a3_real_distributed_2proc_gloo``）覆盖。
+        """
         t = torch.tensor([float(self.comm.rank)])
         result = self.comm.gather(t, dst=0)
-        if self.comm.rank == 0:
-            assert result is not None
-            assert len(result) == 2
-            assert torch.allclose(result[0], torch.tensor([0.0]))
-            assert torch.allclose(result[1], torch.tensor([1.0]))
-        else:
-            assert result is None
+        assert result is not None
+        assert len(result) == self.comm.world_size
+        for r in result:
+            assert torch.equal(r, t)
 
     def test_a2_7_size_validation(self):
         """A2.7 size 不一致时报错。"""

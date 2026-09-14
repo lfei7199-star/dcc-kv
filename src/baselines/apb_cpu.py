@@ -44,7 +44,7 @@ def select_anchor_blocks(
     values: torch.Tensor,       # [L_s, d_v]
     queries: torch.Tensor,      # [L_r, d_h]
     budget: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """APB 的 anchor block 选择：基于 attention mass。
 
     Args:
@@ -55,6 +55,11 @@ def select_anchor_blocks(
     Returns:
         anchor_keys: [budget, d_h]
         anchor_values: [budget, d_v]
+        anchor_indices: [budget]  **按位置升序**的原始索引
+
+    修正（2026-09-14）：返回值新增 ``anchor_indices``。``torch.topk`` 给出的是
+    **按 mass 降序**的索引，与位置序无关；因果掩码必须按原始位置做，故调用方
+    需要索引本身。这里顺手把索引排成升序，使「位置前缀」就是数组前缀。
     """
     d_h = keys.shape[-1]
     scale = 1.0 / (d_h ** 0.5)
@@ -63,7 +68,8 @@ def select_anchor_blocks(
     # 每个 token 的总 attention mass
     mass = attention.sum(dim=0)  # [L_s]
     topk = torch.topk(mass, budget).indices
-    return keys[topk], values[topk]
+    topk = torch.sort(topk).values
+    return keys[topk], values[topk], topk
 
 
 def apb_cpu(
@@ -96,6 +102,7 @@ def apb_cpu(
     # 每块选 anchor
     anchor_keys_list: List[torch.Tensor] = []
     anchor_values_list: List[torch.Tensor] = []
+    anchor_indices_list: List[torch.Tensor] = []
     chunk_offsets: List[int] = []
     offset = 0
     for s in range(world_size):
@@ -106,12 +113,13 @@ def apb_cpu(
         future_queries = queries[offset:]
         if len(future_queries) == 0:
             future_queries = queries
-        a_k, a_v = select_anchor_blocks(
+        a_k, a_v, a_idx = select_anchor_blocks(
             K_s, V_s, future_queries,
             budget=min(config.anchor_budget, len(K_s)),
         )
         anchor_keys_list.append(a_k)
         anchor_values_list.append(a_v)
+        anchor_indices_list.append(a_idx)
         chunk_offsets.append(offset)
         offset = chunk_end
 
@@ -122,13 +130,17 @@ def apb_cpu(
         for s in range(world_size):
             if causal and chunk_offsets[s] > r:
                 continue
-            # 因果：只取前 r+1-chunk_offsets[s] 个
+            # 因果掩码按**原始位置**，不是按 anchor 数组的行序切片。
+            # 修正（2026-09-14）：anchor 数组的行序由 attention mass 决定，与位置序
+            # 无关（实测 topk 索引形如 [0, 33, 27, 22, ...]）。旧实现写的是
+            # anchor_keys_list[s][:end_in_chunk]，等于把"mass 最高的前 k 个"当成
+            # "位置最靠前的前 k 个"。定位见 experiments/cpu/c10_baseline_diagnosis.py。
             if causal:
-                end_in_chunk = min(r + 1 - chunk_offsets[s], anchor_keys_list[s].shape[0])
-                if end_in_chunk <= 0:
+                visible = anchor_indices_list[s] < (r + 1 - chunk_offsets[s])
+                if not bool(visible.any()):
                     continue
-                K_v = anchor_keys_list[s][:end_in_chunk]
-                V_v = anchor_values_list[s][:end_in_chunk]
+                K_v = anchor_keys_list[s][visible]
+                V_v = anchor_values_list[s][visible]
             else:
                 K_v = anchor_keys_list[s]
                 V_v = anchor_values_list[s]

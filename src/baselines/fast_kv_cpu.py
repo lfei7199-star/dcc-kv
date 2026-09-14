@@ -18,11 +18,13 @@ try:  # 允许两种导入根：包内 `src.` 导入 与 把 `src/` 直接加入
     from ..dcc_kv_ref import (
         build_compact_kv, CompactKV, OnlineSoftmaxState,
         online_softmax_from_attention, merge_softmax_states,
+        DEFAULT_LAMBDA_BETA,
     )
 except ImportError:  # pragma: no cover - 兼容把 src/ 直接加入 sys.path 的调用方
     from dcc_kv_ref import (
         build_compact_kv, CompactKV, OnlineSoftmaxState,
         online_softmax_from_attention, merge_softmax_states,
+        DEFAULT_LAMBDA_BETA,
     )
 
 
@@ -32,7 +34,11 @@ class FastKVConfig:
     budget: int = 256
     num_repr_queries: int = 64
     projection_dim: int = 32
-    lambda_beta: float = 1e-3
+    # 修正（2026-09-14）：原来硬编码 1e-3，未跟随 dcc_kv_ref 的校准默认值。
+    # 该 baseline 与 DCC-KV **共用同一套压缩机制**，区别只在"是否按目的端
+    # 条件化"，因此 λ_β 必须与主方法取同一个默认值，否则对照不公平
+    # （此时 FastKV 用的是已被替换掉的旧默认）。实测结论不变，但数字会变。
+    lambda_beta: float = DEFAULT_LAMBDA_BETA
     lambda_value: float = 1e-3
     seed: int = 42
 
@@ -98,14 +104,19 @@ def fast_kv_cpu(
             if causal and chunk_offsets[s] > r:
                 continue
             compact = chunk_compacts[s]
-            # 因果：只取前 r+1-chunk_offsets[s] 个
+            # 因果掩码按**原始位置**（selected_indices），不是按压缩块的行序切片。
+            # 修正（2026-09-14）：压缩块的行序由选键决定（RMS 排序），与位置序无关。
+            # 旧实现写的是 compact.keys[:end_in_chunk]，等于把"score 最高的前 k 个"
+            # 当成"位置最靠前的前 k 个"，破坏因果语义（$B=L_s$ 时索引恰好升序，
+            # 故该 bug 在 $B<L_s$ 时才改变数值）。定位见
+            # experiments/cpu/c10_baseline_diagnosis.py。
             if causal:
-                end_in_chunk = min(r + 1 - chunk_offsets[s], compact.keys.shape[0])
-                if end_in_chunk <= 0:
+                visible = compact.selected_indices < (r + 1 - chunk_offsets[s])
+                if not bool(visible.any()):
                     continue
-                K_visible = compact.keys[:end_in_chunk]
-                V_visible = compact.values[:end_in_chunk]
-                bias_visible = compact.logit_bias[:end_in_chunk]
+                K_visible = compact.keys[visible]
+                V_visible = compact.values[visible]
+                bias_visible = compact.logit_bias[visible]
             else:
                 K_visible = compact.keys
                 V_visible = compact.values

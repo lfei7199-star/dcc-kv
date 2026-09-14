@@ -45,7 +45,12 @@ def test_launch_dist_single_process_returns_value():
 
     ret = launch_dist(fn, nproc_per_node=1, args=("hello",))
     assert ret == "result_from_rank_0"
-    assert results == [(0, "hello")]
+    # args 是**原样**传给 fn 的第二个参数（与多进程路径一致：launch_dist 的
+    # docs 写明 "args: 传给 fn 的第二个参数"；其他测试也传 dict / int / None）。
+    # 故 fn 收到的是 ("hello",) 本身，而不是被拆开的 "hello"。
+    # 修正（2026-09-14）：原断言写成 [(0, "hello")]，与单进程实现
+    # （return fn(0, args)）和其余调用点均不一致。
+    assert results == [(0, ("hello",))]
 
 
 def test_launch_dist_single_process_no_distributed_init():
@@ -241,44 +246,48 @@ def _worker_dist_comm_all_to_all_v(rank, args):
     comm = DistributedComm(backend="gloo", mock=False)
     comm.init(rank=rank, world_size=args["world_size"])
 
-    # 每个 rank 准备发给 2 个 rank 的不同长度消息
-    # rank 0 发：[2, 3]  →  收到 [3, 2]
-    # rank 1 发：[3, 2]  →  收到 [2, 3]
+    # 每个 rank 准备发给 2 个 rank 的不同长度消息。
+    # 约定（与实现一致）：messages[i] 是发给 rank i 的；因此 results[i] 是
+    # **从 rank i 收到**的消息（实现里切分顺序同 torch all_to_all_single，
+    # metadata["src_rank"] = i）。于是 rank r 的 recv_sizes[j] = S_j[r]。
+    #
+    # 修正（2026-09-14）：原写法把 my_recv_sizes 当成自己 send_sizes 的"转置"
+    # （[3,2] / [2,3]），与两侧实际发送量矛盾；断言也把 results[0] 当成了
+    # "来自 rank 1"。本实现在 Step 1 会先交换真实 size 再按它分配，
+    # 所以声明出错不改变收件内容，只让断言失败（该缺陷此前被 launch_dist 的
+    # mp.spawn 序列化失败掩盖）。重算后：
+    #   rank 0 收到：rank 0 的 messages[0]（2 个）、rank 1 的 messages[0]（3 个）
+    #   rank 1 收到：rank 0 的 messages[1]（3 个）、rank 1 的 messages[1]（2 个）
     if rank == 0:
         my_messages = [
             VarLenMessage(payload=torch.tensor([10.0, 11.0])),
             VarLenMessage(payload=torch.tensor([20.0, 21.0, 22.0])),
         ]
         my_send_sizes = [2, 3]
-        my_recv_sizes = [3, 2]
+        my_recv_sizes = [2, 3]
     else:
         my_messages = [
             VarLenMessage(payload=torch.tensor([100.0, 101.0, 102.0])),
             VarLenMessage(payload=torch.tensor([200.0, 201.0])),
         ]
         my_send_sizes = [3, 2]
-        my_recv_sizes = [2, 3]
+        my_recv_sizes = [3, 2]
 
     results = comm.all_to_all_v(
         my_messages, send_sizes=my_send_sizes, recv_sizes=my_recv_sizes
     )
 
-    # 验证接收内容
+    # 验证接收内容（results[i] 来自 rank i）
     if rank == 0:
-        # rank 0 从 rank 1 收到 3 个（payload 来自 rank 1 的 send[0]）
-        # rank 0 从 rank 0 收到 2 个（payload 来自 rank 0 的 send[1]）
-        # 注意：all-to-allv 的语义是 src_rank → dst_rank
-        # recv[i] = src_rank i 发给 dst_rank (=self.rank) 的消息
-        # 在我们的约定里，messages[i] 是发给 rank i 的，所以 recv[i] 是从 rank i 收到的
-        assert results[0].numel() == 3  # from rank 1: [100, 101, 102]
-        assert results[1].numel() == 2  # from rank 0: [20, 21, 22]
-        assert torch.allclose(results[0].payload, torch.tensor([100.0, 101.0, 102.0]))
-        assert torch.allclose(results[1].payload, torch.tensor([20.0, 21.0, 22.0]))
-    else:
-        assert results[0].numel() == 2  # from rank 0: [10, 11]
-        assert results[1].numel() == 3  # from rank 1: [200, 201, 202]
+        assert results[0].numel() == 2  # 来自 rank 0：messages[0] = [10, 11]
         assert torch.allclose(results[0].payload, torch.tensor([10.0, 11.0]))
-        assert torch.allclose(results[1].payload, torch.tensor([200.0, 201.0, 202.0]))
+        assert results[1].numel() == 3  # 来自 rank 1：messages[0] = [100, 101, 102]
+        assert torch.allclose(results[1].payload, torch.tensor([100.0, 101.0, 102.0]))
+    else:
+        assert results[0].numel() == 3  # 来自 rank 0：messages[1] = [20, 21, 22]
+        assert torch.allclose(results[0].payload, torch.tensor([20.0, 21.0, 22.0]))
+        assert results[1].numel() == 2  # 来自 rank 1：messages[1] = [200, 201]
+        assert torch.allclose(results[1].payload, torch.tensor([200.0, 201.0]))
 
     comm.cleanup()
     cleanup_distributed()
@@ -348,9 +357,12 @@ def test_minimal_distributed_demo_runs():
     if os.cpu_count() < 2:
         pytest.skip("Need at least 2 CPU cores")
 
+    # 修正（2026-09-14）：原为 sys.path.insert(0, '{src_dir}')。Windows 路径含
+    # 反斜杠，插进普通字符串字面量后会被当作转义序列，生成的临时脚本直接
+    # SyntaxError（unicodeescape）。改用 !r 走 repr，得到合法字面量。
     demo_script = """
 import sys
-sys.path.insert(0, '{src_dir}')
+sys.path.insert(0, {src_dir!r})
 from distributed.launch_dist import launch_dist, setup_distributed, cleanup_distributed
 from distributed.comm import DistributedComm
 import torch
@@ -382,6 +394,9 @@ if __name__ == '__main__':
         result = subprocess.run(
             [sys.executable, script_path],
             capture_output=True, text=True, timeout=120,
+            # 子进程日志可能以本地编码写出（Windows 中文环境为 cp936），
+            # 显式指定 utf-8 + replace，避免读取线程抛 UnicodeDecodeError。
+            encoding="utf-8", errors="replace",
         )
         assert result.returncode == 0, (
             f"Demo failed.\nstdout: {result.stdout}\nstderr: {result.stderr}"
