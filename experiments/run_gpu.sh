@@ -33,6 +33,12 @@ EXP="$1"; shift
 NPROC=1
 PASSTHRU=()
 
+# 注意：下面向 run_one 传透传参数时用的是 "${PASSTHRU[@]}"，**不能**写成
+# "${PASSTHRU[@]:-}"。带 `:-` 的形式在数组为空时会展开成**一个空字符串**，
+# 于是 `python <脚本> ""` 会让 argparse 直接报
+# "unrecognized arguments:" —— 也就是说，任何"不带透传参数"的正常调用
+# （例如 `bash experiments/run_gpu.sh e8`）都会在参数解析阶段就失败。
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --nproc) NPROC="$2"; shift 2 ;;
@@ -42,7 +48,7 @@ while [ $# -gt 0 ]; do
 done
 
 # 统一的体检/计划短路：这些模式不需要 GPU，也不该被 torchrun 包起来
-for arg in "${PASSTHRU[@]:-}"; do
+for arg in "${PASSTHRU[@]}"; do
   case "$arg" in
     --print-env|--plan)
       echo "[模式] $arg —— 不经 torchrun，直接在单进程下运行"
@@ -76,30 +82,30 @@ FAILED=0
 case "$EXP" in
   e5)
     run_one "E5 消融 A1/A2/A3/A5" experiments/gpu/e5_gpu_ablation.py "$NPROC" \
-      "${PASSTHRU[@]:-}" || FAILED=1
+      "${PASSTHRU[@]}" || FAILED=1
     ;;
   e6)
     run_one "E6 主表与可扩展性" experiments/gpu/e6_main_table.py "$NPROC" \
-      "${PASSTHRU[@]:-}" || FAILED=1
+      "${PASSTHRU[@]}" || FAILED=1
     ;;
   e7)
     run_one "E7 负结果与适用边界" experiments/gpu/e7_negative_results.py "$NPROC" \
-      "${PASSTHRU[@]:-}" || FAILED=1
+      "${PASSTHRU[@]}" || FAILED=1
     ;;
   e8)
     run_one "E8 低精度数值稳定性" experiments/gpu/e8_low_precision.py "$NPROC" \
-      "${PASSTHRU[@]:-}" || FAILED=1
+      "${PASSTHRU[@]}" || FAILED=1
     ;;
   all)
     # 按 tests/gpu/README.md 的资源就绪顺序：先最省资源的，再最费的
     run_one "E8 低精度数值稳定性（单卡）" experiments/gpu/e8_low_precision.py 1 \
-      "${PASSTHRU[@]:-}" || FAILED=1
+      "${PASSTHRU[@]}" || FAILED=1
     run_one "E7 负结果与适用边界（单卡+模型）" experiments/gpu/e7_negative_results.py 1 \
-      "${PASSTHRU[@]:-}" || FAILED=1
+      "${PASSTHRU[@]}" || FAILED=1
     run_one "E6 主表（单卡+模型）" experiments/gpu/e6_main_table.py 1 \
-      "${PASSTHRU[@]:-}" || FAILED=1
+      "${PASSTHRU[@]}" || FAILED=1
     run_one "E5 消融 A1/A2/A5（多卡+NCCL）" experiments/gpu/e5_gpu_ablation.py \
-      "${NPROC:-4}" "${PASSTHRU[@]:-}" || FAILED=1
+      "${NPROC:-4}" "${PASSTHRU[@]}" || FAILED=1
     ;;
   *)
     echo "未知实验：$EXP" >&2

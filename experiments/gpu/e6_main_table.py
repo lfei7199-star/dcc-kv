@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 """E6：主表与可扩展性 —— GPU 端。
 
-论文 §6.4 把 E6 描述为
-    "3 模型 × 5 上下文长度 × 2 GPU 数 × 2 同步模式 × 3 基线 = 144 个数据点"
+论文 §6.4 现把 E6 描述为
+    "3 模型 × 4 上下文长度 × 2 GPU 数 × 2 同步模式 × 3 基线 = 144 个数据点"
 
-**这个等式不成立**：3 × 5 × 2 × 2 × 3 = 180，不是 144。反推可得
-144 / (3 × 2 × 2 × 3) = 4，即上下文长度应为 **4** 档。这是论文里的一处
-算术不一致，需要改成 4 档长度（或把数据点数改成 180）。本脚本按
-`--context-lengths` 的实际长度计算数据点数并打印，不再复述一个对不上的总数。
+算术自洽（3 × 4 × 2 × 2 × 3 = 144）。
+
+（历史）论文原稿写的是"5 上下文长度 = 144 个数据点"，与 180 对不上；
+`72af7db` 已把长度档位改为 4 档修掉。本脚本曾把这条不一致硬编码成警告，
+现在改为**按 `--context-lengths` 的实参现算**数据点数并打印，不再复述
+一个已经过期、且与论文当前状态相反的结论。
 
 本脚本另一个必须明确的点：**GPU 数不是所有方法都能调的自变量。**
     dense / kv_budget_shared —— 单卡测量。它们不涉及跨设备通信，
@@ -33,7 +35,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
 import sys
 import traceback
@@ -87,7 +88,8 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "blockers": [
             "CompactKV → GPU attention kernel 缺失"
             "（src/distributed/dcc_kv_sync_cpu.py 为 CPU 同步版）。",
-            "构造链路的 CUDA 可用性未打通，见 _env.CUDA_CONSTRUCTION_DEFECTS。",
+            "构造链路的 CUDA 可用性待 GPU 机实测（三处 device 缺陷已在 5b5ce98"
+            " 修复；本机无 CUDA，静态审计不能替代实测）。",
             "异步 All-to-Allv 流水尚无 GPU 实现入口。",
         ],
     },
@@ -106,7 +108,7 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "desc": "APB（全网共享 anchor）",
         "blockers": [
             "src/baselines/apb_cpu.py 是 CPU 实现，无 GPU kernel。",
-            "APB 编号（2502.12085）本身尚待二次确认，实现前需先定稿引用。",
+            "（原 blocker「APB 编号 2502.12085 待二次确认」已关闭：编号有效。）",
         ],
     },
 }
@@ -131,15 +133,18 @@ def print_plan(a: argparse.Namespace) -> int:
     print(f"  同步模式   ({n_sync})：{a.sync_modes}")
     print(f"  方法      ({n_methods})：{a.methods}")
     print(f"  => 数据点 = {n_models} × {n_ctx} × {n_sync} × {n_methods} = {n_points}")
+    if n_methods != 3:
+        print(f"  ⚠ 注意：方法数是 {n_methods}，而论文的 144 是按「3 基线」算的。"
+              f"两者数值可能**恰好相等**（3×4×2×6 = 3×4×2×2×3 = 144），"
+              f"但含义不同 —— 不要把本脚本算出的总数直接当成论文声称的数据点数。")
     print(f"  每点 ≥{a.iters} 次 run（报告规范要求）"
           f" => 总前向次数 ≥ {n_points * a.iters}")
 
     print()
-    print("  论文 §6.4 写的「3 模型 × 5 长 × 2 GPU × 2 同步 × 3 基线 = 144」"
-          "算不出来：")
-    print(f"      3 × 5 × 2 × 2 × 3 = 180 ≠ 144")
-    print(f"      144 / (3 × 2 × 2 × 3) = 4  → 上下文长度应为 4 档")
-    print("  需要二选一：把「5 上下文长度」改为 4，或把「144 个数据点」改为 180。")
+    print("  论文 §6.4 现写「3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144」，")
+    print("  算术自洽（3 × 4 × 2 × 2 × 3 = 144）。")
+    print("  （历史）原稿写「5 上下文长度 = 144」，与 180 对不上；`72af7db` 已改为 4 档。")
+    print("  下面按本次实参现算，不复述过期结论。")
 
     print()
     print("  方法前置条件：")
@@ -211,6 +216,11 @@ def measure_point(
                            if spec["gpu_required"] == 1 else
                            f"该方法需要 {spec['gpu_required']} 卡，本次未满足"),
         "sync_async": sync_mode,
+        # sync/async 只对"有跨设备通信"的方法才是自变量。dense 与
+        # kv_budget_shared 是单卡测量，两者在 sync 与 async 两行上的数值必然
+        # 逐位相同 —— 若不加标注，表里会出现两行完全一样的数而被读成
+        # "异步没有收益"，那是把"没有这条轴"错当成"这条轴上的测量结果"。
+        "sync_mode_applicable": False,
         "method": method,
         "method_measurable": spec["measurable"],
         "num_repr_queries": a.M,
@@ -242,6 +252,7 @@ def blocked_point(a: argparse.Namespace, model: str, ctx_len: int,
         "gpu_count_observed": 0,
         "gpu_count_required": spec["gpu_required"],
         "sync_async": sync_mode,
+        "sync_mode_applicable": False,
         "method": method,
         "method_measurable": False,
         "budget_ratio": a.budget_ratio,
@@ -300,8 +311,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", type=str, default="results/gpu/e6")
     p.add_argument("--print-env", action="store_true")
-    p.add_argument("--allow-cpu-plan-only", action="store_true",
-                   help="确认只跑 --plan 而不执行测量")
     return p
 
 
@@ -360,14 +369,15 @@ def main() -> int:
                         }
                     rows.append(r)
                     if r["status"] == "ok":
-                        m = lm.model
+                        acc_str = ("n/a" if r["accuracy"] is None
+                                   else f"{r['accuracy']:.4f}")
                         print(f"  {model.split('/')[-1]:<28} L={ctx_len:<6} "
                               f"{sync_mode:<5} {method:<17} "
                               f"prefill={r['prefill_ms_median']:9.2f}ms "
                               f"(p95={r['prefill_ms_p95']:9.2f})  "
                               f"{r['tokens_per_s_median']:10.1f} tok/s  "
                               f"peak={r['peak_memory_gb']:5.2f}GB  "
-                              f"acc={'n/a' if r['accuracy'] is None else f'{r[chr(97)+chr(99)+chr(99)+chr(117)+chr(114)+chr(97)+chr(99)+chr(121)]:.4f}'}")
+                              f"acc={acc_str}")
                     else:
                         print(f"  {model.split('/')[-1]:<28} L={ctx_len:<6} "
                               f"{sync_mode:<5} {method:<17} [{r['status']}] "
@@ -402,8 +412,8 @@ def main() -> int:
                                  * len(a.sync_modes) * len(a.methods)),
             "n_points_measured": sum(1 for r in rows if r["status"] == "ok"),
             "n_points_blocked": sum(1 for r in rows if r["status"] == "blocked"),
-            "paper_claim": "3 模型 × 5 长度 × 2 GPU × 2 同步 × 3 基线 = 144",
-            "paper_claim_check": "3×5×2×2×3 = 180 ≠ 144；144 对应 4 档长度",
+            "paper_claim": "3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144",
+            "paper_claim_check": "3×4×2×2×3 = 144，与论文 §6.4 自洽（原稿的 5 档已由 72af7db 改为 4 档）",
         },
         "caveat": (
             "gpu_count 在可测量方法（dense / kv_budget_shared）上不是自由轴："

@@ -65,12 +65,22 @@ bash experiments/run_gpu.sh all --nproc 4
 
 - **A3 与 E6 的 `dcc_kv` 不可测**：没有 `CompactKV → GPU attention kernel`。
   脚本会停下并打印缺失清单，不产出假数字。
-- **构造链路 CUDA 不可用**：`src/dcc_kv_ref` 下三处 device 缺陷
-  （`representative_query.py:27,30`、`value_regression.py:32`），
-  见 `_env.CUDA_CONSTRUCTION_DEFECTS`。A1 的 `--build-location cpu`
-  是当前唯一可部署路径，其 `T_build` 含 H2D 传输。
+- **构造链路的 CUDA 可用性待实测**：`src/dcc_kv_ref` 下三处 device 缺陷
+  （`representative_query.py`、`value_regression.py`，以及本次审计发现的
+  `key_selection.py:49`）均已在源码侧修复，`_env.CUDA_CONSTRUCTION_DEFECTS`
+  现为**历史清单**；但本机无 CUDA，"已修复"只是静态审计结论。
+  A1/A2 的实际构造位置由 `_env.probe_gpu_construction()` 在目标机上决定：
+  探测通过走 GPU 构造，否则 `--build-location auto` 退化为 CPU 构造 + H2D，
+  此时 `T_build` 含 PCIe 传输，必须在报告里声明。
 - **`ring` / `apb` / `fastkv` 无 GPU 实现**，E6 主表里这三个以
   `status: "blocked"` 记账。
+
+## 入口脚本
+
+`bash experiments/run_gpu.sh <e5|e6|e7|e8|all> [--nproc N] [脚本参数...]`。
+不带脚本参数时**不要**依赖旧的 `"${PASSTHRU[@]:-}"` 写法（它会把一个空字符串
+透传给 argparse，导致 `unrecognized arguments:` 而直接失败）—— 已在本次审计中
+改为 `"${PASSTHRU[@]}"`。
 
 ## `--device cpu` 只用于 E8
 

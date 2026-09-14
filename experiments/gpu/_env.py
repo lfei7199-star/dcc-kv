@@ -299,11 +299,26 @@ def gate_guard_for_report(meta: ExperimentMetadata) -> Dict[str, Any]:
 # 分布式
 # =============================================================================
 
-def dist_init(rank: int, world_size: int, port: int, backend: str = "nccl") -> None:
+def dist_init(
+    rank: int,
+    world_size: int,
+    port: int,
+    backend: str = "nccl",
+    local_rank: Optional[int] = None,
+) -> None:
+    """初始化进程组。
+
+    `rank` 是**全局** rank，`local_rank` 是本节点内的设备序号；多节点时二者
+    不同。设备绑定必须用 local_rank，进程组身份必须用全局 rank —— 混用会让
+    每个节点都把"本节点 rank 0"当成全局 0，进程组直接建错。
+    """
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ["MASTER_PORT"] = str(port)
     if backend == "nccl":
-        torch.cuda.set_device(rank)
+        lr = local_rank
+        if lr is None:
+            lr = int(os.environ.get("LOCAL_RANK", rank))
+        torch.cuda.set_device(lr)
     if not torch.distributed.is_initialized():
         torch.distributed.init_process_group(
             backend=backend, rank=rank, world_size=world_size
@@ -326,7 +341,11 @@ def maybe_spawn(worker: Callable[..., None], nprocs: int, args: Tuple[Any, ...])
     - 多进程但无 torchrun：用 torch.multiprocessing.spawn 兜底（仅限单机）
     """
     if os.environ.get("RANK") is not None:
-        rank = int(os.environ["LOCAL_RANK"])
+        # 用**全局** RANK，不要用 LOCAL_RANK。多节点下两者不同，而下游的
+        # `rank == 0` 同时控制"打印"与"落盘"：若把每个节点的本地 rank 0 都
+        # 当成全局 0，各节点会并发写同一个结果路径，且 init_process_group
+        # 的 rank 分配是错的。设备绑定由 dist_init 内部从 LOCAL_RANK 取。
+        rank = int(os.environ["RANK"])
         world = int(os.environ["WORLD_SIZE"])
         worker(rank, world, *args)
         return
@@ -338,9 +357,21 @@ def maybe_spawn(worker: Callable[..., None], nprocs: int, args: Tuple[Any, ...])
     ctx.spawn(worker, args=(nprocs,) + args, nprocs=nprocs)
 
 
-def barrier_and_sync() -> None:
+def device_sync() -> None:
+    """只等本设备的算力队列清空（不含任何集合通信）。
+
+    计时区间的**收尾**必须用它而不是 `barrier_and_sync`：后者含一次
+    `dist.barrier()`，把它放进测量窗口会把集合通信的同步开销算进每个样本，
+    且样本值会变成"最慢的 rank 决定"。rank 之间的对齐由下一轮迭代**开始前**
+    的 barrier 负责，不需要在窗口内再做一次。
+    """
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def barrier_and_sync() -> None:
+    """设备同步 + 进程间 barrier。只用于**计时区间之外**的对齐。"""
+    device_sync()
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
@@ -359,6 +390,16 @@ def benchmark_ms(
 
     刻意不返回均值 —— 统计规范要求从分布出发（median + p5/p95 + bootstrap CI），
     把原始逐次值交回调用方，由 experiments.common.report.summarize 汇总。
+
+    计时窗口的边界（重要，曾踩过）
+    ------------------------------
+    窗口 = [t0, fn() 返回且**本设备**算力队列清空]。因此：
+
+    - 窗口**之前**做 `barrier_and_sync()`，让各 rank 从同一起跑线出发；
+    - 窗口**之内**只做 `device_sync()`，不含集合通信 —— 旧实现在窗口内又调了
+      一次 `barrier_and_sync()`，于是每个样本都额外含一次 `dist.barrier()`
+      的开销，且样本值被最慢的 rank 支配，T_comm 与 T_comp 被同等抬高、
+      二者的比值与 overlap 归因随之失真。
     """
     for _ in range(max(0, warmup)):
         fn()
@@ -372,7 +413,7 @@ def benchmark_ms(
         t0 = time.perf_counter()
         fn()
         if sync:
-            barrier_and_sync()
+            device_sync()
         samples.append((time.perf_counter() - t0) * 1000.0)
     return samples
 
@@ -420,6 +461,15 @@ def memory_report() -> Dict[str, Any]:
 # 构造链路在 CUDA 上的可用性探测（当前已知为不可用）
 # =============================================================================
 
+# 构造链路在 CUDA 上的 device 缺陷**历史清单**。
+#
+# 三者均已在提交 5b5ce98 中修复（representative_query.py 现按 queries.device /
+# queries.dtype 生成；value_regression.py 的 torch.eye 带 device；key_selection.py
+# 的 arange 带 device）。保留本清单是为了让 `probe_gpu_construction` 在**仍然**
+# 失败时能给出可比对的线索，而不是让读者以为它描述的是当前状态。
+#
+# 注意：本机无 CUDA，"已修复"只是**静态审计**结论（源码中不再有无 device 的
+# 张量构造），是否真正可用必须由目标机上的 `probe_gpu_construction()` 实测确认。
 CUDA_CONSTRUCTION_DEFECTS: List[Dict[str, str]] = [
     {
         "file": "src/dcc_kv_ref/representative_query.py",
@@ -428,12 +478,14 @@ CUDA_CONSTRUCTION_DEFECTS: List[Dict[str, str]] = [
                    "随后 queries @ proj.T 触发 CUDA 与 CPU 张量的 device mismatch。",
         "fix": "g = torch.Generator(device=queries.device); "
                "proj = proj.to(device=queries.device, dtype=queries.dtype)",
+        "status": "fixed-in 5b5ce98",
     },
     {
         "file": "src/dcc_kv_ref/value_regression.py",
         "line": "32",
         "symptom": "torch.eye(B, dtype=X.dtype) 创建在 CPU 上，与 XTX（CUDA）相加时 device mismatch。",
         "fix": "torch.eye(B, dtype=X.dtype, device=X.device)",
+        "status": "fixed-in 5b5ce98",
     },
     {
         "file": "src/dcc_kv_ref/representative_query.py",
@@ -441,6 +493,15 @@ CUDA_CONSTRUCTION_DEFECTS: List[Dict[str, str]] = [
         "symptom": "torch.arange(N) / torch.tensor(selected) 返回 CPU 索引张量。"
                    "CUDA 张量用 CPU 索引当前可用，但会在 --device cpu 与 cuda 混跑时引入隐式同步。",
         "fix": "显式 .to(features.device)",
+        "status": "fixed-in 5b5ce98",
+    },
+    {
+        "file": "src/dcc_kv_ref/key_selection.py",
+        "line": "49",
+        "symptom": "预算 >= 块长 时返回 torch.arange(L_s)（CPU 索引），"
+                   "是同一类缺陷的最后一处；旧探测用 budget < 块长，恰好绕开了这个分支。",
+        "fix": "torch.arange(L_s, device=keys.device)",
+        "status": "fixed-in b10ea0e+audit",
     },
 ]
 
@@ -453,6 +514,10 @@ def probe_gpu_construction(device: str = "cuda") -> Dict[str, Any]:
     这些实验只能退化为"CPU 构造 + 传输"，而那会改变延迟的归因
     （构造开销被 PCIe 传输掩盖或放大），必须在报告里显式声明。
 
+    两条路径都要探：`budget < 块长`（走 RMS topk 选键）与
+    `budget >= 块长`（走"直接用全部 key"的短路分支）。两条分支返回的索引
+    来源不同，历史上恰是后者的索引留在 CPU 上而旧探测没覆盖到。
+
     本函数只做探测，不修改任何源码。
     """
     if not torch.cuda.is_available():
@@ -464,17 +529,32 @@ def probe_gpu_construction(device: str = "cuda") -> Dict[str, Any]:
 
     dev = torch.device(device)
     try:
-        K = torch.randn(64, 16, device=dev)
-        V = torch.randn(64, 16, device=dev)
-        Q = torch.randn(24, 16, device=dev)
-        ck = build_compact_kv(
-            source_keys=K, source_values=V, destination_queries=Q,
-            budget=8, num_representative_queries=4, projection_dim=8, seed=0,
-        )
+        L, d = 64, 16
+        K = torch.randn(L, d, device=dev)
+        V = torch.randn(L, d, device=dev)
+        Q = torch.randn(24, d, device=dev)
+        checks: Dict[str, Any] = {}
+        for case, budget in (("topk", 8), ("full_budget", L)):
+            ck = build_compact_kv(
+                source_keys=K, source_values=V, destination_queries=Q,
+                budget=budget, num_representative_queries=4, projection_dim=8, seed=0,
+            )
+            checks[case] = {
+                "budget": budget,
+                "logit_bias_device": str(ck.logit_bias.device),
+                "selected_indices_device": str(ck.selected_indices.device),
+                "all_on_device": all(
+                    t.device == dev for t in (ck.keys, ck.logit_bias, ck.values,
+                                              ck.selected_indices)
+                ),
+            }
+        ok = all(c["all_on_device"] for c in checks.values())
         return {
-            "ok": True,
-            "note": "构造链路在 CUDA 上可用",
-            "device_of_logit_bias": str(ck.logit_bias.device),
+            "ok": ok,
+            "note": ("构造链路在 CUDA 上可用，且四条返回张量都在目标设备上"
+                     if ok else
+                     "构造链路能跑通，但有返回张量不在目标设备上（见 checks）"),
+            "checks": checks,
         }
     except Exception as e:
         return {
@@ -484,9 +564,11 @@ def probe_gpu_construction(device: str = "cuda") -> Dict[str, Any]:
             "error": str(e),
             "known_defects": CUDA_CONSTRUCTION_DEFECTS,
             "note": (
-                "构造链路当前在 CUDA 张量上不可用（CPU-only 实现）。"
-                "GPU 实验中需要构造的环节将退化为 CPU 构造 + H2D/D2H 传输，"
+                "构造链路在 CUDA 张量上探测失败。为了不产出无法归因的延迟数字，"
+                "GPU 实验中需要构造的环节应退化为 CPU 构造 + H2D/D2H 传输，"
                 "该退化会改变延迟归因，必须在结果 payload 的 caveat 中声明。"
+                "先按 known_defects 逐条比对 —— 它们是历史缺陷清单（多已修复），"
+                "本次失败若与清单无关，则是新问题。"
             ),
         }
 
@@ -505,6 +587,7 @@ __all__ = [
     "dist_destroy",
     "maybe_spawn",
     "barrier_and_sync",
+    "device_sync",
     "benchmark_ms",
     "human_bytes",
     "tensor_bytes",

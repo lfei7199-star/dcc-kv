@@ -24,9 +24,10 @@ A3 要把四个变体的紧凑 KV 喂进真实模型的注意力，需要一条
 `src/distributed/dcc_kv_sync_cpu.py`（CPU、同步、且只做数值等价性验证），
 没有可用的 GPU kernel。因此本脚本的 A3 会在前置检查处停下并打印
 缺失清单，而不是产出一个看起来像模像样的假数字。
-另外，紧凑 KV 的**构造链路本身在 CUDA 张量上不可用**（见
-`_env.probe_gpu_construction()` 与 `_env.CUDA_CONSTRUCTION_DEFECTS`），
-这是 A1 必须处理的第二个前置问题。
+另外，紧凑 KV 的构造链路曾有**三处 device 缺陷**（`_env.CUDA_CONSTRUCTION_DEFECTS`
+保留的是历史清单），三者均已在 `5b5ce98` 修复；本机无 CUDA，所以"已修复"只是
+静态审计结论，能否真跑必须由目标机上的 `_env.probe_gpu_construction()` 实测。
+实际构造位置据此决定：探测通过走 GPU 构造，否则退化为 CPU 构造 + H2D 传输。
 
 **第三，A1 的构造代价有两种口径，且它们不可互换。**
 `--build-location gpu`  — 构造在 GPU 上（当前不可用，会如实报错）
@@ -75,8 +76,9 @@ SCRIPT = "experiments/gpu/e5_gpu_ablation.py"
 A3_MISSING_PREREQUISITES = [
     "CompactKV → GPU attention kernel：需要把紧凑 K/β/V 送进 SDPA，"
     "现有实现 src/distributed/dcc_kv_sync_cpu.py 是 CPU 同步版，只做数值等价性验证。",
-    "构造链路的 CUDA 可用性：src/dcc_kv_ref 下三处 device 缺陷，"
-    "见 _env.CUDA_CONSTRUCTION_DEFECTS。",
+    "构造链路的 CUDA 可用性：三处 device 缺陷（representative_query / "
+    "value_regression / key_selection）已在 5b5ce98 修复，但本机无 CUDA 无法实测，"
+    "须由 _env.probe_gpu_construction() 在目标机上确认。",
     "逐边条件化的多设备语义：单进程 harness 只有单一目的端，"
     "无法区分 DCC-KV 与 FastKV —— A3 的对照必须走多设备路径。",
 ]
@@ -562,7 +564,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--comp-scale", dest="comp_scale", type=float, default=1.0,
                    help="A5 计算侧规模系数：调小可放大 T_comm/T_comp 比，用于探测 overlap 上限")
     p.add_argument("--build-location", dest="build_location", type=str, default="auto",
-                   choices=["auto", "gpu", "cpu"])
+                   choices=["auto", "gpu", "cpu"],
+                   help="紧凑 KV 的构造位置。auto=先用 probe_gpu_construction() 探测 CUDA "
+                        "构造链路，通过则用 gpu，否则退化为 cpu（CPU 构造 + H2D 传输，"
+                        "T_build 会含 PCIe 传输，必须在报告里声明）")
     p.add_argument("--interconnect", type=str, default="unknown",
                    help="如实填写：nvlink / pcie / ib；会写进元数据")
 

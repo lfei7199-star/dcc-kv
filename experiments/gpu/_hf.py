@@ -33,6 +33,7 @@ prefill 计时口径。
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import pathlib
@@ -169,6 +170,8 @@ def apply_kv_budget(
     total: List[int] = []
     per_layer_ratio: List[float] = []
 
+    # 选点用的随机数一律固定在 CPU 上生成：这样同一 seed 在所有 rank 上得到
+    # 同一组保留位置，"random" 才是可比的对照，而不是引入了各 rank 差异。
     gen = torch.Generator(device="cpu").manual_seed(seed)
 
     for i, k, v in _cache_layers(cache):
@@ -265,8 +268,19 @@ def score_choices(
     """对一个样本的每个选项打分，返回正确选项与其得分。
 
     打分口径：以 "prompt + choice" 的 continuation 平均 logprob 作为分数
-    （长度归一），这是长文 QA 评测里的常规做法。所有选项用**同一份**
-    prefill 缓存，因此选项差异不会污染 prefill 计时。
+    （长度归一），这是长文 QA 评测里的常规做法。所有选项共用**同一份
+    prefill 结果**（各自持一份副本），因此选项差异不会污染 prefill 计时。
+
+    两处实现细节是正确性的前提，不要"优化"掉：
+
+    1. **每个选项一份 cache 副本。** 前缀只算一次（prefill 的代价是 O(S²)，
+       不能按选项重算），但 `DynamicCache` 在前向中会**就地追加**新 token：
+       若所有选项共用同一对象，第 2 个选项就会在"前缀 + 第 1 个选项的
+       continuation"之上继续生成，选项之间的比较不再同源。
+    2. **必须显式传 position_ids。** 预算裁剪后 cache 长度为 B < S；若留空，
+       transformers 会把 continuation 的绝对位置算成 B..B+T-1 而不是
+       S..S+T-1，RoPE 的相对距离整体错位，准确率会被系统性低估。
+       （保留位置子集本身不改被保留 key 的表示，见模块文档。）
     """
     tok = lm.tokenizer
     device = lm.device
@@ -290,10 +304,13 @@ def score_choices(
         if cont_ids.numel() == 0:
             scores.append(float("-inf"))
             continue
-        full = torch.cat([prompt_ids, cont_ids], dim=1)
-        # 复用已有 cache：只喂 continuation（首 token 用 last logits 打分）
-        out = lm.model(input_ids=full[:, S:], past_key_values=cache,
-                       use_cache=True, position_ids=None)
+        T = int(cont_ids.shape[1])
+        # 复用前缀：每个选项拿到裁剪后 cache 的**独立副本**（见函数文档 ①），
+        # 且必须显式给出绝对位置（见函数文档 ②）
+        past = copy.deepcopy(cache)
+        position_ids = torch.arange(S, S + T, device=device).unsqueeze(0)
+        out = lm.model(input_ids=cont_ids, past_key_values=past,
+                       use_cache=True, position_ids=position_ids)
         logits = out.logits[0]                       # [T, V]
         # 第 i 个 continuation token 由第 i-1 个位置的 logits 预测
         prev = torch.cat([prefix.logits[0, -1:, :], logits[:-1, :]], dim=0)

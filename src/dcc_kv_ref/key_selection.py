@@ -46,7 +46,9 @@ def select_topk_keys(
     M = representative_queries.shape[0]
 
     if budget >= L_s:
-        return keys, torch.arange(L_s)
+        # 索引必须在 keys 的同一个设备上：返回 CPU 索引会让下游（GPU 注意力通路、
+        # 或把 selected_indices 当位置掩码用的地方）出现"能用但有隐式同步"的状态。
+        return keys, torch.arange(L_s, device=keys.device)
 
     # A = softmax(Q̂ K^T / √d)  [M, L_s]
     scale = 1.0 / (d_h ** 0.5)

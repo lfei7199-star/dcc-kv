@@ -177,8 +177,18 @@ def all_to_all_v_async(
     send_sizes: Sequence[int],
     recv_sizes: Sequence[int],
 ) -> Tuple[torch.Tensor, Any]:
-    """变长 All-to-Allv（非阻塞版），返回 (recv_buffer, handle)。"""
+    """变长 All-to-Allv（非阻塞版），返回 (recv_buffer, handle)。
+
+    入参自洽性检查与阻塞版一致。缺这层检查时，尺寸写错只会在
+    `all_to_all_single` 内部退化成 `Split sizes doesn't match total dim 0 size`，
+    无法判断是调用方声明错了还是实现错了。
+    """
     world = dist.get_world_size()
+    assert len(send_sizes) == world, f"send_sizes 长度 {len(send_sizes)} != world {world}"
+    assert len(recv_sizes) == world
+    assert int(send.shape[0]) == int(sum(send_sizes)), (
+        f"send 行数 {int(send.shape[0])} != sum(send_sizes) {int(sum(send_sizes))}"
+    )
     recv = torch.empty(int(sum(recv_sizes)), send.shape[1],
                        dtype=send.dtype, device=send.device)
     handle = dist.all_to_all_single(
@@ -216,16 +226,15 @@ def run_sync_pipeline(
     但每块"发完即等"，因此不存在重叠。
     """
     import time
-    chunks = _split_chunks(payload, send_sizes, n_chunks)
+    chunks = _split_chunks(payload, send_sizes, recv_sizes, n_chunks)
 
     t0 = time.perf_counter()
     comm_ms = 0.0
     comp_ms = 0.0
 
-    for send_c, send_s, recv_s in chunks:
+    for send_c, chunk_send, chunk_recv in chunks:
         c0 = time.perf_counter()
-        recv_c = all_to_all_v(send_c, [send_s] * dist.get_world_size(),
-                              [recv_s] * dist.get_world_size())
+        recv_c = all_to_all_v(send_c, chunk_send, chunk_recv)
         _env.barrier_and_sync()
         comm_ms += (time.perf_counter() - c0) * 1000.0
 
@@ -261,17 +270,16 @@ def run_async_pipeline(
     使调用方能按式~(speedup-bound) 判断实测加速比的归因是否合理。
     """
     import time
-    chunks = _split_chunks(payload, send_sizes, n_chunks)
+    chunks = _split_chunks(payload, send_sizes, recv_sizes, n_chunks)
 
     t0 = time.perf_counter()
     comm_ms = 0.0
     comp_ms = 0.0
 
     pending: Optional[Tuple[torch.Tensor, Any]] = None
-    for i, (send_c, send_s, recv_s) in enumerate(chunks):
+    for i, (send_c, chunk_send, chunk_recv) in enumerate(chunks):
         c0 = time.perf_counter()
-        recv_c, handle = all_to_all_v_async(send_c, [send_s] * dist.get_world_size(),
-                                            [recv_s] * dist.get_world_size())
+        recv_c, handle = all_to_all_v_async(send_c, chunk_send, chunk_recv)
         comm_issue = (time.perf_counter() - c0) * 1000.0
 
         if pending is not None:
@@ -307,21 +315,46 @@ def run_async_pipeline(
 def _split_chunks(
     payload: torch.Tensor,
     send_sizes: Sequence[int],
+    recv_sizes: Sequence[int],
     n_chunks: int,
-) -> List[Tuple[torch.Tensor, int, int]]:
-    """把 outbound payload 按**等预算**切成 n_chunks 块。
+) -> List[Tuple[torch.Tensor, List[int], List[int]]]:
+    """按**目的端**切分 outbound payload，返回 (块张量, 块的 send_sizes, recv_sizes)。
 
-    假设各边预算相同（A5 固定其他条件，只变同步/异步），因此每块的
-    发/收大小都是 payload.shape[0] // n_chunks。
+    payload 的布局是「按 dst 顺序拼接」（见 `all_to_all_v`）：
+    [dst0 的 B 行, dst1 的 B 行, ...]。所以一个块**不能**是 payload 的连续行段 ——
+    必须对每个 dst 的片段各取一段再拼起来；否则块的起始行落在某个 dst 片段的
+    内部，声明的 split sizes 与块内实际行数也对不上。
+
+    旧实现把 payload 按连续行切段，却仍声明 `[块行数] * world`：`world >= 2`
+    时 `sum(send_sizes) == world * 块行数 != 块行数`，必然触发
+    `all_to_all_v` 的自洽性检查失败；即便绕过检查，行与目的端的对应也是错的。
+
+    等预算假设：只有 send_sizes / recv_sizes 各自全等时才能逐块均分。
+    变长预算下不做分块（宁可退化为单块，也不产出错误的切分）。
     """
-    total = int(payload.shape[0])
-    if n_chunks <= 1:
-        per = total
-        return [(payload, per, per)]
-    per = max(1, total // n_chunks)
-    return [(payload[i * per:(i + 1) * per], int(payload[i * per:(i + 1) * per].shape[0]),
-             int(payload[i * per:(i + 1) * per].shape[0]))
-            for i in range(n_chunks) if payload[i * per:(i + 1) * per].shape[0] > 0]
+    world = len(send_sizes)
+    if world == 0 or len(recv_sizes) != world:
+        raise ValueError("send_sizes 与 recv_sizes 必须等长且非空")
+    flat_send = [int(s) for s in send_sizes]
+    flat_recv = [int(r) for r in recv_sizes]
+    if len(set(flat_send)) != 1 or len(set(flat_recv)) != 1:
+        return [(payload, flat_send, flat_recv)]
+    B = flat_send[0]
+    if int(payload.shape[0]) != B * world:
+        raise ValueError(
+            f"payload 行数 {int(payload.shape[0])} 与 world * B = {world * B} 不符"
+        )
+    if n_chunks <= 1 or B < 2:
+        return [(payload, [B] * world, [B] * world)]
+
+    per = max(1, B // n_chunks)
+    chunks: List[Tuple[torch.Tensor, List[int], List[int]]] = []
+    for lo in range(0, B, per):
+        hi = min(B, lo + per)
+        k = hi - lo
+        parts = [payload[d * B + lo:d * B + hi] for d in range(world)]
+        chunks.append((torch.cat(parts, dim=0), [k] * world, [k] * world))
+    return chunks
 
 
 # =============================================================================
@@ -337,21 +370,36 @@ def make_comp_work(
 ):
     """构造一个与接收消息同规模的注意力式计算，用于产生真实 T_comp。
 
-    scale = 1/√d_h 的 QK^T → softmax → @V 是稠密注意力的三段式，
-    与接收到的紧凑块规模严格对应。这样 T_comm/T_comp 的比值
-    才有物理含义，而不是被人为设定的 sleep 决定。
+    scale = 1/√d_h 的 QK^T → (+β) → softmax → @V 是接收端实际要做的三段式，
+    与接收到的紧凑块规模对应。这样 T_comm/T_comp 的比值才有物理含义，
+    而不是被人为设定的 sleep 决定。
+
+    两处与旧实现的差别，都影响 T_comp 的可比性：
+
+    1. **β 必须加回 logits。** 紧凑块的列布局是 [K | β | V]（见
+       `pack_compact_edge`），β 是 DCC-KV 计算路径的一部分。旧实现只取
+       `recv[:, :d_h]` 与 `recv[:, d_h+1:]`，把 β 列直接丢掉 ——
+       那测的是"没有 β 的注意力"，与 DCC-KV 的实际 T_comp 不是同一个算子。
+    2. **查询矩阵只在首次调用时分配。** 旧实现每次调用都 `torch.randn`，
+       分配开销落在计时区间内，会系统性地抬高 T_comp、压低 T_comm/T_comp 比，
+       进而低估异步的 overlap 上限。
     """
     ratio = max(1, (d_h + 1 + d_v) // max(1, d_h))
     n_rows = max(1, int(recv_elem // max(1, d_h + 1 + d_v)) * ratio)
+    cache: Dict[str, Any] = {"q": None}
 
     def _work(recv: torch.Tensor) -> torch.Tensor:
         B = int(recv.shape[0])
         if B == 0:
             return recv
-        q = torch.randn(n_rows, d_h, device=recv.device, dtype=recv.dtype)
+        q = cache["q"]
+        if q is None or q.device != recv.device or q.dtype != recv.dtype:
+            q = torch.randn(n_rows, d_h, device=recv.device, dtype=recv.dtype)
+            cache["q"] = q
         k = recv[:, :d_h]
-        # 紧凑块里 β 与 V 的列位置由 pack_compact_edge 决定
+        # 紧凑块里 β 与 V 的列位置由 pack_compact_edge 决定：第 d_h 列是 β
         logits = (q @ k.T) * (1.0 / (d_h ** 0.5)) * flops_scale
+        logits = logits + recv[:, d_h].unsqueeze(0)
         attn = torch.softmax(logits, dim=-1)
         v = recv[:, d_h + 1:]
         return attn @ v
