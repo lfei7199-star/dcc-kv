@@ -148,6 +148,39 @@ def _set_layer(cache: Any, i: int, k: torch.Tensor, v: torch.Tensor) -> None:
         cache[i] = (k, v)
 
 
+def _pooled_key_energy(k: torch.Tensor, chunk: int = 8192,
+                       mode: str = "topk_rms") -> torch.Tensor:
+    """按块累加 Key 的能量谱，返回 [S]。
+
+    为什么不直接 `k.float().pow(2).mean(...)`：那会**瞬时复制整份 K cache**。
+    8B 模型 / 32K 上下文 / bf16 的单层 K 约 68 MiB，32 层合计约 2.1 GiB；
+    转成 float32 就是再要 4.3 GiB（V 还在旁边），而这一步只是要一个 [S] 的
+    排序键 —— 峰值额外显存本应只与 chunk 有关、与 S 无关。
+
+    累加在 float32 中逐块进行。归约沿 `(B, H, d)` 维、分块沿 `S` 维，两者
+    **正交**，因此每个 `s` 位置参与归约的元素集合与顺序都不变。实测边界：
+
+    - `chunk >= 2`：结果与"整张转换后一次算完"**逐位相同**
+      （覆盖 chunk ∈ {2, 7, 64, 999, 8192, 100000}）；
+    - `chunk == 1`：PyTorch 对 `[B, H, 1, d]` 会走另一条归约 kernel，产生
+      1 ULP 级差异（bf16 下约 3.6e-07）；
+    - **保留位置对任何 chunk 都逐位一致**（含 1）。位置才是影响准确率的量，
+      所以显存与数值在这里是可以解耦的。
+
+    见 tests/test_gpu_pipeline.py 的两个等价性锚点。
+    """
+    S = int(k.shape[-2])
+    out = torch.empty(S, dtype=torch.float32, device=k.device)
+    for lo in range(0, S, chunk):
+        hi = min(S, lo + chunk)
+        e = k[..., lo:hi, :].float().pow(2)
+        if mode == "topk_norm":
+            out[lo:hi] = e.sum(dim=(0, 1, 3))
+        else:
+            out[lo:hi] = e.mean(dim=(0, 1, 3))
+    return out
+
+
 def apply_kv_budget(
     cache: Any,
     budget: int,
@@ -183,11 +216,9 @@ def apply_kv_budget(
             continue
 
         B = max(1, min(int(budget), S))
-        kf = k.float()
         if mode in ("topk_rms", "topk_norm"):
-            pooled = kf.pow(2).mean(dim=(0, 1, 3))          # [S]
-            if mode == "topk_norm":
-                pooled = kf.pow(2).sum(dim=(0, 1, 3))
+            # 分块算能量谱：不做整张 k.float()，峰值额外显存与 S 无关
+            pooled = _pooled_key_energy(k, mode=mode)        # [S]
         elif mode == "random":
             pooled = torch.rand(S, generator=gen)
         elif mode == "stride":

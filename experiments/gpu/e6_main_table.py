@@ -19,6 +19,13 @@
 因此本脚本把 gpu_count 记为**方法的要求**而非自由轴，并在结果里显式标注
 `gpu_count_observed` 与 `gpu_count_required`。
 
+同一个道理适用于**同步模式轴**。sync / async 描述的是跨设备通信的调度方式，
+对单卡方法没有意义：若仍为 dense / kv_budget_shared 各生成 sync 与 async 两行，
+这两行必然**逐位相同**，而"两行数字一模一样"在表里会被读成"异步没有收益" ——
+那是把「这条轴不存在」错当成「这条轴上的测量结果为零」。
+因此本脚本对这类方法**折叠**该轴：只生成一行，`sync_async` 记为 `n/a`；
+`n_points_planned` 也按每个方法各自的轴累加，而不是用「方法数 × 同步模式数」一把乘。
+
 用法
 ----
     # 任何机器上都能跑：打印完整网格与每个方法的前置条件
@@ -113,17 +120,50 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# sync/async 轴对不需要该轴的方法的占位取值。刻意不用 "sync" 顶上：
+# 那会被下游读成一个真实的测量条件，而不是"该轴不适用"。
+SYNC_MODE_NA = "n/a"
+
+
+def sync_axis_applies(method: str) -> bool:
+    """sync / async 是否是该方法的自变量。
+
+    判据是**该方法是否存在跨设备通信**，即它是否要求多卡
+    （`METHOD_SPECS[...]["gpu_required"] > 1`）。单卡方法没有可异步重叠的通信，
+    该轴对它不构成自变量 —— 给它生成两行只会得到两行逐位相同的数。
+
+    从 `gpu_required` 推导而不是写死 False：写死会在 dcc_kv 的 GPU 实现就绪后
+    仍把它的异步行标成"该轴不适用"，把"还没测"固化成"没这条轴"。
+    """
+    return METHOD_SPECS[method]["gpu_required"] > 1
+
 
 # =============================================================================
 # 计划打印（无需 GPU）
 # =============================================================================
+
+def planned_points(a: argparse.Namespace) -> int:
+    """按每个方法各自的轴累加计划点数。
+
+    单卡方法折叠 sync/async 轴（贡献 1 而不是 len(sync_modes)）。若照旧用
+    `n_models * n_ctx * n_sync * n_methods` 一把乘，就把"永远不会被生成的数据点"
+    算进了计划数，计划数与实测数从此对不上，而差额会被误读成"漏跑"。
+    """
+    total = 0
+    for m in a.methods:
+        mult = len(a.sync_modes) if sync_axis_applies(m) else 1
+        total += len(a.models) * len(a.context_lengths) * mult
+    return total
+
 
 def print_plan(a: argparse.Namespace) -> int:
     n_models = len(a.models)
     n_ctx = len(a.context_lengths)
     n_sync = len(a.sync_modes)
     n_methods = len(a.methods)
-    n_points = n_models * n_ctx * n_sync * n_methods
+    n_points = planned_points(a)
+    expanded = [m for m in a.methods if sync_axis_applies(m)]
+    collapsed = [m for m in a.methods if not sync_axis_applies(m)]
 
     print("=" * 78)
     print("E6 网格计划")
@@ -132,11 +172,18 @@ def print_plan(a: argparse.Namespace) -> int:
     print(f"  上下文长度 ({n_ctx})：{a.context_lengths}")
     print(f"  同步模式   ({n_sync})：{a.sync_modes}")
     print(f"  方法      ({n_methods})：{a.methods}")
-    print(f"  => 数据点 = {n_models} × {n_ctx} × {n_sync} × {n_methods} = {n_points}")
+    print(f"  => 数据点 = {n_points}（按各方法自身的轴累加，不是简单相乘）")
+    print(f"     sync/async 轴展开的方法（{len(expanded)}）：{expanded}")
+    if collapsed:
+        overcount = n_models * n_ctx * (n_sync - 1) * len(collapsed)
+        print(f"     sync/async 轴折叠的方法（{len(collapsed)}）：{collapsed}")
+        print(f"       —— 单卡方法，无跨设备通信，该轴不是自变量；"
+              f"若按简单相乘会虚增 {overcount} 个永不生成的数据点")
     if n_methods != 3:
         print(f"  ⚠ 注意：方法数是 {n_methods}，而论文的 144 是按「3 基线」算的。"
-              f"两者数值可能**恰好相等**（3×4×2×6 = 3×4×2×2×3 = 144），"
-              f"但含义不同 —— 不要把本脚本算出的总数直接当成论文声称的数据点数。")
+              f"折叠 sync/async 轴后本脚本算出 {n_points} 点，"
+              f"与论文的 144 既不同值也不同义 —— 不要把本脚本的总数当成"
+              f"论文声称的数据点数。（旧版不折叠轴时数字曾凑到 144，纯属巧合。）")
     print(f"  每点 ≥{a.iters} 次 run（报告规范要求）"
           f" => 总前向次数 ≥ {n_points * a.iters}")
 
@@ -217,10 +264,11 @@ def measure_point(
                            f"该方法需要 {spec['gpu_required']} 卡，本次未满足"),
         "sync_async": sync_mode,
         # sync/async 只对"有跨设备通信"的方法才是自变量。dense 与
-        # kv_budget_shared 是单卡测量，两者在 sync 与 async 两行上的数值必然
-        # 逐位相同 —— 若不加标注，表里会出现两行完全一样的数而被读成
-        # "异步没有收益"，那是把"没有这条轴"错当成"这条轴上的测量结果"。
-        "sync_mode_applicable": False,
+        # kv_budget_shared 是单卡测量：本脚本对它们**折叠**该轴（见 main 的循环），
+        # 只生成一行且 sync_async 记为 "n/a"，因此不会出现两行逐位相同的数。
+        # 该标注由 gpu_required 推导而非写死 —— 写死会在 dcc_kv 的 GPU 实现
+        # 就绪后仍把它的异步行标成"不适用"。
+        "sync_mode_applicable": sync_axis_applies(method),
         "method": method,
         "method_measurable": spec["measurable"],
         "num_repr_queries": a.M,
@@ -252,7 +300,7 @@ def blocked_point(a: argparse.Namespace, model: str, ctx_len: int,
         "gpu_count_observed": 0,
         "gpu_count_required": spec["gpu_required"],
         "sync_async": sync_mode,
-        "sync_mode_applicable": False,
+        "sync_mode_applicable": sync_axis_applies(method),
         "method": method,
         "method_measurable": False,
         "budget_ratio": a.budget_ratio,
@@ -351,8 +399,12 @@ def main() -> int:
         lm = _hf.load_model(model, a.precision, attn_implementation=a.attn_impl)
         print("=" * 78)
         for ctx_len in a.context_lengths:
-            for sync_mode in a.sync_modes:
-                for method in a.methods:
+            for method in a.methods:
+                # 轴折叠：单卡方法（dense / kv_budget_shared）不生成 sync/async
+                # 两行 —— 它们没有跨设备通信，两行必然逐位相同，而表里"两行
+                # 一样"会被读成"异步没有收益"。详见 SYNC_MODE_NA 与 planned_points。
+                modes = a.sync_modes if sync_axis_applies(method) else [SYNC_MODE_NA]
+                for sync_mode in modes:
                     if not METHOD_SPECS[method]["measurable"]:
                         rows.append(blocked_point(a, model, ctx_len, sync_mode, method))
                         continue
@@ -362,6 +414,7 @@ def main() -> int:
                         r = {
                             "model": model, "context_length": ctx_len,
                             "sync_async": sync_mode, "method": method,
+                            "sync_mode_applicable": sync_axis_applies(method),
                             "status": "error", "error_type": type(e).__name__,
                             "error": str(e),
                             "traceback": traceback.format_exc().splitlines()[-8:],
@@ -408,8 +461,12 @@ def main() -> int:
         "grid": {
             "models": a.models, "context_lengths": a.context_lengths,
             "sync_modes": a.sync_modes, "methods": a.methods,
-            "n_points_planned": (len(a.models) * len(a.context_lengths)
-                                 * len(a.sync_modes) * len(a.methods)),
+            "n_points_planned": planned_points(a),
+            "n_points_planned_naive_product": (len(a.models) * len(a.context_lengths)
+                                               * len(a.sync_modes) * len(a.methods)),
+            "sync_axis_expanded_methods": [m for m in a.methods if sync_axis_applies(m)],
+            "sync_axis_collapsed_methods": [m for m in a.methods
+                                            if not sync_axis_applies(m)],
             "n_points_measured": sum(1 for r in rows if r["status"] == "ok"),
             "n_points_blocked": sum(1 for r in rows if r["status"] == "blocked"),
             "paper_claim": "3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144",

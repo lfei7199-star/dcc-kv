@@ -18,50 +18,44 @@
 ## 项目结构
 
 ```
-dcc_kv/
+dcc-kv/
 ├── src/
-│   ├── dcc_kv_ref/           # M0-M1 reference（CPU 可跑）
-│   │   ├── online_softmax.py
-│   │   ├── representative_query.py
-│   │   ├── key_selection.py
-│   │   ├── calibration.py
-│   │   ├── value_regression.py
-│   │   └── compact_kv.py
-│   ├── distributed/          # Phase A 多进程 + 通信原语
-│   │   ├── launch_dist.py
-│   │   ├── comm.py
-│   │   ├── full_attention_cpu.py
-│   │   ├── dcc_kv_sync_cpu.py
-│   │   └── var_len_msg.py
-│   ├── baselines/            # 基线 mock
-│   │   ├── ring_attention_cpu.py
-│   │   ├── fast_kv_cpu.py
-│   │   └── apb_cpu.py
+│   ├── dcc_kv_ref/           # M0-M1 参考实现（CPU 可跑）
+│   │   ├── online_softmax.py        # 归并算子 ⊕
+│   │   ├── representative_query.py  # 目的端代表 Query 选取
+│   │   ├── key_selection.py         # 选键
+│   │   ├── calibration.py           # β（质量偏置）拟合
+│   │   ├── value_regression.py      # V 岭回归
+│   │   └── compact_kv.py            # 构造链路总入口
+│   ├── distributed/          # 多进程 + 通信原语
+│   ├── baselines/            # 基线 mock（Ring / FastKV / APB）
 │   └── experiment_metadata.py
+├── experiments/
+│   ├── common/               # 合成场景与结果汇总
+│   ├── cpu/                  # E0–E11 / A3 机制级（CPU 可复现）
+│   ├── gpu/                  # E5–E8 任务级与系统级（需 GPU + NCCL）
+│   ├── run_cpu.sh
+│   └── run_gpu.sh
 ├── tests/
-│   ├── test_dist_equivalence.py
-│   ├── test_var_len_msg.py
-│   ├── test_experiment_metadata.py
-│   ├── test_smoke.py
-│   ├── test_phase_a.py
-│   └── gpu/                  # GPU 测试（deferred）
-│       ├── test_nccl_basic.py
-│       ├── test_async_overlap.py
-│       ├── test_end_to_end_8b.py
-│       └── profiling/
-├── scripts/                  # 启动脚本
-│   ├── run_m2_real.sh
-│   └── run_m3_async.sh
-├── docs/                     # 文档
+│   ├── test_*.py             # CPU 测试
+│   └── gpu/                  # GPU 测试（pytest 默认跳过）
+├── paper/                    # 论文（xelatex；sections/ + figures/）
+├── docs/
+│   ├── commit_log.md         # 逐次提交报告
+│   ├── FILE_MAP.md           # 文件说明（每个文件做什么）
 │   ├── git_strategy.md
 │   ├── release_checklist.md
-│   └── reproducibility.md
+│   ├── reproducibility.md
+│   └── ssh_setup.md
+├── scripts/                  # M2 / M3 运行脚本
 ├── conftest.py
 ├── pytest.ini
 ├── requirements.txt
 ├── .gitignore
 └── README.md
 ```
+
+**逐文件说明见 [docs/FILE_MAP.md](docs/FILE_MAP.md)。**
 
 ## 当前状态
 
@@ -126,6 +120,8 @@ compact = build_compact_kv(
 
 ## 文档导航
 
+- **[docs/FILE_MAP.md](docs/FILE_MAP.md)** — **文件说明：每个文件的作用与内容**
+- **[docs/commit_log.md](docs/commit_log.md)** — 逐次提交报告（做了什么 / 验证了什么 / 还有什么没解决）
 - **[docs/git_strategy.md](docs/git_strategy.md)** — Git 仓库管理策略（分支、commit、tag、实验可追溯）
 - **[docs/release_checklist.md](docs/release_checklist.md)** — 投稿前 / Camera Ready 清单
 - **[docs/reproducibility.md](docs/reproducibility.md)** — 可复现性说明
@@ -139,6 +135,12 @@ compact = build_compact_kv(
 - `../dcc_kv_plan/M2_pre_launch_checklist.md`
 - `../dcc_kv_plan/references.bib` 26 条
 - `../dcc_kv_plan/contribution_boundary_section.md`
+
+> ⚠️ **以上 5 份文件当前均不在仓库内，也不在相邻目录**（全盘搜索未找到，记账为 `docs/commit_log.md` C11）。
+> 其中 blueprint v1.1 §3 / §4 的内容已大体抄入本仓库（见 `docs/reproducibility.md` §6、
+> `docs/release_checklist.md` §4、`src/experiment_metadata.py`），因此**不阻塞开发**，
+> 但**无法做一致性核对**。另注：本行原写 `references.bib` 26 条，而仓库内
+> `paper/refs.bib` 实际为 **17 条**（且全部被引用）—— 该差额待取回原件后确认。
 
 ## License
 

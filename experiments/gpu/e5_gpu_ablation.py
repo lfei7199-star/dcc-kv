@@ -286,11 +286,21 @@ def a2_budget_sweep(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, Any
             "inbound_bytes_per_step": plan.inbound_bytes(rank),
             "full_kv_outbound_bytes_per_step": plan.full_outbound_bytes(rank),
             "compression_ratio": plan.compression_ratio(rank),
-            # 精度轴：只有真实模型才有
+            # 精度轴：只有真实模型才有。
+            # 且两轴**不同源**：x 轴（预算 / 通信量）来自 DCC-KV 的逐边预算
+            # （每条边各自选 B 个 Key），y 轴（准确率）走的是
+            # _hf.apply_kv_budget 的**共享** top-B 裁剪（所有 Query 共用同一组
+            # 保留位置）。二者只共享"B 是同一个标量"这一层耦合，不是同一条
+            # 曲线上的两点。在 CompactKV → GPU attention kernel 就绪前，
+            # 这里得到的是「预算–精度参考曲线」，**不是**帕累托前沿。
             "accuracy": None,
             "accuracy_by_task": None,
             "accuracy_by_length": None,
             "n_eval": 0,
+            "comm_axis_source": "dcc_kv(per-edge 逐边预算)",
+            "accuracy_axis_source": "kv_budget_shared(proxy, 共享 top-B 裁剪)",
+            "axes_are_same_method": False,
+            "pareto_frontier_valid": False,
         }
 
         if lm is not None and samples:
@@ -315,14 +325,27 @@ def a2_budget_sweep(rank: int, world: int, a: Dict[str, Any], ctx: Dict[str, Any
     caveat = [
         "通信量口径：边 = K[B,d_h] + β[B] + V[B,d_v]，未 padding 到等长。",
         "compression_ratio 的分母取「不压缩时每边发完整 L_s 的 K 与 V」。",
+        "**两轴不同源**：x 轴（预算 / 通信量）来自 DCC-KV 的逐边预算，"
+        "y 轴（准确率）来自 kv_budget_shared 的共享 top-B 裁剪 —— "
+        "预算标量 B 在两轴上的语义不同（逐边各自选 vs 全体共用一组）。"
+        "因此即使 --backend hf 跑通，得到的也只是「预算–精度参考曲线」，"
+        "不能称作帕累托前沿；同源前沿需要 CompactKV → GPU attention kernel"
+        "（当前缺失，见 A3_MISSING_PREREQUISITES）。",
     ]
     if not have_acc:
         caveat.append(
-            "**精度轴缺失**：本次运行未使用真实模型，因此这不是帕累托前沿，"
-            "只是通信量曲线。要得到可与 FastKV/APB 叠加对比的前沿，"
-            "需以 --backend hf 重跑。"
+            "**精度轴缺失**：本次运行未使用真实模型，因此连参考曲线也算不上，"
+            "只有一条通信量曲线。要画出参考曲线需以 --backend hf 重跑。"
         )
-    return {"experiment": "A2", "rows": rows, "caveat": " ".join(caveat)}
+    return {
+        "experiment": "A2",
+        "rows": rows,
+        "caveat": " ".join(caveat),
+        "comm_axis_source": "dcc_kv(per-edge 逐边预算)",
+        "accuracy_axis_source": "kv_budget_shared(proxy, 共享 top-B 裁剪)",
+        "axes_are_same_method": False,
+        "pareto_frontier_valid": False,
+    }
 
 
 # =============================================================================

@@ -38,7 +38,7 @@ from typing import List, Tuple
 import pytest
 import torch
 
-from experiments.gpu import _comm, _env
+from experiments.gpu import _comm, _env, _hf
 
 F = 8
 
@@ -292,3 +292,155 @@ def test_e5_binds_device_through_local_device() -> None:
            / "experiments" / "gpu" / "e5_gpu_ablation.py").read_text(encoding="utf-8")
     assert 'torch.device(f"cuda:{rank}")' not in src
     assert "_env.local_device(rank)" in src
+
+
+# ============================================================================
+# E6 的 sync/async 轴折叠（C20）
+# ============================================================================
+
+def _e6_module():
+    import importlib
+    return importlib.import_module("experiments.gpu.e6_main_table")
+
+
+def _ns(**kw):
+    import argparse
+    base = dict(models=["m"], context_lengths=[4096, 8192],
+                sync_modes=["sync", "async"],
+                methods=["dense", "kv_budget_shared", "dcc_kv", "ring", "apb",
+                         "fastkv_official"])
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_e6_sync_axis_applies_only_to_multi_device_methods() -> None:
+    """sync/async 的自变量资格由"是否有跨设备通信"决定，不是写死的。"""
+    e6 = _e6_module()
+    assert e6.sync_axis_applies("dense") is False
+    assert e6.sync_axis_applies("kv_budget_shared") is False
+    for m in ("dcc_kv", "ring", "apb", "fastkv_official"):
+        assert e6.sync_axis_applies(m) is True, m
+
+
+def test_e6_planned_points_counts_sync_axis_per_method() -> None:
+    """计划点数按各方法自身的轴累加：单卡方法的 sync 轴只贡献 1。
+
+    回归锚点：旧式 `n_models * n_ctx * n_sync * n_methods` 会把"永远不会被生成
+    的数据点"算进计划数，计划数与实测数的差额会被误读成"漏跑"。
+    """
+    e6 = _e6_module()
+    a = _ns(models=["m"], context_lengths=[4096, 8192],
+            sync_modes=["sync", "async"], methods=["dense", "dcc_kv"])
+    # dense: 1 × 2 × 1 = 2（轴折叠）; dcc_kv: 1 × 2 × 2 = 4（轴展开）
+    assert e6.planned_points(a) == 6
+    # 旧口径：1 × 2 × 2 × 2 = 8 —— 多算了 2 个
+    assert e6.planned_points(a) != 8
+
+    # 六个方法全选时：4 个多卡方法展开、2 个单卡方法折叠
+    full = e6.planned_points(_ns())
+    naive = 1 * 2 * 2 * 6
+    assert full == naive - 1 * 2 * (2 - 1) * 2
+
+
+def test_e6_single_device_rows_use_na_not_a_fake_sync_mode() -> None:
+    """折叠后写入行里的 sync_async 必须是 "n/a"，不能是 "sync"。
+
+    用 "sync" 顶上会把"该轴不适用"写成一个真实的测量条件。
+    """
+    e6 = _e6_module()
+    assert e6.SYNC_MODE_NA == "n/a"
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "experiments" / "gpu" / "e6_main_table.py").read_text(encoding="utf-8")
+    assert '"sync_mode_applicable": False' not in src, "标注又被写死了"
+    # 三处：measure_point、blocked_point、主循环的 except 分支
+    assert src.count('"sync_mode_applicable": sync_axis_applies(method)') == 3
+    assert '[SYNC_MODE_NA]' in src, "主循环没有折叠该轴"
+
+
+# ============================================================================
+# apply_kv_budget 的显存峰值（C21）
+# ============================================================================
+
+def test_pooled_key_energy_matches_full_float_computation() -> None:
+    """分块算能量谱必须与"整张 k.float() 一次算完"逐位等价。
+
+    这是"省内存"这个改动的正确性锚点：省法只有在结果不变时才成立。
+    """
+    torch.manual_seed(0)
+    k = torch.randn(2, 3, 5000, 8).to(torch.bfloat16)
+
+    got = _hf._pooled_key_energy(k, chunk=1024, mode="topk_rms")
+    ref = k.float().pow(2).mean(dim=(0, 1, 3))
+    assert got.shape == ref.shape == (5000,)
+    assert got.dtype == torch.float32
+    assert torch.equal(got, ref), "rms 分块与整张不逐位一致"
+
+    got_n = _hf._pooled_key_energy(k, chunk=1024, mode="topk_norm")
+    ref_n = k.float().pow(2).sum(dim=(0, 1, 3))
+    assert torch.equal(got_n, ref_n), "norm 分块与整张不逐位一致"
+
+    # 分块大小是**显存参数**，不是数值参数：chunk >= 2 时结果逐位相同。
+    # （chunk == 1 会让 PyTorch 对 [B,H,1,d] 走另一条归约 kernel，产生 1 ULP
+    #   级差异；它不影响保留位置，见下一个测试。默认 chunk=8192 不受影响。）
+    for chunk in (2, 7, 64, 999, 8192, 100000):
+        assert torch.equal(_hf._pooled_key_energy(k, chunk=chunk), ref), (
+            f"chunk={chunk} 改变了结果")
+
+
+def test_kv_budget_kept_positions_are_bitwise_stable_across_chunk_sizes() -> None:
+    """分块算能量**不得改变保留位置** —— 位置变了才会改变准确率。
+
+    这是对原 C22 顾虑（"分块累加会改变求和顺序、进而可能改变保留位置与
+    准确率，故不宜在无 GPU 复核时改动"）的直接检验。能量归约沿 (B, H, d) 维、
+    分块沿 S 维，两者**正交**，所以每个 s 位置的归约元素集合与顺序都不变。
+
+    实测：任何 chunk（含 1）下保留位置都逐位一致 —— 即"省显存"与"不改变
+    任务指标"在这里可以解耦，顾虑不成立。
+    """
+    torch.manual_seed(1)
+    S, d, B = 3000, 6, 256
+    k = torch.randn(1, 2, S, d).to(torch.bfloat16)
+
+    idx_ref = torch.topk(k.float().pow(2).mean(dim=(0, 1, 3)), B,
+                         largest=True).indices.sort().values
+    for chunk in (1, 2, 7, 1024, 8192, 10 ** 9):
+        idx = torch.topk(_hf._pooled_key_energy(k, chunk=chunk), B,
+                         largest=True).indices.sort().values
+        assert torch.equal(idx, idx_ref), f"chunk={chunk} 改变了保留位置"
+
+
+def test_apply_kv_budget_selects_same_indices_as_full_computation() -> None:
+    """预算裁剪选出的位置，必须与整张计算出的 top-B 完全一致。"""
+    torch.manual_seed(1)
+    S, d = 3000, 6
+    k = torch.randn(1, 2, S, d).to(torch.bfloat16)
+    v = torch.randn(1, 2, S, d).to(torch.bfloat16)
+
+    B = 256
+    cache = [(k.clone(), v.clone())]
+    stats = _hf.apply_kv_budget(cache, budget=B, mode="topk_rms")
+
+    assert stats["kept_per_layer"] == [B]
+    assert stats["total_per_layer"] == [S]
+    kk, vv = cache[0]
+    assert int(kk.shape[-2]) == B and int(vv.shape[-2]) == B
+
+    idx = torch.topk(k.float().pow(2).mean(dim=(0, 1, 3)), B,
+                     largest=True).indices.sort().values
+    assert torch.equal(kk, k[..., idx, :].contiguous())
+    assert torch.equal(vv, v[..., idx, :].contiguous())
+
+
+def test_apply_kv_budget_identity_and_short_cache_untouched() -> None:
+    """identity 与"S <= budget"两条短路不得改动缓存。"""
+    k = torch.randn(1, 2, 8, 4)
+    v = torch.randn(1, 2, 8, 4)
+    cache = [(k.clone(), v.clone())]
+    stats = _hf.apply_kv_budget(cache, budget=4, mode="identity")
+    assert stats["mean_keep_ratio"] == 1.0
+    assert torch.equal(cache[0][0], k)
+
+    cache2 = [(k.clone(), v.clone())]
+    stats2 = _hf.apply_kv_budget(cache2, budget=99, mode="topk_rms")
+    assert stats2["kept_per_layer"] == [8]
+    assert torch.equal(cache2[0][0], k)
