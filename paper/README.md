@@ -17,7 +17,8 @@ paper/
 │   ├── fig1_architecture.tex    DCC-KV 总体架构
 │   ├── fig2_async_pipeline.tex  异步 All-to-Allv 流水时序
 │   ├── fig3_error_decomposition.tex  误差来源与误差界
-│   └── fig4_comm_scaling.tex    通信量解析对比
+│   ├── fig4_comm_scaling.tex    通信量解析对比
+│   └── fig5_lambda_curve.tex    λ_β 的归并误差曲线（数据取自 results/cpu/e11）
 ├── build.sh                     一键构建脚本
 └── fetch_refs.sh                按 refs.bib 拉取 arXiv PDF（可选）
 ```
@@ -28,7 +29,7 @@ paper/
 
 ```bash
 bash build.sh              # 完整构建：先生成图表，再编译正文
-bash build.sh figures      # 只生成 4 张矢量图
+bash build.sh figures      # 只生成 5 张矢量图
 bash build.sh clean        # 清理中间文件
 bash build.sh distclean    # 清理中间文件 + 生成物
 ```
@@ -66,3 +67,6 @@ bash fetch_refs.sh
   `test_dcc_kv_lower_error_than_shared` 只断言两种方法的误差各自有界，
   并未断言 DCC-KV 更优，因此不构成 H2 的证据。
 - 图 4 为解析结果，图注已标注「非实测数据」。
+- 图 5 的坐标取自 `results/cpu/e11/summary.json` 的 180 格中位数（箱约束
+  `[-3,3]` 固定打开），头部注释已标明数据来源；改数须同步改图与
+  `§6.3.7` 表 `tab:lambda-ladder`。

@@ -19,7 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")" || exit 1
 
 FIG_DIR="figures"
-FIGS=(fig1_architecture fig2_async_pipeline fig3_error_decomposition fig4_comm_scaling)
+FIGS=(fig1_architecture fig2_async_pipeline fig3_error_decomposition fig4_comm_scaling fig5_lambda_curve)
 
 build_figures() {
     echo "==> 生成矢量图（$FIG_DIR/）"

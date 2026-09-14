@@ -55,6 +55,7 @@ if str(REPO_ROOT) not in sys.path:
 from experiments.common import synthetic as S          # noqa: E402
 from experiments.common import report as R             # noqa: E402
 from experiments.common import beta_variants as BV     # noqa: E402
+from src.dcc_kv_ref import DEFAULT_LAMBDA_BETA         # noqa: E402
 
 
 # =============================================================================
@@ -69,7 +70,7 @@ def evaluate_preset(
     num_repr: int,
     projection_dim: int,
     seed: int,
-    lambda_beta: float = 1e-3,
+    lambda_beta: float = DEFAULT_LAMBDA_BETA,
     fixed_ctx: Any = None,
 ) -> Dict[str, Any]:
     """在单个（目的端, 预算）上按指定口径构造并评估。"""
@@ -174,8 +175,9 @@ def main(argv: List[str] | None = None) -> int:
     p.add_argument("--focus-strength", dest="focus_strength", type=float, default=8.0)
     p.add_argument("--fixed-len", dest="fixed_len", type=int, default=128,
                    help="归并实验里固定上下文块的长度")
-    p.add_argument("--lambda-beta", dest="lambda_beta", type=float, default=1e-3,
-                   help="β 拟合的岭正则强度 λ_β")
+    p.add_argument("--lambda-beta", dest="lambda_beta", type=float,
+                   default=DEFAULT_LAMBDA_BETA,
+                   help="β 拟合的岭正则强度 λ_β（默认取 src 的 DEFAULT_LAMBDA_BETA）")
     p.add_argument("--no-paired", dest="paired", action="store_false")
     args = p.parse_args(argv)
 
@@ -192,6 +194,8 @@ def main(argv: List[str] | None = None) -> int:
     print(f"  M={args.num_repr} d_p={args.projection_dim} budgets={args.budgets} "
           f"seeds={args.seeds} focus={args.focus_strength} "
           f"λ_β={args.lambda_beta:g}")
+    print("  β 箱约束 = 无（E2b 只判定**口径**，故不启用箱约束以隔离该变量；"
+          "箱约束与 λ_β 的判定分别在 E10 与 E11）")
     print(f"  β 的理想量级（质量保持）：log(L_s/B) = "
           f"{[round(math.log(args.L_s / b), 3) for b in args.budgets]}")
     print()
@@ -405,6 +409,12 @@ def main(argv: List[str] | None = None) -> int:
         "experiment": "E2b",
         "kind": "beta-convention-decision",
         "config": {k: v for k, v in vars(args).items() if not k.startswith("_")},
+        "beta_bound": None,
+        "beta_bound_note": (
+            "E2b 只判定 β 的**口径**（质量目标与系数），故不启用箱约束，"
+            "以免把稳定性约束混入口径对照；箱约束的效果见 E10，"
+            "λ_β 的取值见 E11。"
+        ),
         "summary": summary,
         "paired": paired,
         "rows": rows,

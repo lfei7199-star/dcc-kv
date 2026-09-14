@@ -112,9 +112,11 @@ def evaluate_cell(
     projection_dim: int,
     fixed_ctx: Any,
     beta_bound: Any,
+    lambda_beta: float,
 ) -> Dict[str, Any]:
     """评估一个 (M, B) 格。"""
-    compact, diag = _build(split, dest, M, B, seed, projection_dim, beta_bound)
+    compact, diag = _build(split, dest, M, B, seed, projection_dim,
+                           beta_bound, lambda_beta)
 
     ev = split.eval_queries[dest]
     rel = S.relative_output_error(ev, compact, split.keys, split.values)
@@ -151,11 +153,13 @@ def evaluate_cell(
     }
 
 
-def _build(split, dest, M, B, seed, projection_dim, beta_bound):
+def _build(split, dest, M, B, seed, projection_dim, beta_bound, lambda_beta):
     """构造紧凑 KV：代表 Query 数 = M，预算 = B，β 箱约束 = beta_bound。
 
-    `beta_bound` 必须显式传入（由 main 从 CLI 解析），
+    `beta_bound` 与 `lambda_beta` 都必须显式传入（由 main 从 CLI 解析），
     以免脚本悄悄跟随 src 的默认值而在产物里留下不可追溯的口径。
+    「显式传入」的判据因此是：本脚本产出的每个数字，所用配置都能在
+    summary.json 的 config 里原样读回。
     """
     from src.dcc_kv_ref import build_compact_kv
     compact = build_compact_kv(
@@ -167,6 +171,7 @@ def _build(split, dest, M, B, seed, projection_dim, beta_bound):
         projection_dim=projection_dim,
         seed=seed,
         beta_bound=beta_bound,
+        lambda_beta=lambda_beta,
     )
     b = compact.logit_bias
     # 下界随箱约束变化（2026-09-14 修正）：旧写法固定比较 -13.0，
@@ -202,12 +207,18 @@ def main(argv: List[str] | None = None) -> int:
     p.add_argument("--projection-dim", dest="projection_dim", type=int, default=32)
     p.add_argument("--fixed-len", dest="fixed_len", type=int, default=128)
     p.add_argument("--focus-strength", dest="focus_strength", type=float, default=8.0)
+    p.add_argument("--lambda-beta", dest="lambda_beta", type=float,
+                   default=None,
+                   help="β 拟合的岭正则强度 λ_β；默认取 src 的 DEFAULT_LAMBDA_BETA")
     p.add_argument("--beta-bound", dest="beta_bound", type=float, default=None,
                    help="β 的箱约束半宽；默认取 src 的 DEFAULT_BETA_BOUND")
     p.add_argument("--no-beta-bound", dest="no_beta_bound", action="store_true",
                    help="关闭箱约束（复现 2026-09-14 之前的结果）")
     args = p.parse_args(argv)
 
+    if args.lambda_beta is None:
+        from src.dcc_kv_ref import DEFAULT_LAMBDA_BETA
+        args.lambda_beta = DEFAULT_LAMBDA_BETA
     if args.beta_bound is None and not args.no_beta_bound:
         from src.dcc_kv_ref import DEFAULT_BETA_BOUND
         args.beta_bound = DEFAULT_BETA_BOUND
@@ -231,6 +242,7 @@ def main(argv: List[str] | None = None) -> int:
     print("=" * 78)
     print(f"  L_s={args.L_s} d_h={args.d_h} d_v={args.d_v} dest={args.num_dest}")
     print(f"  β 箱约束 = {'无（β ≥ log(1e-6)）' if args.beta_bound is None else f'[-{args.beta_bound:g}, +{args.beta_bound:g}]'}")
+    print(f"  λ_β = {args.lambda_beta:g}")
     print(f"  每目的端 Query={args.queries_per_dest}，留出 {args.eval_fraction:.0%} "
           f"→ 拟合池={fit_pool}，评估池={args.queries_per_dest - fit_pool}")
     print(f"  M ∈ {args.Ms}    B ∈ {args.budgets}    seeds={args.seeds}")
@@ -256,7 +268,7 @@ def main(argv: List[str] | None = None) -> int:
                 for B in args.budgets:
                     rows.append(evaluate_cell(split, dest, M, B, seed,
                                               args.projection_dim, fixed_ctx,
-                                              args.beta_bound))
+                                              args.beta_bound, args.lambda_beta))
         print(f"  seed={seed} 完成（累计 {len(rows)} 格）")
 
     def med(field: str, **cond) -> float:

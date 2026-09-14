@@ -30,6 +30,24 @@
 本仓库实测（E10，`experiments/cpu/e10_beta_stability.py`，180 格）：不加箱约束时
 约 5.4% 的 Key 被压到 log(1e-6)=−13.8155 的下界，即"软剔除"；加 [−3,3] 后
 该比例降为 0，而误差变化在 ±0.002 以内。因此默认采用源论文的箱约束。
+
+λ_β 的默认值（E11，`experiments/cpu/e11_lambda_tuning.py`）
+-----------------------------------------------------------
+箱约束解决了"顶到 −13.8155"，但没有解决"顶到 −3"：在 λ_β=1e-3 下仍有 5.7%
+的 Key 停在箱的下界（E11 新增的"箱绑定率"诊断）。E11 在同样的 180 格上扫描
+λ_β ∈ [1e-3, 1e3]，结论是：
+
+* λ_β → ∞ 时 w → 1、β → 0，链路逐位退化到"关闭 β"：实测 max|Δ| ≤ 1.7·β_std，
+  比值有界，故该极限成立。这意味着留出误差曲线**必然回弹**，存在内部最优；
+* 输出与归并误差的最低点出现在 λ_β ≈ 1e-2 ~ 1e-1，比 λ_β=1e-3 低 0.004~0.019；
+* 但最优 λ_β 随 (M,B) 与所选指标移动达 4 个数量级（单格 argmin 从 3e-3 到 1e3），
+  因此**不存在全局最优的 λ_β**，默认值只能按公开判据取。
+
+本文采用的判据（可从落盘产物复现）：取**最小的** λ_β，使两个指标相对旧默认
+（1e-3）的改进在配对 bootstrap 上均**稳健**（95% CI 排除 0），且 B≤M 一侧
+保持统计中性。满足该判据的最小值是 3e-2（输出 Δ=−0.0119、归并 Δ=−0.0118，
+均 p<0.002；B≤M 侧 p>0.5），其最差单格退化 7.3%，远小于 1e-1 的 20.3%。
+故 ``DEFAULT_LAMBDA_BETA = 3e-2``；显式传入 lambda_reg 即可复现任何其它配置。
 """
 from __future__ import annotations
 
@@ -41,11 +59,16 @@ from typing import Dict, Optional, Tuple
 # 设为 None 可退回「w ≥ 0 无上界」的旧行为（复现旧结果时使用）。
 DEFAULT_BETA_BOUND: Optional[float] = 3.0
 
+# β 岭正则的默认强度 λ_β（E11 判定，见模块文档）。
+# 旧值为 1e-3：它会让 5.7% 的 Key 停在箱下界 −3，且两个指标都被 3e-2 稳健地
+# 超过（配对 bootstrap 95% CI 排除 0），故提升到判据允许的最小值 3e-2。
+DEFAULT_LAMBDA_BETA: float = 3e-2
+
 
 def nonneg_least_squares(
     G: torch.Tensor,
     target: torch.Tensor,
-    lambda_reg: float = 1e-3,
+    lambda_reg: float = DEFAULT_LAMBDA_BETA,
     n_iter: int = 2000,
     tol: float = 1e-12,
     lambda_mode: str = "relative",
@@ -74,7 +97,7 @@ def nonneg_least_squares(
     Args:
         G: [M, B] 设计矩阵（G_{a,j} = exp(ℓ_compact)）
         target: [M] 目标向量（未归一化质量 m_{s→r}）
-        lambda_reg: 正则化强度 λ_β
+        lambda_reg: 正则化强度 λ_β（默认 `DEFAULT_LAMBDA_BETA`=3e-2，见模块文档）
         n_iter: 最大迭代次数
         tol: 收敛容差（w 的最大变化量）
         lambda_mode: 见上
@@ -143,7 +166,7 @@ def fit_logit_bias(
     representative_queries: torch.Tensor,
     compact_keys: torch.Tensor,
     original_block_mass: torch.Tensor,
-    lambda_reg: float = 1e-3,
+    lambda_reg: float = DEFAULT_LAMBDA_BETA,
     mass_shift: float = 0.0,
     beta_bound: Optional[float] = DEFAULT_BETA_BOUND,
 ) -> torch.Tensor:
@@ -154,7 +177,7 @@ def fit_logit_bias(
         compact_keys: [B, d_h] 选中的 K（紧凑块）
         original_block_mass: [M] 原始块的**未归一化**质量
             m_{s→r} = Σ_k exp(ℓ_k) —— 不是 softmax 沿 key 轴之和（那恒等于 1）
-        lambda_reg: 正则化强度 λ_β
+        lambda_reg: 正则化强度 λ_β（默认 `DEFAULT_LAMBDA_BETA`=3e-2，见模块文档）
         mass_shift: 全局常数偏移 c。设计矩阵取 exp(ℓ_compact − c)，
             调用方必须用同一 c 计算 original_block_mass。
             **偏移不改变拟合出的 β**：把 ℓ → ℓ − c 与 m → m·exp(−c) 同时施加后，

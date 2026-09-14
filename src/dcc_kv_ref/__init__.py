@@ -24,6 +24,7 @@ from .key_selection import (
 )
 from .calibration import (
     DEFAULT_BETA_BOUND,
+    DEFAULT_LAMBDA_BETA,
     nonneg_least_squares,
     fit_logit_bias,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "select_topk_keys",
     # calibration
     "DEFAULT_BETA_BOUND",
+    "DEFAULT_LAMBDA_BETA",
     "nonneg_least_squares",
     "fit_logit_bias",
     # value regression

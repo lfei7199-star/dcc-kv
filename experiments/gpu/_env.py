@@ -244,7 +244,7 @@ def build_metadata(
     baseline: str = "dcc_kv",
     num_repr_queries: int = 64,
     projection_dim: int = 32,
-    lambda_beta: float = 1e-3,
+    lambda_beta: float = 3e-2,   # 与 src.dcc_kv_ref.DEFAULT_LAMBDA_BETA 一致（E11）
     lambda_value: float = 1e-3,
     task: str = "unknown",
     precision: str = "bfloat16",

@@ -26,7 +26,11 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from src.dcc_kv_ref import CompactKV, build_compact_kv
+from src.dcc_kv_ref import (
+    DEFAULT_LAMBDA_BETA,
+    CompactKV,
+    build_compact_kv,
+)
 
 
 # =============================================================================
@@ -530,7 +534,7 @@ def build_for_dest(
     budget: int,
     num_repr_queries: int = 32,
     projection_dim: int = 32,
-    lambda_beta: float = 1e-3,
+    lambda_beta: float = DEFAULT_LAMBDA_BETA,
     lambda_value: float = 1e-3,
     seed: int = 42,
 ) -> CompactKV:
@@ -553,7 +557,7 @@ def build_shared(
     budget: int,
     num_repr_queries: int = 32,
     projection_dim: int = 32,
-    lambda_beta: float = 1e-3,
+    lambda_beta: float = DEFAULT_LAMBDA_BETA,
     lambda_value: float = 1e-3,
     seed: int = 42,
 ) -> CompactKV:
