@@ -301,7 +301,12 @@ def main(argv: List[str] | None = None) -> int:
             a = [ka[k] for k in common]
             b = [kb[k] for k in common]
             pr = R.paired_bootstrap(a, b, metric_name="rel_out_err", unit="ratio")
-            paired[f"{name_a}_vs_{name_b}"] = pr.to_dict()
+            # 键里必须带 metric（2026-09-13 修正）：旧写法只有
+            # f"{name_a}_vs_{name_b}"，而同一对预设会在"单块"与"归并"两轮里
+            # 各写一次，后一轮直接把前一轮覆盖 —— 于是落盘的 paired 里
+            # 只剩单块结果，"归并侧 44/1"这类结论再也无法从产物复现。
+            # 复现方式：从 rows.csv 按 (seed, dest, budget) 配对重算。
+            paired[f"{name_a}_vs_{name_b}__{metric}"] = pr.to_dict()
             print(f"  {name_a:<20} vs {name_b:<12} n={pr.n_pairs:<4} "
                   f"mean_diff={pr.mean_diff:+.4e} "
                   f"CI95=[{pr.ci_95_lower:+.3e},{pr.ci_95_upper:+.3e}] "
@@ -361,18 +366,18 @@ def main(argv: List[str] | None = None) -> int:
                       f"{r['abs_mass_common_median']:>15.4e}")
         print()
         # 1. 现状 vs 正确口径（决定要不要改代码）
-        p_fix = paired.get("am_vs_legacy") or {}
+        p_fix = paired.get("am_vs_legacy__single") or {}
         if p_fix:
             print(f"  · 正确口径 vs 仓库现状（单块误差）："
                   f"mean_diff={p_fix['mean_diff']:+.4e}, p={p_fix['p_value_one_sided']:.4f}, "
                   f"{p_fix['a_wins']}/{p_fix['b_wins']} 配对"
                   f"  → {'应当修' if p_fix['p_value_one_sided'] < 0.05 else '无需改'}")
         # 2. β 在归并侧是否有效（β 的主战场）
-        p_mix = paired.get("am_vs_am_nobeta", {})
+        p_mix = paired.get("am_vs_am_nobeta__mixture", {})
         print()
         print("  β 的效应（归并侧 = β 的主战场）：")
         for nm in ("legacy", "shift", "am", "am_logfit", "am_scalar"):
-            pm = paired.get(f"{nm}_vs_am_nobeta")
+            pm = paired.get(f"{nm}_vs_am_nobeta__mixture")
             if not pm:
                 continue
             # 这里 am_nobeta 是 B，nm 是 A；A 更优 => mean_diff < 0

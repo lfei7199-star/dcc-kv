@@ -35,7 +35,8 @@ Eq.(2)：`Σ_{k∈K} exp(ℓ(q,k)) ≈ Σ_{j∈Ck} exp(ℓ(q,Ck_j) + β_j)`
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+import math
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -149,11 +150,33 @@ def nonneg_ridge_pgd(
     n_iter: int = 2000,
     tol: float = 1e-12,
     lambda_mode: str = "relative",
+    w_lower: float = 0.0,
+    w_upper: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """求解 min_{w>=0} ||G w − target||² + λ||w − 1||²，用步长 1/L 的投影梯度。
+    """求解 min_{w∈[lo,hi]} ||G w − target||² + λ||w − 1||²，用步长 1/L 的投影梯度。
 
-    规范化后等价于 `A w = b` 在非负象限上的投影，其中
+    规范化后等价于 `A w = b` 在**箱约束**上的投影，其中
     `A = GᵀG + λ_eff·I`、`b = Gᵀ·target + λ_eff·1`。
+
+    `w_lower` / `w_upper`（2026-09-13 新增，默认 `0.0` / `None` 即旧行为）
+    ---------------------------------------------------------------------
+    源论文 Attention Matching 附录 C.2 "Stabilizing β" 一节记录了与本模块
+    同一类失效模式，并给出了箱约束解法：
+
+    > A potential failure mode of this two-stage procedure is that mass matching
+    > can assign extremely small weights to some selected keys (i.e., very
+    > negative β, or effectively β = −∞). Such keys may have little effect on the
+    > mass objective yet still be useful for reducing attention-output error;
+    > however, once β is very negative, the corresponding key cannot contribute
+    > to the attention output, regardless of Cv.
+    > For Highest Attention Keys, we replace NNLS with a bounded least-squares
+    > over w = exp(β), enforcing e^{−3} ≤ w_j ≤ e^{3}.
+
+    其后果是**双阶段程序的耦合**：β 由质量目标拟合，却决定了输出阶段的
+    可用列。β_j → −∞ 等价于把第 j 个 Key 从输出回归的设计矩阵里删掉，
+    而这与 β 的定位（"质量重加权"）不符。
+
+    默认值保持 `[0, ∞)` 以便复现 E2b 的既有结论；E10 显式传入箱约束做对照。
 
     `lambda_mode` 决定 λ_eff：
         - ``"absolute"``：λ_eff = λ。与仓库 `nonneg_least_squares` 一致。
@@ -190,11 +213,13 @@ def nonneg_ridge_pgd(
         L = float(A.abs().sum(dim=-1).max().item())
     L = max(L, 1e-12)
 
-    w = torch.zeros(B, dtype=G.dtype)
+    w = torch.full((B,), float(w_lower), dtype=G.dtype)
     n_used = 0
     for it in range(n_iter):
         grad = A @ w - b
-        w_new = torch.clamp(w - grad / L, min=0.0)
+        w_new = torch.clamp(w - grad / L, min=w_lower)
+        if w_upper is not None:
+            w_new = torch.clamp(w_new, max=w_upper)
         delta = float((w_new - w).abs().max().item())
         w = w_new
         n_used = it + 1
@@ -208,6 +233,10 @@ def nonneg_ridge_pgd(
         "solver_lambda_eff": lam,
         "solver_curvature": float(torch.diagonal(A_data).mean().item()),
         "solver_residual": resid,
+        "w_lower": float(w_lower),
+        "w_upper": float(w_upper) if w_upper is not None else float("inf"),
+        # 支撑集：严格大于下界的坐标数。箱约束生效时它应当接近 B。
+        "support_size": int((w > float(w_lower) + 1e-12).sum()),
     }
     return w, diag
 
@@ -347,6 +376,8 @@ def fit_logit_bias_variant(
     shift: float = 0.0,
     solver: str = "pgd",
     lambda_mode: str = "relative",
+    w_lower: float = 0.0,
+    w_upper: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """按指定口径拟合 β。
 
@@ -390,7 +421,8 @@ def fit_logit_bias_variant(
 
     if solver == "pgd":
         w, sdiag = nonneg_ridge_pgd(G, m, lambda_reg=lambda_reg,
-                                    lambda_mode=lambda_mode)
+                                    lambda_mode=lambda_mode,
+                                    w_lower=w_lower, w_upper=w_upper)
     elif solver == "repo_legacy":
         w = _legacy_nonneg_least_squares(G, m, lambda_reg=lambda_reg)
         sdiag = {"solver_iters": -1, "solver_lipschitz": float("nan"),
@@ -404,9 +436,16 @@ def fit_logit_bias_variant(
     else:
         raise ValueError(f"未知 solver: {solver}")
 
-    # 各求解器返回的诊断字段名不完全一致，这里统一出一个 solver_residual
+    # 各求解器返回的诊断字段名不完全一致，这里统一出三个必备字段。
+    # `support_size` 的定义统一为「取值为正且不小于求解器下界的坐标数」：
+    # 对箱约束路径它就是箱内坐标数，对闭式 `scalar` 路径则退化为 B
+    # （β 为常量时所有 Key 同等参与，不存在被剔除的坐标）。
     sdiag.setdefault("solver_residual",
                      sdiag.get("solver_residual_logspace", float("nan")))
+    sdiag.setdefault("support_size", int((w > 1e-12).sum().item()))
+    sdiag.setdefault("w_lower", float(w_lower))
+    sdiag.setdefault("w_upper",
+                     float(w_upper) if w_upper is not None else float("inf"))
 
     eps = 1e-6
     beta = torch.log(torch.clamp(w, min=eps))
@@ -425,14 +464,37 @@ def fit_logit_bias_variant(
         c_p95 = float(torch.quantile(comp, 0.95).item()) if comp.numel() > 1 else c_med
         need_spread = (c_p95 / c_p5) if c_p5 > 1e-30 else float("inf")
 
+    # ---- 稳定性诊断：β 是否把 Key 从后续输出回归中"删掉" ----
+    # β_j 加在 logit 上，推理与 V 回归的设计矩阵都是 softmax(ℓ + β)。
+    # β_j → −∞ 时第 j 列的权重趋近 0，无论 C_v 取什么都无法让该 Key 参与输出 ——
+    # 这正是源论文 Appendix C.2 描述的失效模式。阈值取它的原文两档：−3（箱约束）
+    # 与 −7（OMP 剪枝线），另加一档求解器的 clamp 下界 log(1e-6)。
+    with torch.no_grad():
+        sv = torch.linalg.svdvals(G)
+        rank_tol = float(sv.max().item()) * max(M, B) * float(torch.finfo(G.dtype).eps)
+        rank_G = int((sv > rank_tol).sum().item())
+        cond_G = (float(sv.max().item() / sv.min().item())
+                  if float(sv.min().item()) > 0 else float("inf"))
+        log_eps = math.log(eps)
+        n_m3 = int((beta <= -3.0).sum().item())
+        n_m7 = int((beta <= -7.0).sum().item())
+        n_clamped = int((beta <= log_eps + 1e-9).sum().item())
+
     diag = {
         "mass_target_mean": float(m.mean()),
         "mass_target_std": float(m.std()) if M > 1 else 0.0,
         "w_mean": float(w.mean()),
         "beta_mean": float(beta.mean()),
+        "beta_std": float(beta.std()) if B > 1 else 0.0,
         "beta_min": float(beta.min()),
         "beta_max": float(beta.max()),
         "clamp_hits": int((w <= eps).sum()),
+        "n_beta_le_m3": n_m3,
+        "n_beta_le_m7": n_m7,
+        "n_beta_at_clamp": n_clamped,
+        "frac_beta_le_m3": n_m3 / max(B, 1),
+        "rank_G_numeric": rank_G,
+        "cond_G": cond_G,
         "needed_compensation_median": c_med,
         "needed_compensation_p5": c_p5,
         "needed_compensation_p95": c_p95,
@@ -458,6 +520,8 @@ def build_compact_kv_variant(
     lambda_beta: float = 1e-3,
     lambda_value: float = 1e-3,
     seed: int = 42,
+    w_lower: float = 0.0,
+    w_upper: Optional[float] = None,
 ) -> Tuple[CompactKV, Dict[str, float]]:
     """按指定口径构造紧凑 KV。
 
@@ -489,6 +553,7 @@ def build_compact_kv_variant(
         repr_queries, compact_keys, logits_orig,
         mass_target=cfg["mass"], lambda_reg=lambda_beta, shift=shift,
         solver=cfg["solver"], lambda_mode=cfg["lam"],
+        w_lower=w_lower, w_upper=w_upper,
     )
 
     # ---- V 回归：β 的系数由 fit 决定 ----
@@ -496,7 +561,24 @@ def build_compact_kv_variant(
     # 也必须用无 β 的 X。否则"拟合时带 β、评估时去掉 β"会把两个口径割裂，
     # 让 β 的损害被系统性夸大。
     if cfg["apply"] == "none":
+        # 诊断口径修正（2026-09-13）：此处必须把 β 形态统计**一并归零**。
+        # 旧写法只把 beta 置零，diag 里仍留着"拟合出来但从未施加"的那组 β ——
+        # 于是 `am_nobeta` 会报告 beta_min = −13.82、clamp 命中若干，
+        # 读起来像"β 在基线里也塌缩了"，而实际上基线里根本没有 β。
+        # 保留原值于 fitted_beta_* 以便仍需观察"拟合本会怎么做"。
+        diag["fitted_beta_mean"] = diag["beta_mean"]
+        diag["fitted_beta_min"] = diag["beta_min"]
+        diag["fitted_beta_max"] = diag["beta_max"]
+        diag["fitted_beta_std"] = diag["beta_std"]
+        diag["fitted_n_beta_at_clamp"] = diag["n_beta_at_clamp"]
+        diag["fitted_n_beta_le_m3"] = diag["n_beta_le_m3"]
         beta = torch.zeros_like(beta)
+        diag.update({
+            "beta_mean": 0.0, "beta_std": 0.0,
+            "beta_min": 0.0, "beta_max": 0.0,
+            "clamp_hits": 0, "n_beta_le_m3": 0, "n_beta_le_m7": 0,
+            "n_beta_at_clamp": 0, "frac_beta_le_m3": 0.0,
+        })
 
     logits_compact = (repr_queries @ compact_keys.T) * scale
     beta_in_fit = beta if cfg["fit"] == "one" else beta / max(M, 1)
@@ -505,6 +587,20 @@ def build_compact_kv_variant(
     A_orig = torch.softmax(logits_orig, dim=-1)
     Y = A_orig @ source_values
     C_v = ridge_regression_value(X, Y, lambda_reg=lambda_value)
+
+    # ---- 输出阶段的直接测量：还有多少个 Key 在真正参与输出？ ----
+    # X 的列权重就是各 Key 对输出的贡献份额（softmax 已归一化）。
+    # 取每列的跨 query 平均份额 s_j，再做有效个数（参与度）：
+    #     B_eff = exp(−Σ_j p_j log p_j),  p_j = s_j / Σ_j s_j
+    # 这是在**不依赖任何误差定义**的前提下回答"β 是否把列删掉了"。
+    with torch.no_grad():
+        col_mean = X.mean(dim=0)                       # [B]
+        tot = col_mean.sum().clamp(min=1e-30)
+        pj = (col_mean / tot).clamp(min=1e-30)
+        x_eff_budget = float(torch.exp(-(pj * torch.log(pj)).sum()).item())
+        v_fit_resid = float((X @ C_v - Y).norm().item() / (Y.norm().item() + 1e-12))
+        x_col_mean_min = float(col_mean.min().item())
+        x_col_mean_max = float(col_mean.max().item())
 
     diag.update({
         "preset": preset,
@@ -517,6 +613,13 @@ def build_compact_kv_variant(
         "lambda_mode": cfg["lam"],
         # X 的秩上限 —— 决定 B > M 时回归是否欠定
         "rank_upper_bound": int(min(M, budget)),
+        "x_eff_budget": x_eff_budget,
+        "x_eff_budget_frac": x_eff_budget / max(budget, 1),
+        "x_col_mean_min": x_col_mean_min,
+        "x_col_mean_max": x_col_mean_max,
+        "x_col_mean_ratio": (x_col_mean_min / x_col_mean_max
+                             if x_col_mean_max > 0 else float("inf")),
+        "v_fit_resid_rel": v_fit_resid,
     })
 
     compact = CompactKV(
