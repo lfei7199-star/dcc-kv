@@ -1,0 +1,69 @@
+{
+  "experiment": "E1",
+  "config": {
+    "L_s": 256,
+    "d_h": 32,
+    "d_v": 32,
+    "budget": 64,
+    "M": 32
+  },
+  "n_pass": 11,
+  "n_total": 11,
+  "checks": [
+    {
+      "check": "keys 形状为 [B, d_h]",
+      "passed": true,
+      "detail": "got (64, 32)"
+    },
+    {
+      "check": "logit_bias 形状为 [B]",
+      "passed": true,
+      "detail": "got (64,)"
+    },
+    {
+      "check": "values 形状为 [B, d_v]",
+      "passed": true,
+      "detail": "got (64, 32)"
+    },
+    {
+      "check": "selected_indices 形状为 [B]",
+      "passed": true,
+      "detail": "got (64,)"
+    },
+    {
+      "check": "选中索引互不重复",
+      "passed": true,
+      "detail": "唯一值 64/64"
+    },
+    {
+      "check": "选中索引落在 [0, L_s) 内",
+      "passed": true,
+      "detail": "min=1 max=255 L_s=256"
+    },
+    {
+      "check": "keys/values 无 NaN/Inf",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "logit_bias 无 NaN/Inf",
+      "passed": true,
+      "detail": "范围 [-13.8155, -2.5580]"
+    },
+    {
+      "check": "同种子下构造完全一致",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "check": "异种子可分辨（证明种子真的接入）",
+      "passed": true,
+      "detail": "种子改变了选中索引"
+    },
+    {
+      "check": "B < L_s 时确实发生压缩",
+      "passed": true,
+      "detail": ""
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+world_size,chunk_size,L_total,budget,max_abs_diff_compressed,rel_diff_compressed,within_repo_threshold_1e-2,max_abs_diff_budget_eq_chunk,max_abs_diff_no_compression_isolated,rel_diff_no_compression_isolated,merge_path_correct,gap_from_compaction_pipeline
+2,64,128,16,0.40679317712783813,0.5461793541908264,False,0.3216325342655182,2.980232238769531e-07,3.3894960438374255e-07,True,True
+4,64,256,16,0.4461657404899597,0.7981245517730713,False,0.34810614585876465,3.2782554626464844e-07,4.149202936787333e-07,True,True

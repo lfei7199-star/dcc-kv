@@ -1,0 +1,182 @@
+==============================================================================
+E3：边级条件化 vs 共享压缩（CPU，合成数据）
+==============================================================================
+  精度 dtype=float32  （可用: ['float32', 'float64']）
+  L_s=256  d_h=32  d_v=32  num_dest=4  M=32
+  预算扫描 B=[16, 32, 64, 128]
+  目的端分离度扫描=[0.0, 2.0, 4.0, 8.0, 16.0]（0.0 为负对照）
+
+------------------------------------------------------------------------------
+H1：同一源块对不同目的端的紧凑 KV 是否显著不同
+    判据 KL > 0.5；同时要求 KL 显著高于同目的端的种子噪声底线
+------------------------------------------------------------------------------
+  strength=0.0   B=16   KL= 14.247(ceil≈19.4)  JS=0.5806  floor: KL=8.893 JS=0.3914  Jaccard=0.067  ✓H1   ✓Key集不同
+  strength=0.0   B=32   KL= 11.391(ceil≈19.4)  JS=0.5245  floor: KL=4.942 JS=0.2420  Jaccard=0.153  ✓H1   ✓Key集不同
+  strength=0.0   B=64   KL=  9.434(ceil≈19.4)  JS=0.4550  floor: KL=4.655 JS=0.2652  Jaccard=0.255  ✓H1   ✓Key集不同
+  strength=0.0   B=128  KL=  5.611(ceil≈19.4)  JS=0.2774  floor: KL=2.150 JS=0.1120  Jaccard=0.434  ✓H1   ✓Key集不同
+  strength=2.0   B=16   KL= 14.201(ceil≈19.4)  JS=0.6129  floor: KL=4.302 JS=0.1987  Jaccard=0.103  ✓H1   ✓Key集不同
+  strength=2.0   B=32   KL= 13.239(ceil≈19.4)  JS=0.5780  floor: KL=2.024 JS=0.1168  Jaccard=0.104  ✓H1   ✓Key集不同
+  strength=2.0   B=64   KL= 10.359(ceil≈19.4)  JS=0.4875  floor: KL=4.571 JS=0.2515  Jaccard=0.196  ✓H1   ✓Key集不同
+  strength=2.0   B=128  KL=  6.495(ceil≈19.4)  JS=0.3236  floor: KL=1.636 JS=0.0864  Jaccard=0.355  ✓H1   ✓Key集不同
+  strength=4.0   B=16   KL= 14.768(ceil≈19.4)  JS=0.6452  floor: KL=2.848 JS=0.1510  Jaccard=0.067  ✓H1   ✓Key集不同
+  strength=4.0   B=32   KL= 14.237(ceil≈19.4)  JS=0.6282  floor: KL=3.466 JS=0.2192  Jaccard=0.067  ✓H1   ✓Key集不同
+  strength=4.0   B=64   KL= 11.010(ceil≈19.4)  JS=0.5286  floor: KL=1.938 JS=0.1410  Jaccard=0.143  ✓H1   ✓Key集不同
+  strength=4.0   B=128  KL=  6.948(ceil≈19.4)  JS=0.3456  floor: KL=0.882 JS=0.0524  Jaccard=0.320  ✓H1   ✓Key集不同
+  strength=8.0   B=16   KL= 13.898(ceil≈19.4)  JS=0.5982  floor: KL=0.767 JS=0.0451  Jaccard=0.067  ✓H1   ✓Key集不同
+  strength=8.0   B=32   KL= 13.110(ceil≈19.4)  JS=0.5786  floor: KL=0.283 JS=0.0248  Jaccard=0.076  ✓H1   ✓Key集不同
+  strength=8.0   B=64   KL= 11.571(ceil≈19.4)  JS=0.5270  floor: KL=0.522 JS=0.0306  Jaccard=0.118  ✓H1   ✓Key集不同
+  strength=8.0   B=128  KL=  7.066(ceil≈19.4)  JS=0.3395  floor: KL=0.352 JS=0.0191  Jaccard=0.303  ✓H1   ✓Key集不同
+  strength=16.0  B=16   KL= 15.387(ceil≈19.4)  JS=0.6679  floor: KL=0.263 JS=0.0117  Jaccard=0.032  ✓H1   ✓Key集不同
+  strength=16.0  B=32   KL= 13.802(ceil≈19.4)  JS=0.6239  floor: KL=0.139 JS=0.0063  Jaccard=0.058  ✓H1   ✓Key集不同
+  strength=16.0  B=64   KL= 12.352(ceil≈19.4)  JS=0.5769  floor: KL=0.009 JS=0.0007  Jaccard=0.113  ✓H1   ✓Key集不同
+  strength=16.0  B=128  KL=  8.287(ceil≈19.4)  JS=0.3790  floor: KL=0.009 JS=0.0011  Jaccard=0.310  ✓H1   ✓Key集不同
+
+  KL > 0.5 满足:            20/20 组合
+  JS 高于种子噪声底线:       20/20 组合
+  选中 Key 集合显著不同:     20/20 组合
+  KL 已饱和(> 0.8×上限):     0/20 组合
+
+  说明：strength=0 不是「无差异」的零假设，而是「各目的端仅有采样噪声」
+  差异」。真正的零假设是「无条件化」（共享压缩），其对比见下节 H2。
+
+------------------------------------------------------------------------------
+H2：DCC-KV(逐边条件化) vs 共享压缩 —— 配对比较
+    同时扫描 β 的三种使用方式，以检验结论是否由 β 约定主导
+------------------------------------------------------------------------------
+  --- β 模式 = full ---
+    strength=0.0   B=16   DCC-KV=0.606530  Shared=0.736489  Δ=-0.129959  p=0.0000  DCC 优
+    strength=0.0   B=32   DCC-KV=0.512705  Shared=0.833019  Δ=-0.320315  p=0.0000  DCC 优
+    strength=0.0   B=64   DCC-KV=0.332491  Shared=0.702624  Δ=-0.370133  p=0.0000  DCC 优
+    strength=0.0   B=128  DCC-KV=0.267784  Shared=0.546804  Δ=-0.279020  p=0.0000  DCC 优
+    strength=2.0   B=16   DCC-KV=0.574350  Shared=0.767443  Δ=-0.193093  p=0.0000  DCC 优
+    strength=2.0   B=32   DCC-KV=0.437834  Shared=0.871052  Δ=-0.433218  p=0.0000  DCC 优
+    strength=2.0   B=64   DCC-KV=0.329442  Shared=0.705833  Δ=-0.376391  p=0.0000  DCC 优
+    strength=2.0   B=128  DCC-KV=0.246396  Shared=0.558199  Δ=-0.311803  p=0.0000  DCC 优
+    strength=4.0   B=16   DCC-KV=0.515165  Shared=0.771614  Δ=-0.256450  p=0.0000  DCC 优
+    strength=4.0   B=32   DCC-KV=0.408339  Shared=0.804784  Δ=-0.396445  p=0.0000  DCC 优
+    strength=4.0   B=64   DCC-KV=0.267930  Shared=0.682674  Δ=-0.414744  p=0.0000  DCC 优
+    strength=4.0   B=128  DCC-KV=0.219406  Shared=0.542433  Δ=-0.323027  p=0.0000  DCC 优
+    strength=8.0   B=16   DCC-KV=0.289470  Shared=0.681275  Δ=-0.391805  p=0.0000  DCC 优
+    strength=8.0   B=32   DCC-KV=0.183477  Shared=0.643267  Δ=-0.459790  p=0.0000  DCC 优
+    strength=8.0   B=64   DCC-KV=0.122921  Shared=0.496504  Δ=-0.373583  p=0.0000  DCC 优
+    strength=8.0   B=128  DCC-KV=0.119482  Shared=0.447840  Δ=-0.328358  p=0.0000  DCC 优
+    strength=16.0  B=16   DCC-KV=0.061297  Shared=0.357635  Δ=-0.296338  p=0.0000  DCC 优
+    strength=16.0  B=32   DCC-KV=0.035822  Shared=0.276682  Δ=-0.240859  p=0.0000  DCC 优
+    strength=16.0  B=64   DCC-KV=0.035350  Shared=0.229149  Δ=-0.193799  p=0.0000  DCC 优
+    strength=16.0  B=128  DCC-KV=0.038474  Shared=0.224384  Δ=-0.185910  p=0.0000  DCC 优
+    [汇总] Δ=-0.313752 CI95=[-0.324720,-0.303259] p=0.000000  方向一致=是
+
+  --- β 模式 = over_m ---
+    strength=0.0   B=16   DCC-KV=0.985904  Shared=1.355464  Δ=-0.369560  p=0.0000  DCC 优
+    strength=0.0   B=32   DCC-KV=0.973080  Shared=0.949960  Δ=+0.023120  p=0.7357  Shr 优
+    strength=0.0   B=64   DCC-KV=0.609110  Shared=0.779922  Δ=-0.170811  p=0.0000  DCC 优
+    strength=0.0   B=128  DCC-KV=0.400146  Shared=0.583240  Δ=-0.183094  p=0.0000  DCC 优
+    strength=2.0   B=16   DCC-KV=1.026361  Shared=1.248734  Δ=-0.222373  p=0.0002  DCC 优
+    strength=2.0   B=32   DCC-KV=0.947102  Shared=0.859192  Δ=+0.087911  p=0.9963  Shr 优
+    strength=2.0   B=64   DCC-KV=0.625318  Shared=0.798935  Δ=-0.173617  p=0.0000  DCC 优
+    strength=2.0   B=128  DCC-KV=0.365377  Shared=0.613892  Δ=-0.248514  p=0.0000  DCC 优
+    strength=4.0   B=16   DCC-KV=1.031289  Shared=1.480353  Δ=-0.449064  p=0.0000  DCC 优
+    strength=4.0   B=32   DCC-KV=1.103134  Shared=1.212661  Δ=-0.109527  p=0.0095  DCC 优
+    strength=4.0   B=64   DCC-KV=0.603967  Shared=0.812674  Δ=-0.208707  p=0.0000  DCC 优
+    strength=4.0   B=128  DCC-KV=0.345432  Shared=0.583140  Δ=-0.237708  p=0.0000  DCC 优
+    strength=8.0   B=16   DCC-KV=0.569387  Shared=0.915406  Δ=-0.346019  p=0.0000  DCC 优
+    strength=8.0   B=32   DCC-KV=0.474903  Shared=0.768094  Δ=-0.293192  p=0.0000  DCC 优
+    strength=8.0   B=64   DCC-KV=0.315378  Shared=0.628128  Δ=-0.312750  p=0.0000  DCC 优
+    strength=8.0   B=128  DCC-KV=0.197711  Shared=0.490847  Δ=-0.293136  p=0.0000  DCC 优
+    strength=16.0  B=16   DCC-KV=0.090804  Shared=0.377981  Δ=-0.287177  p=0.0000  DCC 优
+    strength=16.0  B=32   DCC-KV=0.050822  Shared=0.286647  Δ=-0.235825  p=0.0000  DCC 优
+    strength=16.0  B=64   DCC-KV=0.048357  Shared=0.237536  Δ=-0.189179  p=0.0000  DCC 优
+    strength=16.0  B=128  DCC-KV=0.070207  Shared=0.237227  Δ=-0.167020  p=0.0000  DCC 优
+    [汇总] Δ=-0.219312 CI95=[-0.233758,-0.204775] p=0.000000  方向一致=否
+
+  --- β 模式 = none ---
+    strength=0.0   B=16   DCC-KV=1.010961  Shared=1.405754  Δ=-0.394794  p=0.0000  DCC 优
+    strength=0.0   B=32   DCC-KV=0.992202  Shared=0.950779  Δ=+0.041423  p=0.8695  Shr 优
+    strength=0.0   B=64   DCC-KV=0.620552  Shared=0.783010  Δ=-0.162458  p=0.0000  DCC 优
+    strength=0.0   B=128  DCC-KV=0.406150  Shared=0.585479  Δ=-0.179329  p=0.0000  DCC 优
+    strength=2.0   B=16   DCC-KV=1.062699  Shared=1.282610  Δ=-0.219911  p=0.0002  DCC 优
+    strength=2.0   B=32   DCC-KV=0.970526  Shared=0.855352  Δ=+0.115175  p=0.9995  Shr 优
+    strength=2.0   B=64   DCC-KV=0.635960  Shared=0.800436  Δ=-0.164476  p=0.0000  DCC 优
+    strength=2.0   B=128  DCC-KV=0.370608  Shared=0.617003  Δ=-0.246395  p=0.0000  DCC 优
+    strength=4.0   B=16   DCC-KV=1.084262  Shared=1.529089  Δ=-0.444827  p=0.0000  DCC 优
+    strength=4.0   B=32   DCC-KV=1.141756  Shared=1.231637  Δ=-0.089881  p=0.0253  DCC 优
+    strength=4.0   B=64   DCC-KV=0.616629  Shared=0.815498  Δ=-0.198869  p=0.0000  DCC 优
+    strength=4.0   B=128  DCC-KV=0.351790  Shared=0.585195  Δ=-0.233406  p=0.0000  DCC 优
+    strength=8.0   B=16   DCC-KV=0.587461  Shared=0.930044  Δ=-0.342584  p=0.0000  DCC 优
+    strength=8.0   B=32   DCC-KV=0.488772  Shared=0.776302  Δ=-0.287530  p=0.0000  DCC 优
+    strength=8.0   B=64   DCC-KV=0.323515  Shared=0.634639  Δ=-0.311125  p=0.0000  DCC 优
+    strength=8.0   B=128  DCC-KV=0.201332  Shared=0.493153  Δ=-0.291821  p=0.0000  DCC 优
+    strength=16.0  B=16   DCC-KV=0.092249  Shared=0.378897  Δ=-0.286647  p=0.0000  DCC 优
+    strength=16.0  B=32   DCC-KV=0.051590  Shared=0.287277  Δ=-0.235687  p=0.0000  DCC 优
+    strength=16.0  B=64   DCC-KV=0.049128  Shared=0.238051  Δ=-0.188923  p=0.0000  DCC 优
+    strength=16.0  B=128  DCC-KV=0.072118  Shared=0.238128  Δ=-0.166010  p=0.0000  DCC 优
+    [汇总] Δ=-0.214404 CI95=[-0.229282,-0.199513] p=0.000000  方向一致=否
+
+------------------------------------------------------------------------------
+逐条件明细（以这一层为准，汇总仅作参考）：
+    β=full    strength=0.0   B=16   Δ=-0.129959 p=0.000 显著 → DCC-KV优
+    β=full    strength=0.0   B=32   Δ=-0.320315 p=0.000 显著 → DCC-KV优
+    β=full    strength=0.0   B=64   Δ=-0.370133 p=0.000 显著 → DCC-KV优
+    β=full    strength=0.0   B=128  Δ=-0.279020 p=0.000 显著 → DCC-KV优
+    β=full    strength=2.0   B=16   Δ=-0.193093 p=0.000 显著 → DCC-KV优
+    β=full    strength=2.0   B=32   Δ=-0.433218 p=0.000 显著 → DCC-KV优
+    β=full    strength=2.0   B=64   Δ=-0.376391 p=0.000 显著 → DCC-KV优
+    β=full    strength=2.0   B=128  Δ=-0.311803 p=0.000 显著 → DCC-KV优
+    β=full    strength=4.0   B=16   Δ=-0.256450 p=0.000 显著 → DCC-KV优
+    β=full    strength=4.0   B=32   Δ=-0.396445 p=0.000 显著 → DCC-KV优
+    β=full    strength=4.0   B=64   Δ=-0.414744 p=0.000 显著 → DCC-KV优
+    β=full    strength=4.0   B=128  Δ=-0.323027 p=0.000 显著 → DCC-KV优
+    β=full    strength=8.0   B=16   Δ=-0.391805 p=0.000 显著 → DCC-KV优
+    β=full    strength=8.0   B=32   Δ=-0.459790 p=0.000 显著 → DCC-KV优
+    β=full    strength=8.0   B=64   Δ=-0.373583 p=0.000 显著 → DCC-KV优
+    β=full    strength=8.0   B=128  Δ=-0.328358 p=0.000 显著 → DCC-KV优
+    β=full    strength=16.0  B=16   Δ=-0.296338 p=0.000 显著 → DCC-KV优
+    β=full    strength=16.0  B=32   Δ=-0.240859 p=0.000 显著 → DCC-KV优
+    β=full    strength=16.0  B=64   Δ=-0.193799 p=0.000 显著 → DCC-KV优
+    β=full    strength=16.0  B=128  Δ=-0.185910 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=0.0   B=16   Δ=-0.369560 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=0.0   B=32   Δ=+0.023120 p=0.736 不显著 → 共享压缩优
+    β=over_m  strength=0.0   B=64   Δ=-0.170811 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=0.0   B=128  Δ=-0.183094 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=2.0   B=16   Δ=-0.222373 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=2.0   B=32   Δ=+0.087911 p=0.996 不显著 → 共享压缩优
+    β=over_m  strength=2.0   B=64   Δ=-0.173617 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=2.0   B=128  Δ=-0.248514 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=4.0   B=16   Δ=-0.449064 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=4.0   B=32   Δ=-0.109527 p=0.009 显著 → DCC-KV优
+    β=over_m  strength=4.0   B=64   Δ=-0.208707 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=4.0   B=128  Δ=-0.237708 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=8.0   B=16   Δ=-0.346019 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=8.0   B=32   Δ=-0.293192 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=8.0   B=64   Δ=-0.312750 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=8.0   B=128  Δ=-0.293136 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=16.0  B=16   Δ=-0.287177 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=16.0  B=32   Δ=-0.235825 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=16.0  B=64   Δ=-0.189179 p=0.000 显著 → DCC-KV优
+    β=over_m  strength=16.0  B=128  Δ=-0.167020 p=0.000 显著 → DCC-KV优
+    β=none    strength=0.0   B=16   Δ=-0.394794 p=0.000 显著 → DCC-KV优
+    β=none    strength=0.0   B=32   Δ=+0.041423 p=0.870 不显著 → 共享压缩优
+    β=none    strength=0.0   B=64   Δ=-0.162458 p=0.000 显著 → DCC-KV优
+    β=none    strength=0.0   B=128  Δ=-0.179329 p=0.000 显著 → DCC-KV优
+    β=none    strength=2.0   B=16   Δ=-0.219911 p=0.000 显著 → DCC-KV优
+    β=none    strength=2.0   B=32   Δ=+0.115175 p=1.000 不显著 → 共享压缩优
+    β=none    strength=2.0   B=64   Δ=-0.164476 p=0.000 显著 → DCC-KV优
+    β=none    strength=2.0   B=128  Δ=-0.246395 p=0.000 显著 → DCC-KV优
+    β=none    strength=4.0   B=16   Δ=-0.444827 p=0.000 显著 → DCC-KV优
+    β=none    strength=4.0   B=32   Δ=-0.089881 p=0.025 显著 → DCC-KV优
+    β=none    strength=4.0   B=64   Δ=-0.198869 p=0.000 显著 → DCC-KV优
+    β=none    strength=4.0   B=128  Δ=-0.233406 p=0.000 显著 → DCC-KV优
+    β=none    strength=8.0   B=16   Δ=-0.342584 p=0.000 显著 → DCC-KV优
+    β=none    strength=8.0   B=32   Δ=-0.287530 p=0.000 显著 → DCC-KV优
+    β=none    strength=8.0   B=64   Δ=-0.311125 p=0.000 显著 → DCC-KV优
+    β=none    strength=8.0   B=128  Δ=-0.291821 p=0.000 显著 → DCC-KV优
+    β=none    strength=16.0  B=16   Δ=-0.286647 p=0.000 显著 → DCC-KV优
+    β=none    strength=16.0  B=32   Δ=-0.235687 p=0.000 显著 → DCC-KV优
+    β=none    strength=16.0  B=64   Δ=-0.188923 p=0.000 显著 → DCC-KV优
+    β=none    strength=16.0  B=128  Δ=-0.166010 p=0.000 显著 → DCC-KV优
+
+  结论方向对 β 的使用方式不敏感（各模式汇总差异 {'full': -0.313752, 'over_m': -0.219312, 'none': -0.214404}），因此 E3 的结论不是 β 约定造成的伪影。
+
+==============================================================================
+结果已写入 C:\Users\29914\WorkBuddy\2026-09-13-16-25-13\dcc-kv\results\cpu\e3
+==============================================================================

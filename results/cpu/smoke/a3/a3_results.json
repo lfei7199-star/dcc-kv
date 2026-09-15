@@ -1,0 +1,84 @@
+{
+  "experiment": "A3(mechanism-level)",
+  "rows": [
+    {
+      "focus_strength": 8.0,
+      "budget": 16,
+      "nominal_compression_ratio": 0.125,
+      "M": 16,
+      "value_regression_underdetermined": false,
+      "eps_out_full_median": 0.6187088489532471,
+      "eps_out_full_ci_lower": 0.46930421367287634,
+      "eps_out_full_ci_upper": 0.8241155743598938,
+      "eps_mass_full_median": 0.5296325087547302,
+      "eps_out_no_beta_median": 0.11127526313066483,
+      "eps_out_no_beta_ci_lower": 0.09188506752252579,
+      "eps_out_no_beta_ci_upper": 0.13931197430938483,
+      "eps_mass_no_beta_median": 0.31034277379512787,
+      "eps_out_no_value_median": 1.0712453126907349,
+      "eps_out_no_value_ci_lower": 0.9875245094299316,
+      "eps_out_no_value_ci_upper": 1.3391191959381104,
+      "eps_mass_no_value_median": 0.5296325087547302,
+      "eps_out_no_both_median": 0.43459610641002655,
+      "eps_out_no_both_ci_lower": 0.4021044485270977,
+      "eps_out_no_both_ci_upper": 0.6218887567520142,
+      "eps_mass_no_both_median": 0.31034277379512787,
+      "beta_contribution": -0.5074335858225822,
+      "value_regression_contribution": 0.4525364637374878
+    },
+    {
+      "focus_strength": 8.0,
+      "budget": 64,
+      "nominal_compression_ratio": 0.5,
+      "M": 16,
+      "value_regression_underdetermined": true,
+      "eps_out_full_median": 0.9006041884422302,
+      "eps_out_full_ci_lower": 0.8675261735916138,
+      "eps_out_full_ci_upper": 0.935806930065155,
+      "eps_mass_full_median": 0.36047545075416565,
+      "eps_out_no_beta_median": 0.1982174590229988,
+      "eps_out_no_beta_ci_lower": 0.17798274755477905,
+      "eps_out_no_beta_ci_upper": 0.2244945466518402,
+      "eps_mass_no_beta_median": 0.07618551328778267,
+      "eps_out_no_value_median": 1.417151391506195,
+      "eps_out_no_value_ci_lower": 1.3512978553771973,
+      "eps_out_no_value_ci_upper": 1.5006662011146545,
+      "eps_mass_no_value_median": 0.36047545075416565,
+      "eps_out_no_both_median": 0.1048256941139698,
+      "eps_out_no_both_ci_lower": 0.08995023369789124,
+      "eps_out_no_both_ci_upper": 0.12016664631664752,
+      "eps_mass_no_both_median": 0.07618551328778267,
+      "beta_contribution": -0.7023867294192314,
+      "value_regression_contribution": 0.5165472030639648
+    }
+  ],
+  "beta_contribution_summary": {
+    "median": -0.6049101576209068,
+    "p5": -0.6926390722393989,
+    "p95": -0.5171812430024147,
+    "ci_95_lower": -0.7023867294192314,
+    "ci_95_upper": -0.5074335858225822,
+    "raw_values": [
+      -0.5074335858225822,
+      -0.7023867294192314
+    ],
+    "n_runs": 2,
+    "metric_name": "beta_contribution",
+    "unit": "ratio"
+  },
+  "value_regression_contribution_summary": {
+    "median": 0.4845418334007263,
+    "p5": 0.4557370007038116,
+    "p95": 0.513346666097641,
+    "ci_95_lower": 0.4525364637374878,
+    "ci_95_upper": 0.5165472030639648,
+    "raw_values": [
+      0.4525364637374878,
+      0.5165472030639648
+    ],
+    "n_runs": 2,
+    "metric_name": "value_regression_contribution",
+    "unit": "ratio"
+  },
+  "caveat": "本脚本测的是重构误差，不是任务指标。论文 H3 的 0.5/1.0 点阈值以任务指标为单位，二者不同量纲，因此这里的数字不能直接验证或否证 H3。它回答的是更上游的前置问题：各组件在机制层面是否还有贡献空间。"
+}

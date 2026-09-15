@@ -1,0 +1,26 @@
+==============================================================================
+E2：压缩保真度曲线 ε_mass(B) / ε_out(B)
+==============================================================================
+  dtype=float32（论文规格为 FP64，当前被 dtype 缺陷阻塞）
+  L_s=256  d_h=32  d_v=32  M=32
+
+  strength=0.0   B=8    B/L= 0.031 保留质量= 0.050 (  1.6x)  |ε_mass| none=0.9054 over_m=0.9068  ε_out none=0.8886 over_m=0.8730
+  strength=0.0   B=16   B/L= 0.062 保留质量= 0.090 (  1.4x)  |ε_mass| none=0.8774 over_m=0.8784  ε_out none=0.8389 over_m=0.8240
+  strength=0.0   B=32   B/L= 0.125 保留质量= 0.164 (  1.3x)  |ε_mass| none=0.7973 over_m=0.8000  ε_out none=0.9320 over_m=0.9135
+  strength=0.0   B=64   B/L= 0.250 保留质量= 0.302 (  1.2x)  |ε_mass| none=0.6723 over_m=0.6710  ε_out none=0.6355 over_m=0.6139
+  strength=0.0   B=128  B/L= 0.500 保留质量= 0.561 (  1.1x)  |ε_mass| none=0.4098 over_m=0.4122  ε_out none=0.2871 over_m=0.2794
+  strength=0.0   B=256  B/L= 1.000 保留质量= 1.000 (  1.0x)  |ε_mass| none=0.0000 over_m=0.0023  ε_out none=0.1747 over_m=0.1743
+  strength=8.0   B=8    B/L= 0.031 保留质量= 0.254 (  8.1x)  |ε_mass| none=0.7287 over_m=0.7265  ε_out none=0.9292 over_m=0.8824
+  strength=8.0   B=16   B/L= 0.062 保留质量= 0.376 (  6.0x)  |ε_mass| none=0.6288 over_m=0.6228  ε_out none=1.3990 over_m=1.3512
+  strength=8.0   B=32   B/L= 0.125 保留质量= 0.536 (  4.3x)  |ε_mass| none=0.4709 over_m=0.4673  ε_out none=0.4805 over_m=0.4715
+  strength=8.0   B=64   B/L= 0.250 保留质量= 0.722 (  2.9x)  |ε_mass| none=0.2808 over_m=0.2766  ε_out none=0.4176 over_m=0.4063
+  strength=8.0   B=128  B/L= 0.500 保留质量= 0.897 (  1.8x)  |ε_mass| none=0.1022 over_m=0.1027  ε_out none=0.1635 over_m=0.1595
+  strength=8.0   B=256  B/L= 1.000 保留质量= 1.000 (  1.0x)  |ε_mass| none=0.0000 over_m=0.0039  ε_out none=0.1795 over_m=0.1755
+
+读取方式：
+  1. 保留质量 >> B/L_s：RMS 选择挑高权重 token，所以名义压缩比
+     严重低估了实际保留的信息。B/L=1% 时保留质量可能仍有几十 %。
+  2. mass_underestimated_* 为真 → §5.3 性质 2 成立（质量被系统性低估）。
+  3. none 与 over_m 两列的差距，就是 β 机制的实际贡献量。
+
+结果已写入 C:\Users\29914\WorkBuddy\2026-09-13-16-25-13\dcc-kv\results\cpu\e2

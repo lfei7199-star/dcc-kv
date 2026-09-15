@@ -1,0 +1,24 @@
+{
+  "experiment": "E4",
+  "rows": [
+    {
+      "world_size": 2,
+      "chunk_size": 32,
+      "L_total": 64,
+      "budget": 16,
+      "max_abs_diff_compressed": 0.7652261257171631,
+      "rel_diff_compressed": 0.7537488341331482,
+      "within_repo_threshold_1e-2": false,
+      "max_abs_diff_budget_eq_chunk": 0.7856450080871582,
+      "max_abs_diff_no_compression_isolated": 2.5331974029541016e-07,
+      "rel_diff_no_compression_isolated": 2.6004695996562077e-07,
+      "merge_path_correct": true,
+      "gap_from_compaction_pipeline": true
+    }
+  ],
+  "repo_tests": {
+    "ran": true,
+    "returncode": 1,
+    "summary": ""
+  }
+}

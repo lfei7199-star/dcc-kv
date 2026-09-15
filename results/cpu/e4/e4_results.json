@@ -1,0 +1,38 @@
+{
+  "experiment": "E4",
+  "rows": [
+    {
+      "world_size": 2,
+      "chunk_size": 64,
+      "L_total": 128,
+      "budget": 16,
+      "max_abs_diff_compressed": 0.40679317712783813,
+      "rel_diff_compressed": 0.5461793541908264,
+      "within_repo_threshold_1e-2": false,
+      "max_abs_diff_budget_eq_chunk": 0.3216325342655182,
+      "max_abs_diff_no_compression_isolated": 2.980232238769531e-07,
+      "rel_diff_no_compression_isolated": 3.3894960438374255e-07,
+      "merge_path_correct": true,
+      "gap_from_compaction_pipeline": true
+    },
+    {
+      "world_size": 4,
+      "chunk_size": 64,
+      "L_total": 256,
+      "budget": 16,
+      "max_abs_diff_compressed": 0.4461657404899597,
+      "rel_diff_compressed": 0.7981245517730713,
+      "within_repo_threshold_1e-2": false,
+      "max_abs_diff_budget_eq_chunk": 0.34810614585876465,
+      "max_abs_diff_no_compression_isolated": 3.2782554626464844e-07,
+      "rel_diff_no_compression_isolated": 4.149202936787333e-07,
+      "merge_path_correct": true,
+      "gap_from_compaction_pipeline": true
+    }
+  ],
+  "repo_tests": {
+    "ran": true,
+    "returncode": 1,
+    "summary": ""
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "config": {
+    "seed": 0,
+    "L": 256,
+    "chunk_size": 64,
+    "world_size": 4,
+    "dtype": "float64"
+  },
+  "note": "只做定位：解释 test_fast_kv_vs_dense_within_tolerance 与 test_apb_vs_dense_within_tolerance 为何不成立，不改默认超参。",
+  "d1_convention": {
+    "rows": [
+      {
+        "causal": true,
+        "dense_absmax": 2.2650642924644617,
+        "fastkv_maxdiff": 1.121353205474043,
+        "apb_maxdiff": 1.6867791023303527
+      },
+      {
+        "causal": false,
+        "dense_absmax": 0.5281829469743575,
+        "fastkv_maxdiff": 0.23973934424500798,
+        "apb_maxdiff": 0.6029584193063218
+      }
+    ]
+  },
+  "d2_error_decomposition": {
+    "causal_True": {
+      "src_fast_kv_maxdiff": 1.121353205474043,
+      "ref_regressed_v_maxdiff": 1.121353205474043,
+      "ref_exact_v_maxdiff": 0.013631240279850632
+    },
+    "causal_False": {
+      "src_fast_kv_maxdiff": 0.23973934424500798,
+      "ref_regressed_v_maxdiff": 0.23973934424500798,
+      "ref_exact_v_maxdiff": 0.00755860798981739
+    },
+    "selected_indices_is_identity": true,
+    "fastkv_config": {
+      "budget": 64,
+      "num_repr_queries": 32,
+      "projection_dim": 16,
+      "lambda_beta": 0.03,
+      "lambda_value": 0.001,
+      "seed": 42
+    }
+  },
+  "d3_apb_position_order": {
+    "topk_head_b32": [
+      22,
+      0,
+      19,
+      8,
+      27,
+      33
+    ],
+    "topk_is_position_sorted_b32": false,
+    "b32_causal_True": {
+      "roworder_maxdiff": 1.9943916551584877,
+      "position_maxdiff": 1.6867791023303527
+    },
+    "b32_causal_False": {
+      "roworder_maxdiff": 0.6029584193063219,
+      "position_maxdiff": 0.6029584193063218
+    },
+    "topk_head_b64": [
+      22,
+      0,
+      19,
+      8,
+      27,
+      33
+    ],
+    "topk_is_position_sorted_b64": false,
+    "b64_causal_True": {
+      "roworder_maxdiff": 1.9943916551584877,
+      "position_maxdiff": 2.220446049250313e-16
+    },
+    "b64_causal_False": {
+      "roworder_maxdiff": 2.7755575615628914e-16,
+      "position_maxdiff": 2.7755575615628914e-16
+    }
+  }
+}
