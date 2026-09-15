@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 from experiments.common import hypotheses as H  # noqa: E402
 
 E5 = REPO_ROOT / "experiments" / "gpu" / "e5_gpu_ablation.py"
+E3 = REPO_ROOT / "experiments" / "cpu" / "e3_edge_conditioning.py"
 RELEASE_CHECKLIST = REPO_ROOT / "docs" / "release_checklist.md"
 
 
@@ -146,13 +147,27 @@ def test_h4_judgement_is_wired_into_e5():
     assert H.HYPOTHESES["H4"].code_status == "judged"
 
 
-def test_unjudged_gap_is_recorded():
-    """H1/H2/H3/H5 的判据尚未接线 —— 这个事实有记录，不会随时间消失。
+def test_h1_judgement_is_wired_into_e3():
+    """H1 的判据由 E3 的 h1_criterion_met 产出（2026-09-15 更正）。"""
+    assert H.HYPOTHESES["H1"].code_status == "judged"
 
+
+def test_e3_does_not_hardcode_the_h1_threshold():
+    """E3 曾写裸的 `ci_95_lower > 0.5`，绕开阈值表 —— 由独立监督查出。"""
+    src = E3.read_text(encoding="utf-8")
+    assert "hypotheses as H" in src, "e3 未导入阈值表"
+    assert "H.h1_pass(" in src, "E3 的 H1 判据未调用 h1_pass"
+    assert "ci_95_lower > 0.5" not in src, "E3 仍硬编码 H1 阈值，应改从 hypotheses 取"
+
+
+def test_unjudged_gap_is_recorded():
+    """H2/H3/H5 的判据尚未接线 —— 这个事实有记录，不会随时间消失。
+
+    H1 已于 2026-09-15 登记为 judged（E3 的 h1_criterion_met），H4 一直如此。
     将来接线扩大覆盖面时，请**同时**更新此处与各 spec 的 code_status
     及 note（本测试失败即提醒）。
     """
-    assert set(H.UNJUDGED) == {"H1", "H2", "H3", "H5"}
+    assert set(H.UNJUDGED) == {"H2", "H3", "H5"}
     assert H.UNJUDGED == tuple(
         h for h, s in H.HYPOTHESES.items() if s.code_status != "judged"
     )

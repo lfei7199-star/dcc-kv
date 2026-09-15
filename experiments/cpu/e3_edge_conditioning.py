@@ -55,6 +55,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from experiments.common import synthetic as S  # noqa: E402
 from experiments.common import report as R  # noqa: E402
+from experiments.common import hypotheses as H  # noqa: E402
 
 
 # =============================================================================
@@ -208,7 +209,10 @@ def run_h1(args) -> List[Dict[str, Any]]:
                 "kl_over_floor": (kl_sum.median / floor["kl"]) if floor["kl"] > 1e-12 else float("inf"),
                 "js_over_floor": (js_sum.median / floor["js"]) if floor["js"] > 1e-12 else float("inf"),
                 "jaccard_median": jc_sum.median,
-                "h1_criterion_met": bool(kl_sum.ci_95_lower > 0.5),
+                # H1 判据必须走单一事实源（experiments/common/hypotheses.py）。
+                # 这里曾经把阈值 0.5 直接写死在比较里，绕开了阈值表 —— 由独立
+                # 监督（2026-09-15）查出，见 docs/commit_log.md 第 22 条。
+                "h1_criterion_met": H.h1_pass(kl_sum.ci_95_lower),
                 "beats_sampling_floor": bool(js_sum.ci_95_lower > floor["js"]),
                 # 无假设证据：两个目的端选中的 Key 集合是否显著不同
                 "key_sets_distinct": bool(jc_sum.ci_95_upper < 0.9),
@@ -240,6 +244,21 @@ def run_h2(args) -> Dict[str, Any]:
 
     注意 M（代表 Query 数）在两侧相同，因此差异只来自"条件化"本身，
     不来自可用 Query 数量的多少。
+
+    ⚠️ 已知局限（2026-09-15 由独立监督查出，**尚未修复**）
+    --------------------------------------------------
+    上面那句话只对了一半。M 在两侧确实相同，但两侧**取 M 的池子不同源**：
+    DCC 侧从 `scenario.dest_queries[dest]`（即下面的 `q_dest`，也正是评估用的
+    那一批 Query）里抽代表 Query，shared 侧从 `scenario.all_queries`（全部
+    目的端）里抽。评估同样在 `q_dest` 上进行 ⇒ **DCC 侧存在样本内优势**：
+    它见过评估点，shared 侧没有。因此两侧的 Δ 不是纯粹的「条件化」效应。
+
+    这与 `synthetic.HeldoutSplit` 的 docstring 警告的是同一类错误
+    （「若用同一批 Query 同时做拟合与评估，误差会被系统性低估」）。
+    E2b / E9 / E10 / E11 都已改用 `heldout_split`，**E3 尚未**。
+
+    在按留出集重跑并确认方向之前，本函数产出的 Δ **不得**作为 H2 的机制级
+    证据写入论文（见 `docs/commit_log.md` 第 22 条）。
     """
     detail_rows: List[Dict[str, Any]] = []
     per_condition: List[Dict[str, Any]] = []

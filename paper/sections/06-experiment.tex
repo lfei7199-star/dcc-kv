@@ -696,9 +696,15 @@ clamp 率由 $0.054$ 降为 $0$。$\lambda_\beta$ 的取值由 \S\ref{sec:exp-e1
 \paragraph{A1 通信集大小。}扫描有效边数 $|\mathcal{E}_s|$，观察构造开销与通信开销随设备数
 的分配比例，用于检验式~\eqref{eq:cost-build} 中 $|\mathcal{E}_s|$ 倍构造代价的实际影响。
 
-\paragraph{A2 压缩预算。}在 5 档预算下测量任务指标与通信量，绘制精度--通信量帕累托前沿。
-该曲线是本文最核心的可视化结果：它同时呈现压缩收益与精度代价，并与 FastKV、APB 的同类
-曲线叠加比较。
+\paragraph{A2 压缩预算。}在 5 档预算下测量任务指标与通信量，绘制精度--通信量曲线。
+该曲线是本文计划中最主要的可视化结果：它同时呈现压缩收益与精度代价，并与
+FastKV、APB 的同类曲线叠加比较。
+
+\textbf{标注口径}：只有当精度与通信量两轴取自\textbf{同一方法}时，该曲线才是严格意义上的
+帕累托前沿。当前实现中两轴不同源（通信量取自 DCC-KV 的逐边预算，精度取自共享的
+top-$B$ 裁剪），程序据此记录 \texttt{pareto\_frontier\_valid=False}。故本稿一律称其为
+\textbf{预算--精度参考曲线}，不称帕累托前沿；同源前沿须待 CompactKV 到 GPU attention
+kernel 的通路打通后方可绘制。
 
 \paragraph{A3 组件拆分。}四个变体：完整 DCC-KV、（i）移除质量偏置 $\beta$、
 （ii）移除 Value 回归（直接取所选 Key 对应的原始 Value）、（iii）二者同时移除

@@ -32,9 +32,15 @@ H2 的口径与它的未决点
 - ``judged``   已经有脚本产出该字段
 - ``no-judge`` 尚无
 
-截至今日本仓库**只有 H4 是 ``judged``**（``experiments/gpu/e5_gpu_ablation.py``
-的 A5），H1 / H2 / H3 / H5 均为 ``no-judge``。这个分布由 :data:`UNJUDGED`
-暴露出来，避免它被忘记。
+截至今日本仓库**H1 与 H4 是 ``judged``**：H1 由
+``experiments/cpu/e3_edge_conditioning.py`` 的 ``h1_criterion_met`` 字段产出，
+H4 由 ``experiments/gpu/e5_gpu_ablation.py`` 的 A5 产出；H2 / H3 / H5 为
+``no-judge``。这个分布由 :data:`UNJUDGED` 暴露出来，避免它被忘记。
+
+（2026-09-15 更正：此前 H1 被登记为 ``no-judge``，note 称「E3 测的是配对显著
+不同，不是与 0.5 比较」—— 该说法**与代码不符**。E3 的 ``h1_criterion_met``
+恰恰就是拿 KL 的 CI 下界与 0.5 比较。这个错位由独立监督查出，见
+`docs/commit_log.md` 第 22 条。）
 
 ``no-judge`` **不等于**「结论未定」—— 它表示**判据未接**。E6 能产出 H2 所需的
 两个原始量，但「按什么聚合 4 个上下文长度」属于方法学决定；未定之前本模块
@@ -192,8 +198,12 @@ HYPOTHESES: Dict[str, HypothesisSpec] = {
         boundary="strict",
         source=_SNAPSHOT,
         judge="h1_pass",
-        code_status="no-judge",
-        note="E3 测的是「配对显著不同」，不是「与 0.5 比较」，故判据未接。",
+        code_status="judged",
+        note=(
+            "E3 的 `h1_criterion_met` 用 KL 的 CI 下界与 H1_MIN_KL 比较（严格大于），"
+            "已在 e3_edge_conditioning.py 中改为调用 h1_pass，不再写裸 0.5。"
+            "但该判据建在 E3 的 H1 网格上，与 H2 一样尚未按留出集重跑。"
+        ),
     ),
     "H2": HypothesisSpec(
         hid="H2",
