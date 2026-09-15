@@ -88,11 +88,15 @@ E9（375 格 M×B 扫描）落实为"两轴职责不同、必须同时扫"，见
 - `_hf.py` —— 模型加载、KV 预算约束、多项选择打分、prefill 计时
 
 ```bash
-bash experiments/run_gpu.sh --print-env      # 体检，任何机器可跑
-bash experiments/run_gpu.sh --plan           # 打印网格与前置条件，任何机器可跑
+bash experiments/run_gpu.sh e8 --print-env    # 体检，任何机器可跑
+bash experiments/run_gpu.sh e6 --plan         # 打印网格与前置条件，任何机器可跑
 bash experiments/run_gpu.sh e8               # E8
 bash experiments/run_gpu.sh e5 --nproc 4     # E5
 ```
+
+> `--print-env` / `--plan` **必须跟在实验名后面**。写成 `run_gpu.sh --plan`
+> 会被当成实验名并走进「未知实验」分支（2026-09-16 审计发现，已按实现修正文档）。
+> 另外两个开关的支持范围不齐：`--print-env` 四个脚本都有，`--plan` **只有 E6 / E7 有**。
 
 ### 当前被阻断的部分（不是环境问题，是实现缺口）
 
@@ -133,4 +137,10 @@ experiments/
 ```
 
 结果统一落在 `results/`（`results/cpu/**`、`results/gpu/**`），
-不纳入版本控制。每次运行同时写 JSON（完整 payload）与 CSV（长表，便于画图）。
+每次运行同时写 JSON（完整 payload）与 CSV（长表，便于画图）。
+
+> **更正（2026-09-16）**：本节此前写「不纳入版本控制」。该做法已在 `ee5a5ed`
+> 推翻 —— `results/` 现有 51 个文件（8.13 MB）入库，目的是让论文里的数字能随
+> 仓库复现。`.gitignore` 里旧的 `results/` 规则已删除，改为文件末尾的
+> `!results/**`（须排在 LaTeX 段的 `*.log` 之后）。GPU 单次 run 规划为 1–100 MB，
+> 体积策略见 `docs/git_strategy.md` §8.1。

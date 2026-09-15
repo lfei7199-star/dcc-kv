@@ -1,0 +1,18 @@
+# 行尾策略
+#
+# 背景（2026-09-16 审计补）：本仓库在 Windows 上开发（本机 core.autocrlf=true），
+# 而 GPU 实验要在租来的 Linux 机器上执行。实测结论如下 ——
+#   * git 索引侧始终存 LF（`git ls-files --eol` 显示 i/lf），
+#     所以 Linux 侧 clone 出来的脚本本来就是 LF，不受影响；
+#   * 但工作区文件是 CRLF（36 个 .py + 2 个 .sh），若被直接拷贝到 Linux
+#     或打进 Docker 镜像，shell 脚本会以
+#         /usr/bin/env bash^M: bad interpreter
+#     失败，而这类失败"本地完全看不出来"。
+# 显式声明后，git 不再需要在 add/checkout 时猜，也消除了 checkout 时的
+# "LF will be replaced by CRLF" 警告。
+#
+# 只约束脚本与源码；Markdown 与 LaTeX 不在其列（reproducibility.md 等
+# 已是 CRLF，且不参与执行，改动它们只会制造无意义的 diff）。
+
+*.sh  text eol=lf
+*.py  text eol=lf

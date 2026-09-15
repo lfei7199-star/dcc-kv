@@ -2,8 +2,8 @@
 # 运行 GPU 实验（E5–E8）。**必须有真实 GPU。**
 #
 # 用法：
-#   bash experiments/run_gpu.sh --print-env          # 只体检环境，任何机器可跑
-#   bash experiments/run_gpu.sh --plan               # 只打印网格/条件清单，任何机器可跑
+#   bash experiments/run_gpu.sh e8 --print-env       # 只体检环境，任何机器可跑
+#   bash experiments/run_gpu.sh e6 --plan            # 只打印网格/条件清单，任何机器可跑
 #   bash experiments/run_gpu.sh e8                   # E8（单卡即可）
 #   bash experiments/run_gpu.sh e5 --nproc 4         # E5（多卡，NCCL）
 #   bash experiments/run_gpu.sh e6 --model <path> --eval-file <jsonl>
@@ -12,6 +12,16 @@
 #
 # E5 需要 ≥2 卡 + NCCL；E8 单卡即可（但必须 GPU，除非显式 --allow-cpu）。
 # E6/E7 单卡即可，但需要真实模型权重。
+#
+# --print-env / --plan **必须跟在实验名后面**（如 `run_gpu.sh e6 --plan`）。
+# 原因：本脚本把 $1 无条件当作实验名（见下方 EXP="$1"），所以
+# `run_gpu.sh --plan` 会把 --plan 当成实验名并落到「未知实验」分支，
+# 而下方那个"体检/计划短路"循环根本遍历不到它。这是 2026-09-16 审计发现的
+# 用法与实现不符之处 —— 已按实现修正文档，未改逻辑。
+#
+# 各脚本对两个开关的支持并不齐（实现差异，不是笔误）：
+#   --print-env : E5 / E6 / E7 / E8 均支持
+#   --plan      : 仅 E6 / E7 支持；E5 / E8 没有该开关，会报 unrecognized arguments
 
 set -u
 

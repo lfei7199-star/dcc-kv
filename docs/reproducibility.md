@@ -6,7 +6,9 @@
 ## 1. 代码可获取性
 
 - **仓库**：https://github.com/lfei7199-star/dcc-kv
-- **commit hash**：`v1.0.0` （或具体版本）
+- **commit hash**：仓库当前**未打 release tag**（`v1.0.0` 是发布时的计划占位，
+  尚不存在）。引用时请填具体 commit hash，取自 `git rev-parse HEAD`；
+  本文件不硬编码哈希，以免与代码演进而失同步。
 - **许可证**：Apache 2.0
 - **匿名版**（如果双盲 review）：https://github.com/anonymous-dcc-kv
 
@@ -33,49 +35,91 @@
 
 ## 4. 硬件需求
 
-| 实验 | 最低配置 | 推荐配置 |
-|---|---|---|
-| 单元测试（CPU） | 任意 | 4 核 |
-| M0-M1 | 1 GPU（仅 sanity）| 1x A100 |
-| M2（多卡同步）| 2x A100 80G | 4x A100 80G |
-| M3（异步）| 4x A100 80G NVLink | 8x A100 80G |
-| M4（端到端 8B）| 4x A100 80G | 8x A100 80G |
-| M4（70B/72B）| 8x A100 80G | 8x H100 80G |
-| M5（跨节点）| 2 节点 × 8x A100 | Lambda Labs 多节点 |
+> **编号说明（2026-09-16）**：下表的 `M0`–`M5` 是 blueprint v1.1 时期的实验编号，
+> 仓库现有的脚本用的是另一套编号（CPU 侧 E0–E4、GPU 侧 E5–E8），
+> 而 `writing_scope_and_metrics.md` §4 的 `M1`–`M9` 是**缺口编号**，与实验编号无关。
+> 三套编号并存是历史遗留，引用时务必写清是哪一套。可确证的对应关系已在表中标出，
+> 未确证的不臆测。**建议后续统一为 E 编号。**
+
+| 实验（历史编号） | 对应当前脚本 | 最低配置 | 推荐配置 |
+|---|---|---|---|
+| 单元测试（CPU） | `pytest tests/`（默认跳过 GPU） | 任意 | 4 核 |
+| M0-M1 | 未确证（疑为环境冒烟） | 1 GPU（仅 sanity）| 1x A100 |
+| M2（多卡同步） | E5 的 `--parts a1 a2`（`scripts/run_m2_real.sh` 是它的单元测试入口） | 2x A100 80G | 4x A100 80G |
+| M3（异步） | E5 的 `--parts a5`（`scripts/run_m3_async.sh`） | 4x A100 80G NVLink | 8x A100 80G |
+| M4（端到端 8B） | E6（`e6_main_table.py`） | 4x A100 80G | 8x A100 80G |
+| M4（70B/72B） | **无对应脚本**（E6 只实现了 8B 档） | 8x A100 80G | 8x H100 80G |
+| M5（跨节点） | **无对应脚本**（跨节点未实现） | 2 节点 × 8x A100 | Lambda Labs 多节点 |
+
+按脚本实测的最低门槛（与上表不同源，取更保守者）：
+
+| 脚本 | 最小 GPU | 最小显存 | 备注 |
+|---|---|---|---|
+| `e8_low_precision.py` | 1 卡 | 4 GB | 只做归并算子，无通信、无模型 |
+| `e6_main_table.py` | 1 卡 | 40 GB | 当前只有 `dense` / `kv_budget_shared` 可测 |
+| `e7_negative_results.py` | 1 卡 | 40 GB | 32K 上下文 + 8B 模型 |
+| `e5_gpu_ablation.py` | **2 卡** | 16 GB | A1/A2/A5 需要 NCCL；A3 被实现缺口阻断 |
+
+GPU 单元测试（`pytest -m gpu`）默认被 `pytest.ini` 的 `-m "not gpu"` 排除，
+**上机后第一件事就应该是跑它** —— 它只验证 NCCL/通信通路，成本极低，
+却是唯一能在真机上暴露 device/通信缺陷的手段。
 
 ## 5. 完整复现命令
+
+> **更正（2026-09-16）**：本节此前给的 `scripts/run_main_table.sh`、
+> `scripts/run_ablations.sh`、`scripts/run_robustness.sh` **三个文件在仓库中不存在**
+> （`scripts/` 下只有 `run_m2_real.sh` 与 `run_m3_async.sh`）。照原文执行会直接失败。
+> 现改为实际可用的入口 `experiments/run_gpu.sh`。
 
 ### 5.1 一次性安装
 
 ```bash
 git clone https://github.com/lfei7199-star/dcc-kv
 cd dcc-kv
-git checkout v1.0.0
+# 版本：仓库当前**未打 release tag**。引用时请用具体 commit hash
+# （`git rev-parse HEAD`），不要写 v1.0.0 —— 该 tag 尚不存在。
 pip install -r requirements.txt
-pip install torch==2.3.0  # 按你的 CUDA 版本调整
+# torch 版本以 requirements.txt 为准；各文档间的版本声明不一致，
+# 这是已知问题（见 commit_log 的 C5），安装前请自行核对 CUDA 版本。
 ```
 
-### 5.2 跑主表
+### 5.2 跑主表（E6）
 
 ```bash
-# 8B 主表
-bash scripts/run_main_table.sh --model 8b --gpus 4
+# 单卡；需要真实模型权重与评测集 JSONL
+bash experiments/run_gpu.sh e6 --model meta-llama/Llama-3.1-8B-Instruct \
+    --eval-file <评测集.jsonl>
 
-# 70B 主表
-bash scripts/run_main_table.sh --model 70b --gpus 8
+# 先看网格与前置条件（任何机器可跑，不产出结果）
+bash experiments/run_gpu.sh e6 --plan
 ```
 
-### 5.3 跑消融
+⚠️ **当前 E6 的 6 个方法里有 4 个被实现缺口阻断**（含本文方法 `dcc_kv` 自己），
+详见 `experiments/gpu/README.md`。在缺口补齐前，主表只会产出
+`dense` 与 `kv_budget_shared` 两行。70B/72B 档**无对应脚本**。
+
+### 5.3 跑消融（E5）
 
 ```bash
-bash scripts/run_ablations.sh
+# 多卡 + NCCL
+bash experiments/run_gpu.sh e5 --nproc 4 --parts a1 a2 a5
+
+# 多卡通路的单元测试（上机后建议最先跑，成本最低）
+bash scripts/run_m2_real.sh          # 或等价地：pytest -m gpu
 ```
 
-### 5.4 跑鲁棒性
+A3 与 A4 当前**不可执行**：A3 缺 `CompactKV → GPU attention kernel`，
+A4 只有设计（论文 §6.3）、尚未写代码。
+
+### 5.4 跑鲁棒性与负结果（E7）
 
 ```bash
-bash scripts/run_robustness.sh
+bash experiments/run_gpu.sh e7 --model <path> --eval-file <评测集.jsonl>
+bash experiments/run_gpu.sh e7 --plan      # 只打印四条条件清单
 ```
+
+条件 3（检索类样本）需要评测集里带 `task` 字段；缺数据时记为 `no_data`，
+**不得记为 pass**。
 
 ## 6. 预期结果
 
