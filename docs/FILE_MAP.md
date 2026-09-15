@@ -1,9 +1,9 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**150** 个受控文件 = 61 `.py` / 23 `.csv` / 22 `.json` /
-> 16 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 5 个为 `.gitignore` ×2 /
-> `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
+> 统计口径：`git ls-tree -r HEAD`（**152** 个受控文件 = 61 `.py` / 23 `.csv` / 22 `.json` /
+> 17 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
+> `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
 > 不含编译产物与本地素材（见 §9）。其中 **51 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
 > （决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
@@ -17,6 +17,7 @@
 | 了解项目主张与边界（哪些**不能**声明） | `README.md` §不主张的内容；`docs/commit_log.md` §P |
 | 跑 CPU 可复现实验（机制级） | `experiments/cpu/`，入口 `experiments/run_cpu.sh` |
 | 跑 GPU 实验（任务级 / 系统级） | `experiments/gpu/`，入口 `experiments/run_gpu.sh` |
+| 规划租卡跑实验、控制预算 | **`docs/gpu_execution_plan.md`**（结论：当前不能开跑 —— 缺的不是卡，是代码；含 G1–G6 前置缺口与 S0–S3 梯队） |
 | 看算法参考实现 | `src/dcc_kv_ref/` |
 | 看多进程与通信原语 | `src/distributed/` |
 | 看基线（Ring / FastKV / APB） | `src/baselines/` |
@@ -42,6 +43,7 @@
 | `conftest.py` | 52 | pytest 根配置：注册自定义 marker（`gpu` / `distributed` 等）、把仓库根注入 `sys.path` |
 | `pytest.ini` | 30 | 测试发现与默认行为。`addopts = -m "not gpu"` ⇒ **GPU 测试默认跳过**；`testpaths = tests` |
 | `requirements.txt` | 23 | 依赖清单。⚠️ torch 写 `>=2.6.0`，而 README / CONTRIBUTING 写 `2.3.0+cpu`，**三处不一致**（待决 C5） |
+| `.gitattributes` | 19 | **行尾策略**（2026-09-16 新增）：固定 `*.sh` / `*.py` 为 LF。本机 `core.autocrlf=true`，索引侧虽始终是 `i/lf`（Linux clone 不受影响），但工作区有 36 个 `.py` + 2 个 `.sh` 是 CRLF —— 直接拷到 Linux 会 `bad interpreter`，而这种失败本地看不出来 |
 | `.gitignore` | 142 | 忽略规则。Python / pytest / IDE 常规项 + 项目特定：`models/`、`data/`、`traces/`、LaTeX 中间产物。**`results/` 自 2026-09-16 起不再忽略**（改为 `!results/**` 显式放行；该规则必须排在 LaTeX 段的 `*.log` 之后，否则 `results/cpu/*_run.log` 仍会被挡掉）；末尾有 `!` 白名单例外 |
 
 ---
@@ -99,10 +101,10 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `README.md` | 136 | 实验总览：CPU/GPU 分工、编号体系（E0–E11 / A1–A5）、如何跑 |
+| `README.md` | 147 | 实验总览：CPU/GPU 分工、编号体系（E0–E11 / A1–A5）、如何跑 |
 | `__init__.py` | 15 | 声明 `experiments` 包 |
 | `run_cpu.sh` | 65 | CPU 实验入口 |
-| `run_gpu.sh` | 124 | GPU 实验入口（封装 `torchrun`）。⚠️ 数组展开必须用 `"${ARR[@]}"`，**不能**写 `"${ARR[@]:-}"`（后者会退化成空字符串参数） |
+| `run_gpu.sh` | 135 | GPU 实验入口（封装 `torchrun`）。⚠️ 数组展开必须用 `"${ARR[@]}"`，**不能**写 `"${ARR[@]:-}"`（后者会退化成空字符串参数） |
 
 ### 3.1 `experiments/common/` —— 公共模块（纯 CPU，只依赖 torch + numpy）
 
@@ -206,11 +208,12 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `commit_log.md` | 2222+ | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
+| `commit_log.md` | 2313+ | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
 | `git_strategy.md` | 418 | Git 管理策略：分支、commit 体例、tag、实验可追溯。§8.1 记录 **`results/` 入库**的决定与体积策略 |
 | `release_checklist.md` | 170 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
-| `reproducibility.md` | 155 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值；2026-09-16 起附「质量相近」的完整定义摘要 |
-| `writing_scope_and_metrics.md` | 175 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录第六轮/第四轮裁决的落实（D1–D6）与**仍开放的 4 项**（O1–O4） |
+| `reproducibility.md` | 199 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值；2026-09-16 起附「质量相近」的完整定义摘要 |
+| `writing_scope_and_metrics.md` | 175 |
+| `gpu_execution_plan.md` | 264 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录第六轮/第四轮裁决的落实（D1–D6）与**仍开放的 4 项**（O1–O4） |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
 
@@ -275,3 +278,5 @@
 - 新增/删除/改名任何文件，**同步更新本文**，并在 `docs/commit_log.md` 追加一条。
 - 本文的统计数字以 `git ls-tree -r HEAD | wc -l` 为准，不手写估算。
 - 引用 hash 时写完整 7 位；被后续提交推翻的表述不要删，加 `⚠️ 已被 <hash> 修正`。
+- **行数列的时效性**：本列在多轮提交后未逐次校准 —— 2026-09-16 实测发现约 20 处偏小（1 至 90 行不等，例如 `_hf.py` 436→468、`e6_main_table.py` 441→499、`tests/test_gpu_pipeline.py` 400+→447）。本次只校准了**本轮真涉及的文件**，其余保留原值以免制造假精确。需要准确值时以
+  `git ls-tree -r HEAD --name-only | xargs wc -l` 为准，不要相信本列。
