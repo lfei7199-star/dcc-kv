@@ -189,12 +189,14 @@ Petals \cite{borzunov2023petals} 展示了利用分散设备协同执行大模�
 给定长度为 $L$ 的序列 $X$，将其划分至 $N$ 个设备：
 \begin{equation}
 X = [X_0; X_1; \ldots; X_{N-1}], \qquad L = \sum_{i=0}^{N-1} L_i .
+\label{eq:split-seq}
 \end{equation}
 对某一 Transformer 层和 KV Head，设备 $i$ 本地持有
 \begin{equation}
 Q_i \in \mathbb{R}^{L_i \times d_h},\quad
 K_i \in \mathbb{R}^{L_i \times d_h},\quad
 V_i \in \mathbb{R}^{L_i \times d_v}.
+\label{eq:local-qkv}
 \end{equation}
 以下推导针对单个 KV Head；多层、多头情况可独立执行并分配不同预算。
 
@@ -203,18 +205,22 @@ $\Er = \Ds \setminus \{r\}$；连续分块的因果注意力下，若块索引�
 $\Er = \{s \mid s < r\}$。所有有效有向边组成
 \begin{equation}
 \mathcal{E} = \{(s,r) \mid s \in \Er\}.
+\label{eq:edge-set}
 \end{equation}
 
 \subsection{块级注意力分解}
 
 对目的设备 $r$ 上的单个 Query $q$，源块 $s$ 的非归一化注意力质量与局部输出分别为
 \begin{align}
-M_s(q) &= \sum_{j=1}^{L_s} \exp\!\left(\frac{q K_{s,j}^\top}{\sqrt{d_h}}\right), \\
+M_s(q) &= \sum_{j=1}^{L_s} \exp\!\left(\frac{q K_{s,j}^\top}{\sqrt{d_h}}\right),
+\label{eq:mass} \\
 O_s(q) &= \frac{\sum_{j=1}^{L_s} \exp\!\left(q K_{s,j}^\top / \sqrt{d_h}\right) V_{s,j}}{M_s(q)} .
+\label{eq:out}
 \end{align}
 于是完整全局注意力可写为
 \begin{equation}
 \Attn(q) = \frac{\sum_{s \in \Br} M_s(q) \, O_s(q)}{\sum_{s \in \Br} M_s(q)} ,
+\label{eq:global-attn}
 \end{equation}
 其中 $\Br = \{r\} \cup \Er$。该分解揭示了压缩远程块必须保留的两个量：块在全局分母中的质量
 $M_s$，以及给定进入该块后返回的语义输出 $O_s$。只匹配归一化后的局部输出而忽略质量，会破坏
@@ -229,15 +235,21 @@ $M_s$，以及给定进入该块后返回的语义输出 $O_s$。只匹配归一
 对每条有效边 $(s,r)$，DCC-KV 构造
 \begin{equation}
 C^{s \to r} = \left(C_k^{s \to r},\; \beta^{s \to r},\; C_v^{s \to r}\right),
+\label{eq:compact}
 \end{equation}
 其中
 \begin{equation}
 C_k^{s \to r} \in \mathbb{R}^{B_{s,r} \times d_h},\quad
 \beta^{s \to r} \in \mathbb{R}^{B_{s,r}},\quad
 C_v^{s \to r} \in \mathbb{R}^{B_{s,r} \times d_v},
+\label{eq:compact-shapes}
 \end{equation}
 且 $B_{s,r} \ll L_s$。$\beta$ 是加入紧凑 Key Logit 的质量补偿偏置。由于构造过程以目的端
-Query 为条件，通常有 $C^{s \to r_1} \neq C^{s \to r_2}$。
+Query 为条件，通常有
+\begin{equation}
+C^{s \to r_1} \neq C^{s \to r_2}.
+\label{eq:per-edge-diff}
+\end{equation}
 
 框架包含三个逻辑步骤：目的设备提取并交换代表 Query；源设备针对每条边构造紧凑 KV；设备通过
 异步 All-to-Allv 交换变长消息，并在消息到达时增量计算和归并注意力状态。
@@ -262,6 +274,7 @@ Query 为条件，通常有 $C^{s \to r_1} \neq C^{s \to r_2}$。
 P_{a,b} \sim \frac{1}{\sqrt{d_p}}\{\pm 1\},\quad
 z_{r,u} = \frac{P q_{r,u}}{\|P q_{r,u}\|_2 + \eps},\quad
 D(z_{r,u}, z_{r,v}) = 1 - z_{r,u}^\top z_{r,v}.
+\label{eq:proj}
 \end{equation}
 共享生成使 $P$ 无需传输；投影表示仅用于近似 Query 间的方向差异。
 
@@ -271,10 +284,14 @@ $\mathcal{S}_r^{(1)} = \{L_r\}$，第 $m$ 轮执行
 \Delta_{r,u}^{(m)} = \min_{v \in \mathcal{S}_r^{(m)}} D(z_{r,u}, z_{r,v}),\quad
 u_{m+1} = \arg\max_{u \notin \mathcal{S}_r^{(m)}} \Delta_{r,u}^{(m)},\quad
 \mathcal{S}_r^{(m+1)} = \mathcal{S}_r^{(m)} \cup \{u_{m+1}\},
+\label{eq:fps}
 \end{equation}
 直至 $|\mathcal{S}_r^{Q}| = M$。最终取回原始高维表示
-$\widehat{Q}_r = Q_r[\mathcal{S}_r^{Q}, :] \in \mathbb{R}^{M \times d_h}$，而非传输投影
-向量。选择复杂度为 $O(L_r d_h d_p + M L_r d_p)$。
+\begin{equation}
+\widehat{Q}_r = Q_r[\mathcal{S}_r^{Q}, :] \in \mathbb{R}^{M \times d_h},
+\label{eq:repr-q}
+\end{equation}
+而非传输投影向量。选择复杂度为 $O(L_r d_h d_p + M L_r d_p)$。
 
 所有 $\widehat{Q}_r$ 形状相同，适合使用 $N-1$ 轮 Ring All-Gather。第 $p$ 轮设备 $i$ 向
 $[i+1]_N$ 转发当前 Query 摘要，并从 $[i-1]_N$ 接收另一摘要。通信后，源设备 $s$ 获得所有满足
@@ -290,12 +307,14 @@ $(s,r) \in \mathcal{E}$ 的 $\widehat{Q}_r$。
 
 源设备 $s$ 以目的端代表 Query 计算块内注意力，并用跨 Query 的 RMS 响应对 Key 排序：
 \begin{align}
-A^{s \to r} &= \softmax\!\left(\frac{\widehat{Q}_r K_s^\top}{\sqrt{d_h}}\right) \in \mathbb{R}^{M \times L_s},\\
-u_j^{s \to r} &= \sqrt{\frac{1}{M}\sum_{a=1}^{M}\left(A_{a,j}^{s \to r}\right)^2},\\
+A^{s \to r} &= \softmax\!\left(\frac{\widehat{Q}_r K_s^\top}{\sqrt{d_h}}\right) \in \mathbb{R}^{M \times L_s},\notag\\
+u_j^{s \to r} &= \sqrt{\frac{1}{M}\sum_{a=1}^{M}\left(A_{a,j}^{s \to r}\right)^2},\notag\\
 \mathcal{S}_K^{s \to r} &= \TopK\!\left(\{u_j^{s \to r}\}_{j=1}^{L_s},\; B_{s,r}\right),
+\label{eq:key-select}
 \end{align}
 \begin{equation}
 C_k^{s \to r} = K_s\!\left[\mathcal{S}_K^{s \to r}, :\right].
+\label{eq:ck}
 \end{equation}
 RMS 聚合保留了仅对少量代表 Query 具有高响应的 Key。
 
@@ -307,6 +326,7 @@ RMS 聚合保留了仅对少量代表 Query 具有高响应的 Key。
 \ell_{a,k}^{s \to r} = \frac{\widehat{q}_{r,a} K_{s,k}^\top}{\sqrt{d_h}},\qquad
 m_a^{s \to r} = \sum_{k=1}^{L_s} \exp\!\left(\ell_{a,k}^{s \to r}\right),\qquad
 G_{a,j}^{s \to r} = \exp\!\left(\frac{\widehat{q}_{r,a} (C_k^{s \to r})_{j}^\top}{\sqrt{d_h}}\right),
+\label{eq:mass-target}
 \end{equation}
 其中 $m^{s \to r} \in \mathbb{R}^{M}$，$G^{s \to r} \in \mathbb{R}^{M \times B_{s,r}}$。令
 $w_j = \exp(\beta_j) \ge 0$，则带偏置紧凑块的质量为 $\widehat{m} = Gw$。我们通过非负岭回归
@@ -315,6 +335,7 @@ $w_j = \exp(\beta_j) \ge 0$，则带偏置紧凑块的质量为 $\widehat{m} = G
 w^* = \arg\min_{w \ge 0} \left\|G^{s \to r} w - m^{s \to r}\right\|_2^2
       + \lambda_\beta \left\|w - \mathbf{1}\right\|_2^2,\qquad
 \beta_j^{s \to r} = \log\!\left(\max\{w_j^*, \eps\}\right).
+\label{eq:beta-fit}
 \end{equation}
 $w_j$ 表示紧凑 Key 所承载的等效注意力质量，可聚合若干被删除 Key 的指数响应；正则项在拟合
 信息不足时将其收缩至无偏置状态 $w = \mathbf{1}$。非负约束保证 $w$ 可映射为 Logit 偏置。
@@ -326,9 +347,11 @@ $w_j$ 表示紧凑 Key 所承载的等效注意力质量，可聚合若干被删
 上分别计算完整块输出和带偏置紧凑块的归一化权重：
 \begin{equation}
 Y^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r K_s^\top}{\sqrt{d_h}}\right) V_s \in \mathbb{R}^{M \times d_v},
+\label{eq:Y}
 \end{equation}
 \begin{equation}
 X^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r (C_k^{s \to r})^\top}{\sqrt{d_h}} + \mathbf{1}_M (\beta^{s \to r})^\top\right) \in \mathbb{R}^{M \times B_{s,r}}.
+\label{eq:X}
 \end{equation}
 紧凑 Value 由多输出岭回归求得：
 \begin{equation}
@@ -337,6 +360,7 @@ X^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r (C_k^{s \to r})^\top}{\sqrt{d_
                    + \lambda_v \|C_v\|_F^2 \\
                   &= \left(X^\top X + \lambda_v I\right)^{-1} X^\top Y .
 \end{split}
+\label{eq:value-reg}
 \end{equation}
 因此 $C_v^{s \to r}$ 一般不等于所选 Key 对应的原始 Value；每个紧凑 Value 可共同吸收多个被
 删除 Value 在代表 Query 上的输出贡献。质量拟合与 Value 拟合分别逼近块级分母和条件输出。对
@@ -345,6 +369,7 @@ X^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r (C_k^{s \to r})^\top}{\sqrt{d_
 \underbrace{\sum_{k=1}^{L_s} e^{\ell_{a,k}^{s \to r}} V_{s,k}}_{\text{全局 Softmax 分子贡献}}
 = \underbrace{m_a^{s \to r}}_{\text{块级质量}}
   \underbrace{\left(\sum_{k=1}^{L_s} \frac{e^{\ell_{a,k}^{s \to r}}}{m_a^{s \to r}} V_{s,k}\right)}_{\text{条件输出}},
+\label{eq:decomp}
 \end{equation}
 这说明同时拟合 $m$ 与 $Y$ 可分别恢复远程块对全局注意力分母和分子的贡献。
 
@@ -358,6 +383,7 @@ X^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r (C_k^{s \to r})^\top}{\sqrt{d_
 块的注意力计算，通信流则继续接收其余消息，由此形成
 \begin{equation}
 \text{接收 } C^{s_1 \to r} \;\parallel\; \text{计算 } C^{s_0 \to r} \;\parallel\; \text{发送 } C^{r \to t}
+\label{eq:pipeline}
 \end{equation}
 的流水。\textbf{该实现是本文区别于既有紧凑 KV 方法的核心系统设计。}
 
@@ -375,6 +401,7 @@ $\{g_{b,j}, v_{b,j}\}_{j=1}^{T_b}$，其中本地块和远程块分别使用
 \begin{equation}
 g_{r,j} = \frac{q K_{r,j}^\top}{\sqrt{d_h}},\qquad
 g_{s \to r,j} = \frac{q (C_k^{s \to r})_{j}^\top}{\sqrt{d_h}} + \beta_j^{s \to r}.
+\label{eq:logits}
 \end{equation}
 每个块独立生成 Online Softmax 状态
 \begin{equation}
@@ -382,23 +409,28 @@ g_{s \to r,j} = \frac{q (C_k^{s \to r})_{j}^\top}{\sqrt{d_h}} + \beta_j^{s \to r
 S_b &= (m_b, l_b, o_b),\quad m_b = \max_j g_{b,j},\quad l_b = \sum_j e^{g_{b,j} - m_b},\\
 o_b &= \sum_j e^{g_{b,j} - m_b} v_{b,j}.
 \end{split}
+\label{eq:state}
 \end{equation}
 对两个状态 $S_a$ 与 $S_b$，沿用在线 Softmax 的归并算子 $\oplus$ \cite{milakov2018online}：
 \begin{align}
-m_{ab} &= \max(m_a, m_b),\\
-l_{ab} &= e^{m_a - m_{ab}} l_a + e^{m_b - m_{ab}} l_b,\\
-o_{ab} &= e^{m_a - m_{ab}} o_a + e^{m_b - m_{ab}} o_b,\\
+m_{ab} &= \max(m_a, m_b),\notag\\
+l_{ab} &= e^{m_a - m_{ab}} l_a + e^{m_b - m_{ab}} l_b,
+\label{eq:merge-params}\\
+o_{ab} &= e^{m_a - m_{ab}} o_a + e^{m_b - m_{ab}} o_b,\notag\\
 S_a \oplus S_b &= (m_{ab}, l_{ab}, o_{ab}).
+\label{eq:merge-op}
 \end{align}
 该算子等价于对两个块的非归一化 Softmax 分子和分母求和，因而满足
 \begin{equation}
 S_a \oplus S_b = S_b \oplus S_a,\qquad
 (S_a \oplus S_b) \oplus S_c = S_a \oplus (S_b \oplus S_c).
+\label{eq:comm-assoc}
 \end{equation}
 因此，目的设备可按远程消息的实际到达顺序增量更新
 \begin{equation}
 S_r^{\text{global}} = S_r \oplus \bigoplus_{s \in \Er} S^{s \to r},\qquad
 \widehat{\Attn}_r(q) = \frac{o_r^{\text{global}}}{l_r^{\text{global}}} .
+\label{eq:global-state}
 \end{equation}
 交换律保证结果与块的接收顺序无关，结合律允许任意分组或树形归并；只要所有有效块恰好处理一次，
 异步执行与等待全部消息后统一计算在数学上等价。与此同时，本地完整 KV 与远程紧凑 KV 始终共享
@@ -415,17 +447,17 @@ S_r^{\text{global}} = S_r \oplus \bigoplus_{s \in \Er} S^{s \to r},\qquad
 \EndFor
 \State 通过 Ring 交换所有有效目的端的 $\widehat{Q}_r$
 \ForAll{有效边 $(s,r) \in \mathcal{E}$（并行）}
-  \State 用 eq.~(14) 选取 $C_k^{s \to r}$
-  \State 用 eq.~(16) 拟合 $\beta^{s \to r}$
-  \State 用 eq.~(19) 重构 $C_v^{s \to r}$
+  \State 用式~\eqref{eq:ck} 选取 $C_k^{s \to r}$
+  \State 用式~\eqref{eq:beta-fit} 拟合 $\beta^{s \to r}$
+  \State 用式~\eqref{eq:value-reg} 重构 $C_v^{s \to r}$
   \State 打包 $C^{s \to r} = (C_k^{s \to r}, \beta^{s \to r}, C_v^{s \to r})$
 \EndFor
 \ForAll{目的设备 $r$（并行）}
   \State 计算本地状态 $S_r$，并提交变长消息的非阻塞 All-to-Allv 收发
   \ForAll{已到达的 $C^{s \to r}$（按任意顺序）}
-    \State 计算 $S^{s \to r}$，并用 eq.~(25) 立即归并
+    \State 计算 $S^{s \to r}$，并用式~\eqref{eq:merge-op} 立即归并
   \EndFor
-  \State 所有接收完成后，用 eq.~(27) 输出 $O_r$
+  \State 所有接收完成后，用式~\eqref{eq:global-state} 输出 $O_r$
 \EndFor
 \end{algorithmic}
 \end{algorithm}

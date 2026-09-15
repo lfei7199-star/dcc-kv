@@ -65,7 +65,7 @@ Ring All-Gather 实现。式~\eqref{eq:comm-kv} 的关键性质是各边长度�
 
 \subsubsection{代表 Query 选择}
 
-按式~(10)--(12)：随机投影为 $O(L_r d_h d_p)$；$M$ 轮最远点采样，每轮维护并更新当前子集
+按式~\eqref{eq:proj}--\eqref{eq:repr-q}：随机投影为 $O(L_r d_h d_p)$；$M$ 轮最远点采样，每轮维护并更新当前子集
 到所有候选点的最小距离，代价为 $O(M L_r d_p)$。故选择开销为
 \begin{equation}
 \label{eq:cost-fps}
@@ -91,7 +91,7 @@ C_{\text{build}} = O\!\left(M L_s d_h + M B_{s,r}(d_h + d_v) + M B_{s,r}^2\right
 \subsubsection{目的端注意力计算}
 
 目的端 $r$ 的本地块注意力代价为 $O(L_r^2 d_h)$（因果情形减半）。对每个到达的远程紧凑块，
-计算式~(22) 的 Logit 与式~(23) 的状态，代价为 $O(L_r B_{s,r}(d_h + d_v))$。全部远程块合计
+计算式~\eqref{eq:logits} 的 Logit 与式~\eqref{eq:state} 的状态，代价为 $O(L_r B_{s,r}(d_h + d_v))$。全部远程块合计
 \begin{equation}
 \label{eq:cost-attn}
 C_{\text{attn}} = O\!\left(L_r^2 d_h + L_r (d_h + d_v) \textstyle\sum_{s \in \mathcal{E}_r} B_{s,r}\right).
@@ -127,7 +127,7 @@ $|\mathcal{E}_s|$ 倍的构造代价与 $M$ 倍的代表 Query 通信作为代�
 \label{sec:analysis-error}
 
 设目的端 $r$ 上某一 Query $q$ 的精确全局注意力为 $\mathrm{Attn}(q)$，DCC-KV 的输出为
-$\widehat{\mathrm{Attn}}(q)$。按式~(6) 的块分解，误差来自三个可分离的环节。以下均针对
+$\widehat{\mathrm{Attn}}(q)$。按式~\eqref{eq:global-attn} 的块分解，误差来自三个可分离的环节。以下均针对
 单个 Query，且假设所有有效块恰好被处理一次。
 
 \subsubsection{误差的三个来源}
@@ -138,7 +138,7 @@ $\widehat{\mathrm{Attn}}(q)$。按式~(6) 的块分解，误差来自三个可�
 决定，记作 $\epsilon_{\text{repr}}$。
 
 \paragraph{(ii) 块级质量匹配误差。}
-式~(16) 在非负约束与 $\lambda_\beta$ 正则下拟合 $m_a^{s\to r}$，一般不能精确复现。定义
+式~\eqref{eq:beta-fit} 在非负约束与 $\lambda_\beta$ 正则下拟合 $m_a^{s\to r}$，一般不能精确复现。定义
 \begin{equation}
 \label{eq:err-mass}
 \epsilon_{\text{mass}}(q) = \sum_{s \in \mathcal{E}_r}
@@ -148,7 +148,7 @@ $\widehat{\mathrm{Attn}}(q)$。按式~(6) 的块分解，误差来自三个可�
 全局 Softmax 分母中的相对权重，是所有误差项中对最终输出影响最直接的一项。
 
 \paragraph{(iii) 条件输出误差。}
-式~(19) 以 $\lambda_v$ 岭回归拟合 $Y^{s \to r}$，得到的是代表 Query 上的最小二乘解，
+式~\eqref{eq:value-reg} 以 $\lambda_v$ 岭回归拟合 $Y^{s \to r}$，得到的是代表 Query 上的最小二乘解，
 不保证对任意 $q$ 成立。定义
 \begin{equation}
 \label{eq:err-out}
@@ -158,7 +158,7 @@ M_s(q) \left\| \widehat{O}_s(q) - O_s(q) \right\|_2 .
 
 \subsubsection{误差界}
 
-将式~(6) 的分子分母分别扰动。设
+将式~\eqref{eq:global-attn} 的分子分母分别扰动。设
 $\widehat{M}_s = M_s + \delta M_s$、$\widehat{O}_s = O_s + \delta O_s$，且记
 $S(q) = \sum_{s \in \mathcal{B}_r} M_s(q)$。当 $\sum_s |\delta M_s| < S/2$ 时，
 \begin{equation}
@@ -192,13 +192,13 @@ $M$ 的选取需要在"摘要开销小"与"$\epsilon_{\text{mass}}, \epsilon_{\t
 \subsubsection{若干可陈述的性质}
 
 \paragraph{性质 1（质量守恒的充分条件）。}
-若对某条边 $(s,r)$ 有 $B_{s,r} = L_s$，则式~(13) 的 Top-$B$ 选择保留全部 Key，式~(14)
-退化为 $C_k^{s \to r} = K_s$；此时式~(16) 取 $w = \mathbf{1}$、$\beta = \mathbf{0}$ 是
-零残差解，式~(19) 取 $C_v^{s \to r} = V_s$ 亦为零残差解。故 DCC-KV 在预算不裁剪时精确
+若对某条边 $(s,r)$ 有 $B_{s,r} = L_s$，则式~\eqref{eq:key-select} 的 Top-$B$ 选择保留全部 Key，式~\eqref{eq:ck}
+退化为 $C_k^{s \to r} = K_s$；此时式~\eqref{eq:beta-fit} 取 $w = \mathbf{1}$、$\beta = \mathbf{0}$ 是
+零残差解，式~\eqref{eq:value-reg} 取 $C_v^{s \to r} = V_s$ 亦为零残差解。故 DCC-KV 在预算不裁剪时精确
 退化为全注意力，即该框架是精确注意力的一个严格泛化。
 
 \paragraph{性质 2（无偏置下的质量下界）。}
-由于 $w \ge 0$ 且式~(13) 按 RMS 响应选择 Key，被保留 Key 的响应在代表 Query 上系统性地
+由于 $w \ge 0$ 且式~\eqref{eq:key-select} 按 RMS 响应选择 Key，被保留 Key 的响应在代表 Query 上系统性地
 偏高。故在无偏置情形（$\beta = \mathbf{0}$）下通常有 $\widehat{M}_s(q) \le M_s(q)$，
 即压缩后远程块的全局权重被系统性低估，而非随机波动。这为 4.3.2 节引入质量补偿偏置提供
 了直接的动机：$\beta$ 需要做的正是把被裁掉的指数响应重新分配给保留的 Key。
@@ -241,8 +241,9 @@ $T_{\text{comm}} / T_{\text{comp}}$ 的实测值，以便判断实测加速偏�
 还是预算本身失衡。
 
 需要指出，式~\eqref{eq:speedup-bound} 是理论上界，不含通信启动延迟、元数据交换开销、
-负载不均衡以及调度抖动。此外，式~(26) 保证的只是数值结果与接收顺序无关，而在线 Softmax
-状态归并本身引入浮点舍入差异；该差异的量级需通过数值实验界定（见 E1）。因此，异步实现的
+负载不均衡以及调度抖动。此外，式~\eqref{eq:comm-assoc} 保证的只是数值结果与接收顺序无关，而在线 Softmax
+状态归并本身引入浮点舍入差异；该差异的量级需通过数值实验界定
+（见 E0 与低精度下的 E8）。因此，异步实现的
 实测加速比应低于式~\eqref{eq:speedup-bound}，且二者之差可用于衡量实现质量。
 
 \subsection{小结}
