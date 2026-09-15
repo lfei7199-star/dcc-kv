@@ -21,9 +21,16 @@ H2 的口径与它的未决点
 
     质量提升 ≥ 1.5 pp   且   在质量相近前提下 prefill 加速 ≥ 1.10×
 
-「质量相近」这一**前提**的判定主体与阈值，仓库内没有任何定义。因此
-:func:`h2_pass` 把它做成**必填的关键字参数**，强迫调用方显式表态，
-而不是替它猜一个默认值 —— 默认值会让这个缺口悄悄消失。
+「质量相近」这一**前提**原先在仓库内外都没有定义。2026-09-16 已给出定义
+（完整论证见论文 §7「「质量相近」的判定」，摘要见 `docs/reproducibility.md` §6）：
+参照物取**精确注意力**而非共享压缩基线，判据为**单侧非劣检验**
+``CI_low(Q_DCC - Q_dense) > -delta``，非劣边界满足
+``噪声底线 <= delta < min(1.5, delta_bad)``。机器可读的判定程序是
+:func:`quality_comparable_non_inferior`。
+
+:func:`h2_pass` 仍把 ``quality_comparable`` 做成**必填的关键字参数** ——
+定义解决的是「按什么程序判」，而 ``delta`` 与噪声底线两个**参数**依赖
+尚未取得的测量（E6 的重复 run），在此之前任何默认值都是编造。
 
 代码侧的落地状态
 ----------------
@@ -60,6 +67,9 @@ __all__ = [
     "H3_MIN_DROP_VALUE_PP",
     "H4_MIN_P50_SPEEDUP",
     "H5_MIN_SPEEDUP_AT_2X",
+    # H2 前提「质量相近」的判定（2026-09-16）
+    "QUALITY_COMPARABLE_REFERENCE",
+    "QUALITY_COMPARABLE_MAX_DELTA_PP",
     # 注册表
     "HypothesisSpec",
     "HYPOTHESES",
@@ -70,6 +80,7 @@ __all__ = [
     "h3_pass",
     "h4_pass",
     "h5_pass",
+    "quality_comparable_non_inferior",
 ]
 
 
@@ -136,6 +147,73 @@ def h2_pass(
         and quality_gain_pp >= H2_MIN_QUALITY_GAIN_PP
         and prefill_speedup >= H2_MIN_PREFILL_SPEEDUP
     )
+
+
+QUALITY_COMPARABLE_REFERENCE = "dense"
+"""H2 前提「质量相近」的参照物：**精确注意力**（未经压缩的全局注意力）。
+
+不取共享压缩基线：那样「相近」与「相对基线提升 >= 1.5 pp」只有在非劣边界
+大于 1.5 pp 时才可能同时成立，而那时前半句已不表达任何主张 —— 自我矛盾。
+"""
+
+QUALITY_COMPARABLE_MAX_DELTA_PP = H2_MIN_QUALITY_GAIN_PP
+"""H2 前提的**先验上界**：非劣边界必须严格小于它（单位：百分点）。
+
+理由：等价/非劣边界不得大于所要检测的效应量，否则前提会把 H2 前半句
+声称的 1.5 pp 提升一并吞没。另一个上界 ``delta_bad``（共享压缩相对精确
+注意力的退化量）需要数据，故不在此登记为常量。
+"""
+
+
+def quality_comparable_non_inferior(
+    ci_low_pp: float,
+    *,
+    delta_pp: float,
+    noise_floor_pp: float,
+    delta_bad_pp: float | None = None,
+) -> bool:
+    """H2 前提「质量相近」的判定程序：**单侧非劣检验**。
+
+    Args:
+        ci_low_pp: ``Q_DCC - Q_dense`` 的 95% 置信区间**下界**，单位百分点。
+        delta_pp: 非劣边界（允许比精确注意力差多少），单位百分点。**无默认值**。
+        noise_floor_pp: 同一配置重复 run 的噪声底线（可用 run 间质量差的
+            p95-p50 或 bootstrap 区间半宽估计），单位百分点。**无默认值**。
+        delta_bad_pp: 共享压缩相对精确注意力的退化量。给出时才校验
+            ``delta_pp < delta_bad_pp`` —— 否则共享压缩本身也会被判为「相近」。
+
+    Returns:
+        下界严格大于 ``-delta_pp`` 时为 True。
+
+    Raises:
+        ValueError: ``delta_pp`` 越出可行区间时。此时**拒绝执行**而不是返回
+            False —— 容差取值不当意味着本次实验不具备判定该前提的分辨率，
+            与「质量确实不相近」是两个不同的结论，前者必须报为分辨率不足。
+
+    取单侧而非双侧等价的依据：该前提的**功能**是排除「以质量换速度」这一
+    混淆，只要没有显著更差，加速比的比较就是公平的。若 ``ci_low_pp > 0``
+    （显著更优），前提以更强的形式成立，但调用方必须在结果中**显式披露
+    方向**，不得笼统写作「相近」。
+    """
+    if delta_pp <= 0:
+        raise ValueError(f"delta_pp 必须为正，收到 {delta_pp}")
+    if delta_pp < noise_floor_pp:
+        raise ValueError(
+            f"非劣边界 delta_pp={delta_pp} 小于噪声底线 noise_floor_pp={noise_floor_pp}"
+            "：等价性无法建立（测不出差异不能与确实无差异区分），应报告「分辨率不足」"
+        )
+    if not delta_pp < QUALITY_COMPARABLE_MAX_DELTA_PP:
+        raise ValueError(
+            f"非劣边界 delta_pp={delta_pp} 未严格小于 QUALITY_COMPARABLE_MAX_DELTA_PP="
+            f"{QUALITY_COMPARABLE_MAX_DELTA_PP}：边界不得大于所要检测的效应量，"
+            "否则前提会把 H2 前半句声称的提升一并吞没"
+        )
+    if delta_bad_pp is not None and not delta_pp < delta_bad_pp:
+        raise ValueError(
+            f"非劣边界 delta_pp={delta_pp} 未严格小于共享压缩的退化量 "
+            f"delta_bad_pp={delta_bad_pp}：否则共享压缩本身也落入「相近」"
+        )
+    return bool(ci_low_pp > -delta_pp)
 
 
 def h3_pass(drop_without_beta_pp: float, drop_without_value_pp: float) -> bool:
@@ -220,8 +298,10 @@ HYPOTHESES: Dict[str, HypothesisSpec] = {
         judge="h2_pass",
         code_status="no-judge",
         note=(
-            "两个原始量由 E6 产出，但「按什么聚合 4 个上下文长度」未定，"
-            "故判据未接；「质量相近」这一前提的判定主体与阈值也未定义。"
+            "两个原始量由 E6 产出，但「按什么聚合 4 个上下文长度」未定，故判据未接。"
+            "「质量相近」的定义已于 2026-09-16 给出（论文 §7、reproducibility.md §6、"
+            "本模块 quality_comparable_non_inferior），但非劣边界 delta 与噪声底线"
+            "两个参数依赖 E6 的重复 run —— 缺口已由「定义缺失」降为「参数待测」。"
         ),
     ),
     "H3": HypothesisSpec(

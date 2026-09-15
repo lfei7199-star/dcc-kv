@@ -51,7 +51,7 @@ dcc-kv/                                  ← GitHub 私人仓库
 │   ├── figures/
 │   └── supplementary/
 │
-├── results/                              ← 实验结果（不传）
+├── results/                              ← 实验结果（**入库**，见 §8.1）
 ├── logs/                                 ← 日志（不传）
 ├── traces/                               ← profiling trace（不传）
 │
@@ -328,19 +328,26 @@ git merge --no-ff experiment/M2_2proc
 
 ---
 
-## 8. 数据管理（不传仓库）
+## 8. 数据管理
 
-### 8.1 哪些数据不入仓
+### 8.1 哪些数据入库
+
+| 数据 | 位置 | 大小 | 说明 |
+|---|---|---|---|
+| **实验结果** | `results/` | 当前 8.1MB | **入库**（2026-09-16 决定）：论文中的每个 CPU 数字都要能随仓库复现。根 `.gitignore` 用 `!results/**` 显式放行，该规则必须排在 LaTeX 段的 `*.log` 之后，否则 `results/cpu/*_run.log` 仍会被挡掉 |
+
+> ⚠️ **体积策略**：GPU 单次 run 规划为 1–100MB，长期全量入库会迅速膨胀。届时改按目录或按体积上限选择，不要无条件全量入库。当前入库的是 CPU 全部产物，加一个 GPU 冒烟目录 `results/gpu/e8_cpu_reduced/`（该目录未在 GPU 机器上跑过，只是 CPU 缩规模下的通路验证）。
+
+### 8.2 哪些数据不入仓
 
 | 数据 | 位置 | 大小 |
 |---|---|---|
 | 模型权重 | 本地 `/workspace/models/` | 16GB+ |
 | 数据集 | 本地 `/workspace/data/` | 10GB+ |
-| 实验结果 | `results/` | 1-100MB/run |
 | 训练日志 | `logs/` | 10MB/run |
 | Profile trace | `traces/` | 1-10GB/run |
 
-### 8.2 怎么分享给合作者
+### 8.3 怎么分享给合作者
 
 - 压缩：`tar czf results_M4.tar.gz results/M4_*/`
 - 上传：Dropbox / 内部 FTP / 百度网盘

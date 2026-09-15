@@ -130,6 +130,68 @@ def test_h2_registry_records_both_sides():
 
 
 # ---------------------------------------------------------------------------
+# H2 前提「质量相近」的判定程序（2026-09-16 定稿）
+# ---------------------------------------------------------------------------
+def test_quality_comparable_reference_is_dense_not_shared_baseline():
+    """参照物必须是精确注意力；取共享压缩基线与「>= 1.5 pp」自相矛盾。"""
+    assert H.QUALITY_COMPARABLE_REFERENCE == "dense"
+    assert H.QUALITY_COMPARABLE_MAX_DELTA_PP == H.H2_MIN_QUALITY_GAIN_PP
+
+
+def test_quality_comparable_rejects_delta_below_noise_floor():
+    """delta < 噪声底线 ⇒ 拒绝执行（这不是「不相近」，是「测不出来」）。"""
+    with pytest.raises(ValueError):
+        H.quality_comparable_non_inferior(-0.1, delta_pp=0.5, noise_floor_pp=0.8)
+
+
+def test_quality_comparable_rejects_delta_at_or_above_effect_size():
+    """非劣边界不得 >= 1.5 pp，否则前提吞没 H2 前半句所声称的效应。"""
+    with pytest.raises(ValueError):
+        H.quality_comparable_non_inferior(-0.1, delta_pp=1.5, noise_floor_pp=0.2)
+    with pytest.raises(ValueError):
+        H.quality_comparable_non_inferior(-0.1, delta_pp=2.0, noise_floor_pp=0.2)
+
+
+def test_quality_comparable_enforces_the_data_dependent_upper_bound():
+    """给了 delta_bad 时，delta 必须小于它 —— 否则共享压缩本身也算「相近」。"""
+    with pytest.raises(ValueError):
+        H.quality_comparable_non_inferior(
+            -0.1, delta_pp=0.9, noise_floor_pp=0.2, delta_bad_pp=0.5
+        )
+    assert (
+        H.quality_comparable_non_inferior(
+            -0.1, delta_pp=0.4, noise_floor_pp=0.2, delta_bad_pp=0.5
+        )
+        is True
+    )
+
+
+def test_quality_comparable_is_one_sided_strict():
+    """单侧非劣：只卡下界，且下界恰等于 -delta 时不算通过。"""
+    assert (
+        H.quality_comparable_non_inferior(-0.4, delta_pp=0.5, noise_floor_pp=0.1) is True
+    )
+    assert (
+        H.quality_comparable_non_inferior(-0.5, delta_pp=0.5, noise_floor_pp=0.1) is False
+    )
+    # 「显著更优」也通过非劣（但调用方必须披露方向）
+    assert (
+        H.quality_comparable_non_inferior(0.3, delta_pp=0.5, noise_floor_pp=0.1) is True
+    )
+
+
+def test_quality_comparable_delta_must_be_positive():
+    with pytest.raises(ValueError):
+        H.quality_comparable_non_inferior(-0.1, delta_pp=0.0, noise_floor_pp=0.0)
+
+
+def test_quality_comparable_returns_python_bool():
+    assert isinstance(
+        H.quality_comparable_non_inferior(-0.1, delta_pp=0.5, noise_floor_pp=0.1), bool
+    )
+
+
+# ---------------------------------------------------------------------------
 # 返回值类型（要进 JSON，必须是原生 bool）
 # ---------------------------------------------------------------------------
 def test_judges_return_python_bool():
