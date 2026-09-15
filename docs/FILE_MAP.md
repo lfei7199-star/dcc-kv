@@ -1,7 +1,7 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（97 个受控文件 = 60 `.py` / 10 `.tex` / 15 `.md` / 6 `.sh` / 1 `.bib`，
+> 统计口径：`git ls-tree -r HEAD`（98 个受控文件 = 61 `.py` / 10 `.tex` / 15 `.md` / 6 `.sh` / 1 `.bib`，
 > 另 5 个为 `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
 > 不含编译产物、实验产物与本地素材（见 §9）。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
@@ -109,7 +109,7 @@
 | `__init__.py` | 9 | 声明 `common` 包 |
 | `synthetic.py` | 826 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等） |
 | `report.py` | 203 | 结果汇总：`summarize`（median / p5 / p95 / bootstrap CI）、配对检验、`save_json` / `save_csv` |
-| `hypotheses.py` | 255 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设） |
+| `hypotheses.py` | 265 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`） |
 | `beta_variants.py` | 652 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解） |
 
 ### 3.2 `experiments/cpu/` —— 机制级实验（任意多核机器可复现，无需权重/NCCL）
@@ -120,7 +120,8 @@
 | `e1_interface_shapes.py` | 181 | 构造接口的形状与 dtype 契约 |
 | `e2_fidelity_curve.py` | 211 | 保真度随预算变化的曲线 |
 | `e2b_beta_convention.py` | 435 | **β 口径判定**：系数应为 1；度量必须建在归并侧（源块 + 固定上下文块拼接后再与 Dense 比） |
-| `e3_edge_conditioning.py` | 584 | **边级条件化**：20 组配对检验（17 显著 / 3 不显著 / 0 反向）—— H2 机制级证据 |
+| `e3_edge_conditioning.py` | 603 | **边级条件化**：20 组配对检验（17 显著 / 3 不显著 / 0 反向）—— H2 机制级证据。⚠️ `run_h2` 存在**样本内评估**（同一批 Query 又构造又评估，未走 `heldout_split`），其 Δ 在按留出集重跑前**不得**作为 H2 证据（见 `commit_log.md` §S） |
+| `probe_e3_heldout.py` | 226 | **E3 留出集判定探针**（一次性，保留以便复现）：同场景并排跑 in-sample 与 heldout 两套口径，只打印不写结果。结论：负对照上样本内口径造出 +0.156 的假优势；主线 \|Δ\| 缩水约 31%；方向稳定性 20/20 → 18/20 |
 | `e4_dist_equivalence.py` | 283 | 分布式等价性（单进程 mock） |
 | `e5a_mechanism_ablation.py` | 229 | A3 的机制级版本（重构误差口径，对应 GPU 版的任务指标口径） |
 | `e9_knob_localization.py` | 389 | **M–B 旋钮定位**：375 格扫描，分离"可达上界（B）"与"能否触及上界（M）" |
@@ -159,7 +160,7 @@
 | `test_dist_equivalence.py` | 402 | 分布式等价性（含 2 进程 gloo 真实测试，标记 `distributed`） |
 | `test_var_len_msg.py` | 97 | 变长消息协议 |
 | `test_experiment_metadata.py` | 100 | 元数据与结果 schema 的字段契约 |
-| `test_hypotheses.py` | 176 | **H1–H5 阈值表的锚点**：H2 的双条件口径（2026-09-15 裁决）、H1 用严格大于而其余用闭区间、`UNJUDGED` 缺口记录、以及"e5 不得硬编码 H4 阈值"的源码级断言 |
+| `test_hypotheses.py` | 191 | **H1–H5 阈值表的锚点**：H2 的双条件口径（2026-09-15 裁决）、H1 用严格大于而其余用闭区间、`UNJUDGED` 缺口记录、以及"e5 不得硬编码 H4 阈值"与"e3 不得硬编码 H1 阈值"的源码级断言 |
 | `test_gpu_pipeline.py` | 400+ | **纯 CPU 的 GPU 侧口径锚点**：分块尺寸自洽、逐 dst 恰好覆盖一次、两条流水线的 sizes 接线、计时窗口不含集合 barrier、`local_device` 用 LOCAL_RANK、E6 的轴折叠规则、`apply_kv_budget` 分块累加的数值等价性。**不需要 GPU，也不需要进程组** |
 
 `tests/gpu/`（默认跳过）：
@@ -243,6 +244,10 @@
 2026-09-15 按后者（较完整的一版）**定稿为逻辑与**（两条同时满足），两处已对齐，
 阈值的机器可读版本落在 `experiments/common/hypotheses.py`。
 **仍未闭合的一环**：「质量相近」这一前提的判定主体与阈值，仓库内没有定义。
+
+**2026-09-15 独立监督的补充**：本条危害不止上述一处。监督者另发现 **A4 消融编号
+在全仓（论文 + `docs` + `experiments` + `src`）完全不存在**，编号从 A3 直跳 A5 ——
+即实验格点的缺口比本条原记载**多一格**。详见 `commit_log.md` §S.3。
 
 ---
 
