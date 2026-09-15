@@ -1,9 +1,11 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（99 个受控文件 = 61 `.py` / 10 `.tex` / 16 `.md` / 6 `.sh` / 1 `.bib`，
-> 另 5 个为 `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
-> 不含编译产物、实验产物与本地素材（见 §9）。
+> 统计口径：`git ls-tree -r HEAD`（**150** 个受控文件 = 61 `.py` / 23 `.csv` / 22 `.json` /
+> 16 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 5 个为 `.gitignore` ×2 /
+> `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
+> 不含编译产物与本地素材（见 §9）。其中 **51 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
+> （决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
 
 ---
@@ -35,12 +37,12 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `README.md` | 145 | 项目门面。不主张清单（4 条 ❌）、项目结构树、当前状态（M0/M1 完成、M2 待 GPU）、快速开始、文档导航。末尾"上级文档"指向**仓库外**的 5 份文件（当前缺失，见 §8） |
+| `README.md` | 148 | 项目门面。不主张清单（4 条 ❌）、项目结构树、当前状态（M0/M1 完成、M2 待 GPU）、快速开始、文档导航。末尾"上级文档"指向**仓库外**的 5 份文件（当前缺失，见 §8） |
 | `CONTRIBUTING.md` | 178 | 协作规范。分支模型、commit 体例、**禁止直接 commit 到 main**、M2 验收口径（引 blueprint v1.1 §6） |
 | `conftest.py` | 52 | pytest 根配置：注册自定义 marker（`gpu` / `distributed` 等）、把仓库根注入 `sys.path` |
 | `pytest.ini` | 30 | 测试发现与默认行为。`addopts = -m "not gpu"` ⇒ **GPU 测试默认跳过**；`testpaths = tests` |
 | `requirements.txt` | 23 | 依赖清单。⚠️ torch 写 `>=2.6.0`，而 README / CONTRIBUTING 写 `2.3.0+cpu`，**三处不一致**（待决 C5） |
-| `.gitignore` | 137 | 忽略规则。Python / pytest / IDE 常规项 + 项目特定：`models/`、`data/`、`results/`、`traces/`、LaTeX 中间产物；末尾有 `!` 白名单例外 |
+| `.gitignore` | 142 | 忽略规则。Python / pytest / IDE 常规项 + 项目特定：`models/`、`data/`、`traces/`、LaTeX 中间产物。**`results/` 自 2026-09-16 起不再忽略**（改为 `!results/**` 显式放行；该规则必须排在 LaTeX 段的 `*.log` 之后，否则 `results/cpu/*_run.log` 仍会被挡掉）；末尾有 `!` 白名单例外 |
 
 ---
 
@@ -109,7 +111,7 @@
 | `__init__.py` | 9 | 声明 `common` 包 |
 | `synthetic.py` | 826 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等） |
 | `report.py` | 203 | 结果汇总：`summarize`（median / p5 / p95 / bootstrap CI）、配对检验、`save_json` / `save_csv` |
-| `hypotheses.py` | 265 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`） |
+| `hypotheses.py` | 346 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`）。2026-09-16 新增 H2 前提「质量相近」的判定程序 `quality_comparable_non_inferior`（入参显式含 `delta_pp` / `noise_floor_pp`，越出可行区间即 `ValueError` 而**拒绝执行**）与两个常量（`QUALITY_COMPARABLE_REFERENCE = "dense"`、非劣边界上界 = 1.5 pp） |
 | `beta_variants.py` | 652 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解） |
 
 ### 3.2 `experiments/cpu/` —— 机制级实验（任意多核机器可复现，无需权重/NCCL）
@@ -141,7 +143,7 @@
 | `_env.py` | 618 | 环境闸门（`probe` / `enforce`，不达标退出码 3）、计时（`benchmark_ms`；窗口内只做 `device_sync()`，集合 barrier 留窗口外）、设备绑定（`local_rank_of` / `local_device`，取 `LOCAL_RANK`）、`CUDA_CONSTRUCTION_DEFECTS` 历史清单、元数据构造 |
 | `_comm.py` | 437 | 变长 All-to-Allv（阻塞 / 异步）、同步与异步流水线（`run_sync_pipeline` / `run_async_pipeline`）、分块 `_split_chunks`（逐 dst 取片，尺寸自洽）、体积口径（`make_uniform_plan`） |
 | `_hf.py` | 436 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时、KV 字节数 |
-| `e5_gpu_ablation.py` | 641 | **A1** 通信集大小、**A2** 压缩预算扫描、**A3** 组件拆分（被阻断，拒绝产假数字）、**A5** 异步 vs 同步（H4 判据走 `hypotheses.h4_pass`） |
+| `e5_gpu_ablation.py` | 653 | **A1** 通信集大小、**A2** 压缩预算扫描、**A3** 组件拆分（被阻断，拒绝产假数字）、**A5** 异步 vs 同步（H4 判据走 `hypotheses.h4_pass`）。⚠️ **A4 有设计、无代码**：docstring 已显式登记该落差，消融注册表仍是 A1/A2/A3/A5（见 `commit_log.md` 第 25 条） |
 | `e6_main_table.py` | 441 | 主表与可扩展性。`gpu_count` 记为**方法要求**而非自由轴；sync/async 轴对单卡方法**折叠**（不生成两行相同的数） |
 | `e7_negative_results.py` | 485 | 负结果四条件：短上下文 / 低预算 / 强 retrieval / batch=1 |
 | `e8_low_precision.py` | 335 | 低精度（FP16/BF16）归并算子与失效边界 |
@@ -160,7 +162,7 @@
 | `test_dist_equivalence.py` | 402 | 分布式等价性（含 2 进程 gloo 真实测试，标记 `distributed`） |
 | `test_var_len_msg.py` | 97 | 变长消息协议 |
 | `test_experiment_metadata.py` | 100 | 元数据与结果 schema 的字段契约 |
-| `test_hypotheses.py` | 191 | **H1–H5 阈值表的锚点**：H2 的双条件口径（2026-09-15 裁决）、H1 用严格大于而其余用闭区间、`UNJUDGED` 缺口记录、以及"e5 不得硬编码 H4 阈值"与"e3 不得硬编码 H1 阈值"的源码级断言 |
+| `test_hypotheses.py` | 254 | **H1–H5 阈值表的锚点**：H2 的双条件口径（2026-09-15 裁决）、H1 用严格大于而其余用闭区间、`UNJUDGED` 缺口记录、以及"e5 不得硬编码 H4 阈值"与"e3 不得硬编码 H1 阈值"的源码级断言。2026-09-16 补 7 个锚点覆盖「质量相近」判定程序（参照物、两个上界、数据依赖上界、单侧严格性、正数校验、返回原生 bool） |
 | `test_gpu_pipeline.py` | 400+ | **纯 CPU 的 GPU 侧口径锚点**：分块尺寸自洽、逐 dst 恰好覆盖一次、两条流水线的 sizes 接线、计时窗口不含集合 barrier、`local_device` 用 LOCAL_RANK、E6 的轴折叠规则、`apply_kv_budget` 分块累加的数值等价性。**不需要 GPU，也不需要进程组** |
 
 `tests/gpu/`（默认跳过）：
@@ -181,14 +183,14 @@
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
 | `README.md` | 72 | 编译说明与章节目录 |
-| `main.tex` | 477 | 主文件。第 1–4 章正文（引言 / 相关工作 / 问题定义 / 方法）+ 算法伪代码 + 三个 `\input`。⚠️ 作者 / 单位 / 邮箱仍是**占位符**，勿代填 |
+| `main.tex` | 480 | 主文件。第 1–4 章正文（引言 / 相关工作 / 问题定义 / 方法）+ 算法伪代码 + 三个 `\input`。**第 1–4 章以本条重建版定稿**（2026-09-16 决定，原件即桌面 `AuthorKit27 (1).pdf`）。⚠️ 作者 / 单位 / 邮箱是**有意的占位符**（暂不写入正文，勿代填） |
 | `refs.bib` | 242 | 参考文献 **17 条，全部被 `\cite`**。注释字段只用 `annote`（`note` 会被 bst 排版进参考文献表，中文注释会印进正文） |
 | `build.sh` | 70 | 编译入口（**必须 xelatex**：`ctex` 与 `acmart` 冲突，改用 `xeCJK`）。⚠️ `set -e`：出错会**静默中断**，看起来像成功 |
 | `fetch_refs.sh` | 74 | 拉取参考文献 PDF 到 `literature/` |
-| `.gitignore` | 22 | 忽略 `literature/` 与 LaTeX 中间产物 |
-| `sections/05-analysis.tex` | 261 | **第 5 章 复杂度与误差分析**。通信量、计算复杂度、误差分解与误差界、异步流水的理论加速上限 |
-| `sections/06-experiment.tex` | 866 | **第 6 章 实验方案**。设置、评测协议与元数据规范、**已验证的 CPU 实验**（E0–E11 / A3 机制级）、**待执行的 GPU 实验**（E5–E8）、结果报告规范 |
-| `sections/07-discussion.tex` | 138 | **第 7 章 讨论 + 第 8 章 结论**（两章写在同一文件，`\section{结论}` 在 L88） |
+| `.gitignore` | 23 | 忽略 `literature/` 与 LaTeX 中间产物 |
+| `sections/05-analysis.tex` | 262 | **第 5 章 复杂度与误差分析**。通信量、计算复杂度、误差分解与误差界、异步流水的理论加速上限 |
+| `sections/06-experiment.tex` | 875 | **第 6 章 实验方案**。设置、评测协议与元数据规范、**已验证的 CPU 实验**（E0–E11 / A3 机制级）、**待执行的 GPU 实验**（E5–E8，含 2026-09-16 新设的 **A4** 压缩 × 异步交互）、结果报告规范。§6.2 的 H1–H5 阈值已显式标注为**待验假设** |
+| `sections/07-discussion.tex` | 201 | **第 7 章 讨论 + 第 8 章 结论**（两章写在同一文件，`\section{结论}` 在 L153）。2026-09-16 新增小节「「质量相近」的判定」（标签 `sec:quality-comparable`） |
 | `figures/preamble.tex` | 36 | 图的公共样式（颜色、字体、tikzlibrary） |
 | `figures/fig1_architecture.tex` | 57 | 图 1 架构总览 |
 | `figures/fig2_async_pipeline.tex` | 76 | 图 2 异步流水时序 |
@@ -204,11 +206,11 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `commit_log.md` | 2040+ | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
-| `git_strategy.md` | 410 | Git 管理策略：分支、commit 体例、tag、实验可追溯 |
-| `release_checklist.md` | 155 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5） |
-| `reproducibility.md` | 118 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值 |
-| `writing_scope_and_metrics.md` | 149 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束；6 项待裁决事项 |
+| `commit_log.md` | 2222+ | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
+| `git_strategy.md` | 418 | Git 管理策略：分支、commit 体例、tag、实验可追溯。§8.1 记录 **`results/` 入库**的决定与体积策略 |
+| `release_checklist.md` | 170 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
+| `reproducibility.md` | 155 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值；2026-09-16 起附「质量相近」的完整定义摘要 |
+| `writing_scope_and_metrics.md` | 175 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录第六轮/第四轮裁决的落实（D1–D6）与**仍开放的 4 项**（O1–O4） |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
 
@@ -244,11 +246,13 @@
 `docs/reproducibility.md` §6 只写了质量侧，`docs/release_checklist.md` §4 写全了两个侧面。
 2026-09-15 按后者（较完整的一版）**定稿为逻辑与**（两条同时满足），两处已对齐，
 阈值的机器可读版本落在 `experiments/common/hypotheses.py`。
-**仍未闭合的一环**：「质量相近」这一前提的判定主体与阈值，仓库内没有定义。
+**2026-09-16 更新**：「质量相近」这一前提**已给出定义** —— 参照物取精确注意力、判据为单侧非劣检验、非劣边界满足 `噪声底线 <= delta < min(1.5, delta_bad)`（完整论证见论文 §7「「质量相近」的判定」，机器可读实现在 `hypotheses.py` 的 `quality_comparable_non_inferior`）。仍未闭合的只剩**两个参数**（`delta` 与噪声底线），二者依赖 E6 的重复 run。
 
 **2026-09-15 独立监督的补充**：本条危害不止上述一处。监督者另发现 **A4 消融编号
 在全仓（论文 + `docs` + `experiments` + `src`）完全不存在**，编号从 A3 直跳 A5 ——
 即实验格点的缺口比本条原记载**多一格**。详见 `commit_log.md` §S.3。
+
+**2026-09-16 处置**：A4 已补齐到**论文与文档**，并确认原件（第 1–4 章）**本就没有消融编号** ——`消融` / `ablation` / `A1`–`A5` 在原件中各 0 次命中，所以 A4 是**纯设计项**而非"找回"项。**代码侧仍未实现**：`e5_gpu_ablation.py` 的注册表仍是 A1/A2/A3/A5，其 docstring 已显式登记该落差。详见 `commit_log.md` 第 25 条。
 
 ---
 
@@ -257,10 +261,12 @@
 | 路径 | 为什么不在版本控制里 |
 |---|---|
 | `paper/literature/` | 17 篇参考文献 PDF + `_download_log.txt`，由 `paper/.gitignore` 忽略。**与 `paper/refs.bib` 的 17 条一一对应**（含源论文 `zweiger2026attentionmatching_2602.16284`）。用 `paper/fetch_refs.sh` 重建 |
-| `results/` | 实验产物（`results/cpu/`、`results/gpu/`），由根 `.gitignore` 忽略 —— 量大且可重跑 |
 | `paper/main.pdf`、`figures/*.pdf`、`*.aux`、`*.log`、`*.bbl` | LaTeX 编译产物，由 `paper/.gitignore` 与根 `.gitignore` 忽略 |
 | `.pytest_cache/`、`__pycache__/` | 工具缓存 |
 | `models/`、`data/`、`traces/` | 权重、数据集、profiling trace —— 由根 `.gitignore` 显式排除（体积大、可能涉许可） |
+
+> **`results/` 已不再属于本节。** 自 2026-09-16 起它**入库**（51 个文件、8.13 MB；`results/cpu/**` 全部 + `results/gpu/e8_cpu_reduced/**`），由根 `.gitignore` 末尾的 `!results/**` 显式放行 —— 目的是让论文中每个 CPU 数字都能随仓库复现。
+> 两条须知：① 该规则的**位置有约束**，必须排在 LaTeX 段的 `*.log` 之后，否则 `results/cpu/*_run.log` 仍会被挡掉；② `results/gpu/e8_cpu_reduced/` 是 **CPU 缩规模下的通路验证**，不是 GPU 机器上的实测。体积策略见 `docs/git_strategy.md` §8.1。
 
 ---
 
