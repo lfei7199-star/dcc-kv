@@ -62,16 +62,73 @@ from experiments.common import hypotheses as H  # noqa: E402
 # H1：边级条件化是否使紧凑 KV 真的不同
 # =============================================================================
 
+def _dest_query_source(scenario, dest, args):
+    """构造侧该用的 Query 集合。
+
+    留出协议（heldout，默认）下只用 **fit 池** —— 它必须先于评估集被切开，
+    且评估集从未参与选键、β 拟合或 V 回归。这是本仓库的硬约束
+    （见 `synthetic.HeldoutSplit` 的 docstring）。in-sample 仅供复现历史数字。
+    """
+    if args._protocol == "in-sample":
+        return scenario.dest_queries[dest]
+    return args._fit[dest]
+
+
+def _shared_query_source(scenario, args):
+    """共享压缩的构造侧 Query：DCC 侧与共享侧**用同一个池**、同样的 M。
+
+    留出协议下取"各目的端 fit 池的并集"，于是两侧都看不到评估 Query，
+    差异唯一的来源就是「是否按目的端条件化」，而不是「谁见过评估点」。
+    """
+    if args._protocol == "in-sample":
+        return scenario.all_queries
+    return torch.cat([args._fit[d] for d in sorted(args._fit)], dim=0)
+
+
 def _build_dest(scenario, dest, budget, args, seed):
-    """统一入口：保证 H1 与 H2 用同一套 M / d_p 配置。"""
-    return S.build_for_dest(
-        scenario,
-        dest,
+    """统一入口：保证 H1 与 H2 用同一套 M / d_p / Query 源配置。"""
+    return S.build_compact_kv(
+        source_keys=scenario.keys,
+        source_values=scenario.values,
+        destination_queries=_dest_query_source(scenario, dest, args),
         budget=budget,
-        num_repr_queries=args.num_repr_queries,
+        num_representative_queries=args.num_repr_queries,
         projection_dim=args.projection_dim,
         seed=seed,
     )
+
+
+def _build_shared(scenario, budget, args, seed):
+    """共享压缩基线：与 `_build_dest` 只差 Query 来源这一个自变量。"""
+    return S.build_compact_kv(
+        source_keys=scenario.keys,
+        source_values=scenario.values,
+        destination_queries=_shared_query_source(scenario, args),
+        budget=budget,
+        num_representative_queries=args.num_repr_queries,
+        projection_dim=args.projection_dim,
+        seed=seed,
+    )
+
+
+def _stage_protocol(scenario, args):
+    """按协议切分 Query 池，并把结果挂到 args 上供后续调用取用。"""
+    if args._protocol == "in-sample":
+        args._fit = dict(scenario.dest_queries)      # 历史行为：不切分
+        args._eval = dict(scenario.dest_queries)
+        args._n_fit = int(next(iter(scenario.dest_queries.values())).shape[0])
+        args._n_eval = args._n_fit
+    else:
+        split = S.heldout_split(scenario, eval_fraction=args.eval_fraction)
+        args._fit = split.fit_queries
+        args._eval = split.eval_queries
+        args._n_fit = int(next(iter(split.fit_queries.values())).shape[0])
+        args._n_eval = int(next(iter(split.eval_queries.values())).shape[0])
+    if args.num_repr_queries > args._n_fit:
+        raise ValueError(
+            f"M={args.num_repr_queries} 超过构造池 {args._n_fit}；"
+            f"请调大 --queries-per-dest（留出协议下需要 ≥ 2M）。"
+        )
 
 
 def measure_kl_between(
@@ -125,7 +182,7 @@ def measure_noise_floor(
 
     本函数因此强制要求 M < N，否则抛错（由调用方保证）。
     """
-    n_dest_queries = scenario.dest_queries[dest].shape[0]
+    n_dest_queries = _dest_query_source(scenario, dest, args).shape[0]
     if args.num_repr_queries >= n_dest_queries:
         raise ValueError(
             f"噪声底线退化：M={args.num_repr_queries} >= 目的端 Query 数 "
@@ -165,7 +222,12 @@ def run_h1(args) -> List[Dict[str, Any]]:
             seed=args.seed,
             dtype=args._dtype,
         )
-        probe = scenario.all_queries
+        _stage_protocol(scenario, args)
+        # 探针必须来自**留出集**：若探针本身参与过代表 Query 的选择，
+        # 跨目的端的 KL 会被"两边都见过这些点"抬高，H1 随之虚高。
+        probe = torch.cat(
+            [args._eval[d] for d in sorted(args._eval)], dim=0
+        )
 
         for budget in args.budgets:
             kls: List[float] = []
@@ -191,6 +253,9 @@ def run_h1(args) -> List[Dict[str, Any]]:
             jc_sum = R.summarize(jaccards, "jaccard_overlap", "ratio", seed=args.seed)
 
             rows.append({
+                "protocol": args._protocol,
+                "n_fit_queries": args._n_fit,
+                "n_eval_queries": args._n_eval,
                 "focus_strength": strength,
                 "budget": budget,
                 "n_pairs": len(kls),
@@ -245,20 +310,21 @@ def run_h2(args) -> Dict[str, Any]:
     注意 M（代表 Query 数）在两侧相同，因此差异只来自"条件化"本身，
     不来自可用 Query 数量的多少。
 
-    ⚠️ 已知局限（2026-09-15 由独立监督查出，**尚未修复**）
-    --------------------------------------------------
-    上面那句话只对了一半。M 在两侧确实相同，但两侧**取 M 的池子不同源**：
-    DCC 侧从 `scenario.dest_queries[dest]`（即下面的 `q_dest`，也正是评估用的
-    那一批 Query）里抽代表 Query，shared 侧从 `scenario.all_queries`（全部
-    目的端）里抽。评估同样在 `q_dest` 上进行 ⇒ **DCC 侧存在样本内优势**：
-    它见过评估点，shared 侧没有。因此两侧的 Δ 不是纯粹的「条件化」效应。
+    ⚠️ 该局限已于 2026-09-16 修复（缺口 M9）
+    ---------------------------------------
+    独立监督（2026-09-15）查出：M 在两侧确实相同，但两侧**取 M 的池子不同源** ——
+    DCC 侧从 `scenario.dest_queries[dest]`（也正是评估用的那一批 Query）里抽
+    代表 Query，shared 侧从 `scenario.all_queries` 里抽，而评估同样在
+    `q_dest` 上进行 ⇒ **DCC 侧存在样本内优势**：它见过评估点，shared 侧没有。
+    于是两侧的 Δ 不是纯粹的「条件化」效应。
 
-    这与 `synthetic.HeldoutSplit` 的 docstring 警告的是同一类错误
-    （「若用同一批 Query 同时做拟合与评估，误差会被系统性低估」）。
-    E2b / E9 / E10 / E11 都已改用 `heldout_split`，**E3 尚未**。
+    现在默认 `--protocol heldout`：每个目的端的 Query 按 `--eval-fraction`
+    切成互不相交的 fit / eval 两份，**两侧的构造都只用 fit 池，评估只用
+    eval 池**，且两侧取 M 的池子规模相同。唯一自变量回到「是否按目的端
+    条件化」。`--protocol in-sample` 保留历史行为，仅供复现旧数字对照。
 
-    在按留出集重跑并确认方向之前，本函数产出的 Δ **不得**作为 H2 的机制级
-    证据写入论文（见 `docs/commit_log.md` 第 22 条）。
+    与 `docs/commit_log.md` 第 22 条的登记一致：**旧（in-sample）Δ 不得作为
+    H2 的机制级证据写入论文**；本协议下的新数字才是。
     """
     detail_rows: List[Dict[str, Any]] = []
     per_condition: List[Dict[str, Any]] = []
@@ -281,12 +347,10 @@ def run_h2(args) -> Dict[str, Any]:
     # 紧凑 KV 本身也与 β 模式无关（β 是在使用阶段施加的），故只构造一次
     compacts: Dict[Any, Any] = {}
     for strength, scenario in scenarios.items():
+        _stage_protocol(scenario, args)   # 切池必须先于任何构造
         for budget in args.budgets:
-            compacts[(strength, budget, "shared")] = S.build_shared(
-                scenario, budget=budget,
-                num_repr_queries=args.num_repr_queries,
-                projection_dim=args.projection_dim,
-                seed=args.seed,
+            compacts[(strength, budget, "shared")] = _build_shared(
+                scenario, budget=budget, args=args, seed=args.seed,
             )
             for dest in sorted(scenario.dest_queries.keys()):
                 compacts[(strength, budget, dest)] = _build_dest(
@@ -302,6 +366,11 @@ def run_h2(args) -> Dict[str, Any]:
 
         for strength in args.focus_strengths:
             scenario = scenarios[strength]
+            # ⚠️ 必须在这里重新切池：args._eval 是在上面的"构造"循环里逐场景
+            # 覆盖的，构造循环跑完后它只保留**最后一个场景**的 Query。
+            # 若评估循环直接读 args._eval，除最后一个 strength 外全部读错，
+            # 而错误方向是"安静地给出看似合理的数字"（实测过）。
+            _stage_protocol(scenario, args)
 
             for budget in args.budgets:
                 shared = compacts[(strength, budget, "shared")]
@@ -309,7 +378,8 @@ def run_h2(args) -> Dict[str, Any]:
                 cond_shared: List[float] = []
 
                 for dest in sorted(scenario.dest_queries.keys()):
-                    q_dest = scenario.dest_queries[dest]
+                    # 评估只用留出集；构造用的是它的补集（见 _dest_query_source）
+                    q_dest = args._eval[dest]
                     compact_dcc = compacts[(strength, budget, dest)]
 
                     # 逐 query 的相对输出误差（避免 d_v 量纲影响可比性）
@@ -328,6 +398,9 @@ def run_h2(args) -> Dict[str, Any]:
                     cond_shared.extend(e_shared.tolist())
 
                     detail_rows.append({
+                        "protocol": args._protocol,
+                        "n_fit_queries": args._n_fit,
+                        "n_eval_queries": args._n_eval,
                         "beta_mode": beta_mode,
                         "focus_strength": strength,
                         "budget": budget,
@@ -348,6 +421,7 @@ def run_h2(args) -> Dict[str, Any]:
                     seed=args.seed,
                 )
                 entry = {
+                    "protocol": args._protocol,
                     "beta_mode": beta_mode,
                     "focus_strength": strength,
                     "budget": budget,
@@ -458,7 +532,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-v", dest="d_v", type=int, default=32, help="value 维度")
     p.add_argument("--num-dest", dest="num_dest", type=int, default=4,
                    help="目的端数量")
-    p.add_argument("--queries-per-dest", dest="queries_per_dest", type=int, default=48)
+    p.add_argument("--protocol", type=str, default="heldout",
+                   choices=["heldout", "in-sample"],
+                   help="heldout：构造只用 fit 池、评估只用不相交的 eval 池（默认）；"
+                        "in-sample：历史行为（评估 Query 参与构造），仅供对照复现")
+    p.add_argument("--eval-fraction", dest="eval_fraction", type=float, default=0.5,
+                   help="划给评估集的 Query 比例（仅 heldout 协议生效）")
+    p.add_argument("--queries-per-dest", dest="queries_per_dest", type=int, default=96,
+                   help="每个目的端的 Query 数。留出协议下需要 ≥ 2M："
+                        "切分后 fit 池必须容得下 M 个代表 Query")
     p.add_argument("--num-repr-queries", dest="num_repr_queries", type=int, default=32,
                    help="代表 Query 数 M（两侧相同，保证差异只来自条件化）")
     p.add_argument("--projection-dim", dest="projection_dim", type=int, default=32)
@@ -481,6 +563,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    # 内部别名：_stage_protocol / _dest_query_source 读 _protocol / _fit / _eval，
+    # 一律带下划线以便被下方的 cfg 过滤掉（torch.dtype 与张量不可 JSON 序列化）。
+    args._protocol = args.protocol
+    args._fit = {}
+    args._eval = {}
+    args._n_fit = 0
+    args._n_eval = 0
 
     # --- 精度能力探测：在跑之前暴露环境限制，而不是抛 RuntimeError ---
     support = S.compaction_dtype_support()
@@ -506,7 +595,7 @@ def main() -> int:
         args.budgets = [16, 64]
         args.L_s = 128
         args.num_dest = 3
-        args.queries_per_dest = 24
+        args.queries_per_dest = 48
         args.num_repr_queries = 16
 
     print("=" * 78)
@@ -518,6 +607,9 @@ def main() -> int:
           f"num_dest={args.num_dest}  M={args.num_repr_queries}")
     print(f"  预算扫描 B={args.budgets}")
     print(f"  目的端分离度扫描={args.focus_strengths}（0.0 为负对照）")
+    print(f"  Query 协议={args.protocol}"
+          + (f"（fit/eval 按 {args.eval_fraction:g}/{1 - args.eval_fraction:g} 切分）"
+             if args.protocol == "heldout" else "（⚠️ 历史行为：评估 Query 参与构造）"))
     print()
 
     # 只保留公开参数（去掉内部解析出的 _dtype，它是 torch.dtype 不可 JSON 序列化）
@@ -532,8 +624,13 @@ def main() -> int:
             "合成数据的关注带为人为构造，真实文本中目的端差异可能更小。",
             "H1 判据 KL > 0.5 来自 docs/reproducibility.md；本脚本同时报告噪声底线。",
             "H2 显著也不能主张任务指标优势，那需要 experiments/gpu/ 的实验。",
+            "留出协议（--protocol heldout，默认）下构造只用 fit 池、评估只用 "
+            "互不相交的 eval 池；旧 in-sample 数字含 DCC 侧的样本内优势，"
+            "不得作为 H2 的机制级证据（commit_log 第 22 条、缺口 M9）。",
         ],
         "estimator_source": "Attention Matching（非本文原创）",
+        "protocol": args.protocol,
+        "eval_fraction": args.eval_fraction if args.protocol == "heldout" else None,
     }
 
     if args.only in ("h1", "both"):

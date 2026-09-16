@@ -107,17 +107,21 @@ def run(args) -> Dict[str, Any]:
                     beta_mode=beta_mode,
                     num_repr_queries=args.num_repr_queries,
                 )
-                abs_mass = S.mass_error(
+                # M5：改用公共偏移口径。旧实现 mass_error 对 β 的常数分量免疫，
+                # 而本消融的自变量含"移除 β"，用旧口径会低估该成分的作用。
+                abs_mass = S.absolute_mass_error(
                     probe, compact, scenario.keys,
                     beta_mode=beta_mode,
                     num_repr_queries=args.num_repr_queries,
                 )
                 out_sum = R.summarize(rel_out.tolist(), f"eps_out[{name}]", "ratio", seed=args.seed)
-                mass_sum = R.summarize(abs_mass.tolist(), f"eps_mass[{name}]", "ratio", seed=args.seed)
+                mass_sum = R.summarize(
+                    abs_mass.tolist(), f"eps_mass_abscommon[{name}]", "ratio", seed=args.seed
+                )
                 row[f"eps_out_{name}_median"] = out_sum.median
                 row[f"eps_out_{name}_ci_lower"] = out_sum.ci_95_lower
                 row[f"eps_out_{name}_ci_upper"] = out_sum.ci_95_upper
-                row[f"eps_mass_{name}_median"] = mass_sum.median
+                row[f"eps_mass_abscommon_{name}_median"] = mass_sum.median
 
             # 各组件贡献 = 完整版误差 与 移除版误差 之差
             row["beta_contribution"] = (

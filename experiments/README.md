@@ -26,10 +26,12 @@ Key 选择、可能是 β、可能是 Value 回归、可能是归约精度。两
 |---|---|---|---|
 | `e0_order_invariance.py` | E0 | 顺序 / 平衡树 / 随机树 × FP32/FP64 的归并误差 | ✅ 可运行 |
 | `e1_interface_shapes.py` | E1 | 形状、索引合法性、可复现性等 11 项不变量 | ✅ 可运行 |
-| `e2_fidelity_curve.py` | E2 | ε_mass(B)、ε_out(B) 曲线 + 有符号质量误差 | ✅ 可运行 |
-| `e3_edge_conditioning.py` | E3 | H1（KL/JS/Jaccard）+ H2（配对 bootstrap + 置换检验） | ✅ 可运行 |
+| `e2_fidelity_curve.py` | E2 | ε_mass(B)、ε_out(B) 曲线（**FP64**，含 $B=L_s$ 边界）+ 绝对质量误差 | ✅ 可运行 |
+| `e3_edge_conditioning.py` | E3 | H1（KL/JS/Jaccard）+ H2（配对 bootstrap + 置换检验）；**默认留出协议**（`--protocol in-sample` 仅供复现旧数字） | ✅ 可运行 |
 | `e4_dist_equivalence.py` | E4 | 同步 DCC-KV vs dense 的三档对照 + 多进程 gloo | ✅ 可运行 |
-| `e5a_mechanism_ablation.py` | A3（机制级） | 移除 β / 移除 Value 回归各自的重构误差贡献 | ✅ 可运行 |
+| `e5a_mechanism_ablation.py` | A3（机制级） | 移除 β / 移除 Value 回归各自的重构误差贡献（落 `results/cpu/a3/`，口径 `absolute_mass_error`） | ✅ 可运行 |
+| `e12_representative_query.py` | E12 | 代表 Query 投影维度 $d_p$ 的扫描（JL 畸变 / 覆盖率 / 下游误差），5 种子 + 留出 | ✅ 可运行 |
+| `e13_bound_tightness.py` | E13 | **误差界式 (37) 的紧致度检验**：逐 Query 比对 RHS/LHS 与前置条件违反率（$5760$ 个 Query） | ✅ 可运行 |
 
 公共模块：
 
@@ -132,7 +134,7 @@ experiments/
 ├── common/            CPU 侧公共模块
 │   ├── synthetic.py
 │   └── report.py
-├── cpu/               E0–E4 + A3 机制级
+├── cpu/               E0–E13 + A3 机制级
 └── gpu/               E5–E8（含 _env / _comm / _hf）
 ```
 

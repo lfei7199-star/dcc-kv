@@ -121,6 +121,22 @@ bash experiments/run_gpu.sh e7 --plan      # 只打印四条条件清单
 条件 3（检索类样本）需要评测集里带 `task` 字段；缺数据时记为 `no_data`，
 **不得记为 pass**。
 
+### 5.5 跑 CPU 机制级实验（E0–E13，无需权重 / NCCL）
+
+```bash
+bash experiments/run_cpu.sh              # 全部跑一遍（秒 ~ 分钟级）
+bash experiments/run_cpu.sh --quick      # 快速冒烟
+python experiments/cpu/e12_representative_query.py --out results/cpu/e12
+python experiments/cpu/e13_bound_tightness.py       --out results/cpu/e13
+# E3 默认按留出协议；--protocol in-sample 仅用于复现历史数字（不得作 H2 证据）
+python experiments/cpu/e3_edge_conditioning.py      --out results/cpu/e3
+```
+
+CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一一对应。
+其中 **E13** 是式 (37) 误差界的首次数值检验（5760 个 Query、零反例），
+**E12** 是代表 Query 投影维度 d_p 的扫描。**E3 的旧样本内落盘保留在
+`results/cpu/e3_in_sample/`，仅供口径对照，不得作为 H2 的证据。**
+
 ## 6. 预期结果
 
 按 blueprint v1.1 §3 的可检验假设：
@@ -163,8 +179,8 @@ bash experiments/run_gpu.sh e7 --plan      # 只打印四条条件清单
 
 ## 7. 随机性控制
 
-- **多种子**：`e2b` / `e9` / `e10` / `e11` 的 `--seeds` 默认 **5**（该参数是
-  **种子个数**，由基种子派生为 `42, 43, 44, 45, 46`）。
+- **多种子**：`e2b` / `e9` / `e10` / `e11` / **`e12` / `e13`** 的 `--seeds` 默认 **5**
+  （该参数是**种子个数**，由基种子派生为 `42, 43, 44, 45, 46`）。
 - **单种子**：`e0` / `e1` / `e2` / `e3` / `e4` / `e5a` 与 GPU 侧各脚本仅有
   单个 `--seed`（默认 42）。**这些实验尚无种子敏感性证据** —— 这是已知局限，
   见 `docs/commit_log.md` 第 22 条与 §S。

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import math
 import pathlib
 import sys
 
@@ -19,6 +20,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.common import hypotheses as H  # noqa: E402
+
+E6 = REPO_ROOT / "experiments" / "gpu" / "e6_main_table.py"
 
 E5 = REPO_ROOT / "experiments" / "gpu" / "e5_gpu_ablation.py"
 E3 = REPO_ROOT / "experiments" / "cpu" / "e3_edge_conditioning.py"
@@ -251,3 +254,104 @@ def test_release_checklist_states_h2_as_two_sides():
     doc = RELEASE_CHECKLIST.read_text(encoding="utf-8")
     assert "1.5 pp" in doc
     assert "1.10×" in doc
+
+
+# ---------------------------------------------------------------------------
+# H2 跨上下文长度的聚合（2026-09-16，缺口 O2）
+# ---------------------------------------------------------------------------
+def _pts(*specs):
+    return [H.H2PerLength(length=ln, quality_gain_pp=g, prefill_speedup=s,
+                          quality_comparable=c) for ln, g, s, c in specs]
+
+
+def test_h2_aggregation_rule_is_all_not_pooled():
+    """聚合规则必须是「逐长度判定、全通过」，不能退化成池化。
+
+    池化会让某个长度的大额提升掩盖另一个长度的退化，从而改变 H2 的真值条件。
+    若将来要改成池化，必须先改 H2 的**表述**，因此这条断言是刻意的硬约束。
+    """
+    assert H.H2_LENGTH_AGGREGATION == "all"
+    assert H.h2_pass_across_lengths(_pts((4096, 2.0, 1.2, True),
+                                         (8192, 1.6, 1.11, True))).passed is True
+    # 只要有一个长度不达标，整体就不成立 —— 哪怕其余长度大幅超标
+    r = H.h2_pass_across_lengths(_pts((4096, 9.0, 3.0, True),
+                                      (8192, 1.4, 1.11, True)))
+    assert r.passed is False
+    assert r.failing_lengths == (8192,)
+
+
+def test_h2_aggregation_reports_worst_not_mean():
+    """必须同报最差值：只报均值会把「一退一进」读成全面胜利。"""
+    r = H.h2_pass_across_lengths(_pts((4096, 9.0, 3.0, True),
+                                      (8192, 0.4, 1.05, True)))
+    assert r.worst_quality_gain_pp == pytest.approx(0.4)
+    assert r.worst_prefill_speedup == pytest.approx(1.05)
+    # 均值会是 4.7 / 2.025，若实现误用均值，上面两条会失败
+
+
+def test_h2_aggregation_keeps_unresolved_separate_from_failed():
+    """「分辨率不足」不得被计成「未达标」。"""
+    r = H.h2_pass_across_lengths(_pts((4096, 2.0, 1.2, True),
+                                      (8192, float("nan"), float("nan"), None)))
+    assert r.n_failed == 0, "未定长度被误计入失败"
+    assert r.unresolved == (8192,)
+    assert r.passed is False
+    assert r.quality_comparable_all is False
+    # 未定项不得污染最差值
+    assert r.worst_quality_gain_pp == pytest.approx(2.0)
+
+
+def test_h2_aggregation_worst_is_nan_when_nothing_is_finite():
+    r = H.h2_pass_across_lengths(_pts((4096, float("nan"), float("nan"), None)))
+    assert math.isnan(r.worst_quality_gain_pp)
+    assert r.passed is False
+
+
+def test_h2_aggregation_rejects_empty_input():
+    with pytest.raises(ValueError):
+        H.h2_pass_across_lengths([])
+
+
+def test_h2_aggregation_rejects_non_bool_premise():
+    with pytest.raises(ValueError):
+        H.h2_pass_across_lengths(
+            [H.H2PerLength(length=4096, quality_gain_pp=2.0,
+                           prefill_speedup=1.2, quality_comparable="yes")]
+        )
+
+
+def test_h2_registry_judge_is_the_aggregation_entry():
+    """注册表登记的判定入口要与实现一致，避免文档/代码双向漂移。"""
+    assert H.HYPOTHESES["H2"].judge == "h2_pass_across_lengths"
+    assert hasattr(H, H.HYPOTHESES["H2"].judge)
+    # 单长度原语仍然存在，聚合入口才有东西可调
+    assert H.HYPOTHESES["H2"].code_status == "no-judge"
+
+
+def test_e6_wires_the_h2_aggregation_entry():
+    """E6 必须真的调用聚合入口，否则「接线」只是文档里的一句话。"""
+    src = E6.read_text(encoding="utf-8")
+    assert "hypotheses as H" in src, "e6 未导入阈值表"
+    assert "H.h2_pass_across_lengths(" in src, "e6 未调用 H2 聚合入口"
+    assert 'H.H2_LENGTH_AGGREGATION' in src, "e6 未引用聚合规则常量"
+
+
+def test_e6_does_not_prefill_the_h2_parameters():
+    """H2 前提的两个参数**不得有默认值** —— 有默认值等于假装前提永远成立。"""
+    src = E6.read_text(encoding="utf-8")
+    for opt in ("--h2-delta-pp", "--h2-noise-floor-pp"):
+        assert opt in src, f"e6 缺少 {opt}"
+    assert 'dest="h2_delta_pp", type=float, default=None' in src
+    assert 'dest="h2_noise_floor_pp", type=float,\n                   default=None' in src
+
+
+def test_e3_defaults_to_the_heldout_protocol():
+    """E3 的默认协议必须是留出集（缺口 M9）。
+
+    历史行为（评估 Query 参与构造）只能通过显式 ``--protocol in-sample`` 触达，
+    且必须带警示 —— 否则样本内优势会被当成条件化效应写进论文。
+    """
+    src = E3.read_text(encoding="utf-8")
+    assert 'default="heldout"' in src, "E3 默认协议不是留出集"
+    assert "in-sample" in src and "历史行为" in src
+    assert "S.build_shared(" not in src, "E3 绕过了统一的 Query 源解析入口"

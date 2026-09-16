@@ -17,13 +17,14 @@
   而 RMS 选择是**非均匀**采样，保留的质量通常远高于名义比例。
   这个差距是解释"为什么压缩到 1% 还能用"的关键量。
 
-精度说明
---------
-论文该节写的是 FP64，但 **FP64 目前被仓库的一个 dtype 缺陷阻塞**：
-`src/dcc_kv_ref/representative_query.py` 的 `rademacher_projection` 写死
-`.float()`，导致 `build_compact_kv` 在 float64 输入下报 dtype 不匹配。
-本脚本默认 FP32，并在结果里显式记录该限制。若要复现论文规格，
-需先修那一行（改为 `.to(queries.dtype)`）。
+精度说明（2026-09-16 更正）
+--------------------------
+论文 §6 的 E2 规格为 FP64。此前该精度被 `representative_query.py` 的
+`.float()` 写死所阻塞（论文 §6「其五」），故早期落盘是 FP32，本文件也
+记过该限制。**该实现缺陷已修**：`compaction_dtype_support()` 现返回
+`float64: True`。因此本脚本的默认精度改为 **FP64** 以匹配论文规格，
+并把本次实际用的 dtype 写进落盘的 `precision` 字段（此前落盘不含该字段，
+无法从产物判断用的是哪个精度）。`--dtype float32` 仍可用于对照。
 
 用法
 ----
@@ -100,24 +101,36 @@ def run(args) -> Dict[str, Any]:
             }
 
             for beta_mode in args.beta_modes:
-                abs_mass = S.mass_error(
+                # 口径（2026-09-16，缺口 M5）：
+                # 旧实现 mass_error 是"两侧各减自身最大值"，对 β 的常数分量免疫；
+                # 此前的列名却写作 eps_mass_abs_*，名字与实现不符。现改用
+                # absolute_mass_error（公共偏移 c=max(ℓ_full)），列名同步为
+                # eps_mass_abscommon_*，二者不可互比。
+                abs_mass = S.absolute_mass_error(
                     probe, compact, scenario.keys,
                     beta_mode=beta_mode, num_repr_queries=args.num_repr_queries,
                 )
+                # 性质 2 是**方向性**命题（"无偏置时质量被系统性低估"）。
+                # 默认偏移（各减自身 max）会削弱该方向，故必须用公共偏移。
                 signed_mass = S.signed_mass_error(
                     probe, compact, scenario.keys,
                     beta_mode=beta_mode, num_repr_queries=args.num_repr_queries,
+                    common_offset=True,
                 )
                 rel_out = S.relative_output_error(
                     probe, compact, scenario.keys, scenario.values,
                     beta_mode=beta_mode, num_repr_queries=args.num_repr_queries,
                 )
 
-                abs_sum = R.summarize(abs_mass.tolist(), f"eps_mass_abs[{beta_mode}]", "ratio", seed=args.seed)
-                sgn_sum = R.summarize(signed_mass.tolist(), f"eps_mass_signed[{beta_mode}]", "ratio", seed=args.seed)
+                abs_sum = R.summarize(
+                    abs_mass.tolist(), f"eps_mass_abscommon[{beta_mode}]", "ratio", seed=args.seed
+                )
+                sgn_sum = R.summarize(
+                    signed_mass.tolist(), f"eps_mass_signed_common[{beta_mode}]", "ratio", seed=args.seed
+                )
                 out_sum = R.summarize(rel_out.tolist(), f"eps_out_rel[{beta_mode}]", "ratio", seed=args.seed)
 
-                row[f"eps_mass_abs_{beta_mode}_median"] = abs_sum.median
+                row[f"eps_mass_abscommon_{beta_mode}_median"] = abs_sum.median
                 row[f"eps_mass_signed_{beta_mode}_median"] = sgn_sum.median
                 row[f"eps_mass_signed_{beta_mode}_ci_lower"] = sgn_sum.ci_95_lower
                 row[f"eps_mass_signed_{beta_mode}_ci_upper"] = sgn_sum.ci_95_upper
@@ -131,13 +144,34 @@ def run(args) -> Dict[str, Any]:
                 f"  strength={strength:<5} B={budget:<4} "
                 f"B/L={nominal_ratio:6.3f} 保留质量={kept:6.3f} "
                 f"({row['retained_over_nominal']:5.1f}x)  "
-                f"|ε_mass| none={row['eps_mass_abs_none_median']:.4f} "
-                f"over_m={row['eps_mass_abs_over_m_median']:.4f}  "
+                f"|ε_mass|_c none={row['eps_mass_abscommon_none_median']:.4f} "
+                f"over_m={row['eps_mass_abscommon_over_m_median']:.4f}  "
                 f"ε_out none={row['eps_out_rel_none_median']:.4f} "
                 f"over_m={row['eps_out_rel_over_m_median']:.4f}"
             )
 
-    return {"experiment": "E2", "rows": rows}
+    return {
+        "experiment": "E2",
+        # 精度与配置必须随产物落盘：否则无法从结果本身判断用的是哪个口径。
+        "precision": str(args._dtype).replace("torch.", ""),
+        "config": {
+            "L_s": args.L_s, "d_h": args.d_h, "d_v": args.d_v,
+            "budgets": list(args.budgets),
+            "focus_strengths": list(args.focus_strengths),
+            "beta_modes": list(args.beta_modes),
+            "num_repr_queries": args.num_repr_queries,
+            "projection_dim": args.projection_dim,
+            "queries_per_dest": args.queries_per_dest,
+            "seed": args.seed,
+        },
+        "metric_note": (
+            "eps_mass_abscommon_* 用公共偏移 c=max(ℓ_full)；"
+            "eps_mass_signed_common_* 同偏移并保留符号（用于 §5 性质 2 的方向检验）；"
+            "eps_out_rel_* 为单块归一化输出误差。三者与 §5 的跨块绝对量 ε_mass/ε_out "
+            "不是同一个量，见论文 §6 的度量定义表。"
+        ),
+        "rows": rows,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -158,7 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-repr-queries", dest="num_repr_queries", type=int, default=32)
     p.add_argument("--projection-dim", dest="projection_dim", type=int, default=32)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
+    p.add_argument("--dtype", type=str, default="float64", choices=["float32", "float64"],
+                   help="论文 §6 的 E2 规格为 FP64；dtype 缺陷已修，故默认 FP64")
     p.add_argument("--out", type=str, default="results/cpu/e2")
     p.add_argument("--quick", action="store_true")
     return p
@@ -186,7 +221,7 @@ def main() -> int:
     print("=" * 78)
     print("E2：压缩保真度曲线 ε_mass(B) / ε_out(B)")
     print("=" * 78)
-    print(f"  dtype={args.dtype}（论文规格为 FP64，当前被 dtype 缺陷阻塞）")
+    print(f"  dtype={args.dtype}（论文规格为 FP64；'其五'已修，不再阻塞）")
     print(f"  L_s={args.L_s}  d_h={args.d_h}  d_v={args.d_v}  M={args.num_repr_queries}")
     print()
 
@@ -198,6 +233,8 @@ def main() -> int:
     print("     严重低估了实际保留的信息。B/L=1% 时保留质量可能仍有几十 %。")
     print("  2. mass_underestimated_* 为真 → §5.3 性质 2 成立（质量被系统性低估）。")
     print("  3. none 与 over_m 两列的差距，就是 β 机制的实际贡献量。")
+    print("  4. eps_mass_abscommon_* 为公共偏移口径；与 2026-09-16 之前的落盘")
+    print("     （旧口径 mass_error，列名曾误作 eps_mass_abs_*）**不可互比**。")
 
     out_dir = REPO_ROOT / args.out
     R.save_json(str(out_dir / "e2_results.json"), payload)

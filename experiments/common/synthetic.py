@@ -405,13 +405,17 @@ def mass_error(
     beta_mode: str = "full",
     num_repr_queries: int = 1,
 ) -> torch.Tensor:
-    """ε_mass：紧凑块保留的 softmax 质量相对完整块的比例误差。
+    """ε_mass 的**已废弃**单块实现：两侧各减自身最大值。
 
-    定义（与 §5.3 一致）：
+    ⚠️ 弃用（2026-09-16）。**不得再用于任何与 β 有关的结论。**
+    原因：两侧"各自减自身最大值"对 β 的**常数分量完全免疫**，
+    而常数分量恰是 β 的主要职责（恢复块的未归一化质量）。
+    取代者：`absolute_mass_error`（公共偏移 `c = max(ℓ_full)`）。
+    保留本函数仅用于复现历史落盘：E2 与 E5a 在 2026-09-16 之前的结果
+    均由它产出。这一条对应 `docs/writing_scope_and_metrics.md` 的缺口 M5。
+
+    单块版定义（§5.3 的 ε_mass 是跨块绝对量，本函数不跨块）：
         ε_mass = |Σ_j exp(ℓ_compact_j) - Σ_i exp(ℓ_full_i)| / Σ_i exp(ℓ_full_i)
-
-    实现上为避免 exp 溢出，两侧各自减去自己的 max 后比较 ——
-    这与 softmax 的数值稳定性处理一致，衡量的是"质量被低估/高估"的相对程度。
 
     Args:
         probe_queries: [N, d_h]
@@ -485,6 +489,7 @@ def signed_mass_error(
     keys: torch.Tensor,
     beta_mode: str = "full",
     num_repr_queries: int = 1,
+    common_offset: bool = False,
 ) -> torch.Tensor:
     """ε_mass 的**有符号**版本：(mass_compact - mass_full) / mass_full。
 
@@ -494,18 +499,40 @@ def signed_mass_error(
     只有有符号误差才能检验它；取绝对值的版本会把这个预测变成不可证伪的。
 
     Returns:
-        [N] 正值表示紧凑块高估了质量，负值表示低估
+        [N] 正值表示紧凑块高估了质量，负值表示低估（`common_offset=True`）；
+        `common_offset=False`（默认）时符号仍可读，但幅度被偏移选择压低。
+
+    common_offset（2026-09-16 新增）
+    ------------------------------
+    默认 ``False`` 即历史行为「两侧各减自身最大值」。该偏移**不是**一次纯粹的
+    重标定：它把两侧 max 之差 ℓmax_compact − ℓmax_full 混进了表面质量比。
+    该差的符号取决于保留的是哪些 Key、以及 β 把保留 Key 的 logit 抬高了多少
+    （β 的职责正是抬高），**并非常数**。故旧偏移既不保幅度也不保方向：
+
+        实测例（$L_s=128$、$B=16$、$M=16$、$\beta$ 全量、强关注，FP64）——
+        旧偏移给出 $-0.526$，公共偏移给出 $-0.105$，相差 $5$ 倍。
+
+    因此在检验 §5 性质 2（"无偏置时质量被系统性低估"）这类**方向性**命题时，
+    必须用 ``common_offset=True``；旧偏移下"差多少"与"偏哪边"都不可依。
     """
     scale = 1.0 / (keys.shape[-1] ** 0.5)
 
     logits_full = (probe_queries @ keys.T) * scale
-    full_shifted = torch.exp(logits_full - logits_full.max(dim=-1, keepdim=True).values)
-    mass_full = full_shifted.sum(dim=-1)
-
     bias = beta_applied(compact.logit_bias, beta_mode, num_repr_queries)
     logits_c = (probe_queries @ compact.keys.T) * scale + bias
-    c_shifted = torch.exp(logits_c - logits_c.max(dim=-1, keepdim=True).values)
-    mass_c = c_shifted.sum(dim=-1)
+
+    if common_offset:
+        # 公共偏移：两侧同一个 c，故"整块质量被抬高/压低"才可观测
+        c = logits_full.max()
+        mass_full = torch.exp(logits_full - c).sum(dim=-1)
+        mass_c = torch.exp(logits_c - c).sum(dim=-1)
+    else:
+        mass_full = torch.exp(
+            logits_full - logits_full.max(dim=-1, keepdim=True).values
+        ).sum(dim=-1)
+        mass_c = torch.exp(
+            logits_c - logits_c.max(dim=-1, keepdim=True).values
+        ).sum(dim=-1)
 
     return (mass_c - mass_full) / (mass_full + 1e-12)
 

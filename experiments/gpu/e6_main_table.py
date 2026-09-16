@@ -58,6 +58,10 @@ from experiments.gpu import _env, _hf            # noqa: E402
 
 SCRIPT = "experiments/gpu/e6_main_table.py"
 
+# H2 的阈值、前提判定与跨长度聚合规则**只写在 experiments/common/hypotheses.py**。
+# 本文件不得再出现裸阈值（tests/test_hypotheses.py 有源码级断言守这条）。
+from experiments.common import hypotheses as H  # noqa: E402
+
 # 每个方法的前置条件。blocked 的项在这里给出**具体缺什么**，
 # 而不是一句"待实现"。
 METHOD_SPECS: Dict[str, Dict[str, Any]] = {
@@ -315,6 +319,99 @@ def blocked_point(a: argparse.Namespace, model: str, ctx_len: int,
 # main
 # =============================================================================
 
+def h2_points_from_rows(a: argparse.Namespace,
+                        rows: List[Dict[str, Any]]) -> List[H.H2PerLength]:
+    """从主表行数据里抽 H2 的三个原始量，构造逐长度的判据输入。
+
+    配对结构：同一 (model, ctx_len, sync_mode) 下，`dcc_kv` 与
+    `kv_budget_shared` 面对同一份提示、同一份评测集，因此两者的差是**配对量**。
+
+    三个原始量的来源：
+        quality_gain_pp  = (acc_dcc - acc_shared) * 100
+        prefill_speedup  = prefill_shared / prefill_dcc
+        quality_comparable = 由 quality_comparable_non_inferior 判定；当非劣边界
+            `delta_pp` 或噪声底线尚未由命令行给出时取 **None**（= 分辨率不足），
+            而不是 False —— 「没测出容差」与「确实不相近」是两个结论。
+
+    任一必需量为 None（含被阻断的方法）时，该长度记为 None（unresolved）。
+    """
+    def find(method: str, model: str, ctx: int, mode: str):
+        for r in rows:
+            if (r.get("method") == method and r.get("model") == model
+                    and r.get("context_length") == ctx
+                    and r.get("sync_async") == mode):
+                return r
+        return None
+
+    delta = getattr(a, "h2_delta_pp", None)
+    floor = getattr(a, "h2_noise_floor_pp", None)
+    delta_bad = getattr(a, "h2_delta_bad_pp", None)
+
+    points: List[H.H2PerLength] = []
+    for model in a.models:
+        for ctx in a.context_lengths:
+            mode = a.sync_modes[0]
+            r_dcc = find("dcc_kv", model, ctx, mode)
+            r_shr = find("kv_budget_shared", model, ctx, mode)
+            if r_dcc is None or r_shr is None:
+                continue
+            acc_d, acc_s = r_dcc.get("accuracy"), r_shr.get("accuracy")
+            ms_d, ms_s = r_dcc.get("prefill_ms_median"), r_shr.get("prefill_ms_median")
+
+            comparable = None
+            if delta is not None and floor is not None and acc_d is not None \
+                    and acc_s is not None:
+                # 非劣检验要的是 (Q_DCC − Q_dense) 的**配对 95% CI 下界**，
+                # 而本表每格只落一个聚合准确率、不落逐样本判对错，故无法算 CI。
+                # 这里**不猜**：保持 None ⇒ 记入 unresolved。
+                # 要让 H2 真正落判据，需要在 measure_point 里落逐样本得分，
+                # 那是 GPU 侧 E6 跑通后才能做的事（当前 dcc_kv 被阻断）。
+                comparable = None
+
+            if acc_d is None or acc_s is None or not ms_d or not ms_s:
+                points.append(H.H2PerLength(
+                    length=ctx, quality_gain_pp=float("nan"),
+                    prefill_speedup=float("nan"), quality_comparable=None,
+                ))
+            else:
+                points.append(H.H2PerLength(
+                    length=ctx,
+                    quality_gain_pp=(acc_d - acc_s) * 100.0,
+                    prefill_speedup=ms_s / ms_d,
+                    quality_comparable=comparable,
+                ))
+    return points
+
+
+def compute_h2(a: argparse.Namespace,
+               rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """H2 的落盘字段。**规则与阈值全部来自 hypotheses 模块。**
+
+    设计上刻意让它在 E6 被阻断时也能跑完并如实产出 `h2_passed=False`：
+    判定链路先接线、后取数，这样 E6 一跑通就能自动判定，不必再改代码。
+    """
+    points = h2_points_from_rows(a, rows)
+    if not points:
+        return {
+            "h2_passed": None,
+            "h2_aggregation_rule": H.H2_LENGTH_AGGREGATION,
+            "h2_note": "无可配对的数据点（dcc_kv / kv_budget_shared 未同时产出）",
+        }
+    agg = H.h2_pass_across_lengths(points)
+    out = agg.to_dict()
+    out["h2_note"] = (
+        "quality_comparable 为 None 表示该长度上「质量相近」前提无法判定"
+        "（delta 与噪声底线尚未测量），记入 h2_unresolved_lengths，"
+        "**不计入** h2_n_failed —— 分辨率不足不等于未达标。"
+    )
+    out["h2_params_supplied"] = {
+        "delta_pp": getattr(a, "h2_delta_pp", None),
+        "noise_floor_pp": getattr(a, "h2_noise_floor_pp", None),
+        "delta_bad_pp": getattr(a, "h2_delta_bad_pp", None),
+    }
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="E6 主表与可扩展性（GPU）",
@@ -357,6 +454,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--iters", type=int, default=10)
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--h2-delta-pp", dest="h2_delta_pp", type=float, default=None,
+                   help="H2 前提「质量相近」的非劣边界（百分点）。**无默认值** —— "
+                        "取值依赖重复 run 的噪声底线，未给出时该前提记入 "
+                        "h2_unresolved_lengths，判定结果为「分辨率不足」")
+    p.add_argument("--h2-noise-floor-pp", dest="h2_noise_floor_pp", type=float,
+                   default=None,
+                   help="同配置重复 run 的噪声底线（百分点）。**无默认值**")
+    p.add_argument("--h2-delta-bad-pp", dest="h2_delta_bad_pp", type=float,
+                   default=None,
+                   help="共享压缩相对精确注意力的退化量（百分点），可选")
     p.add_argument("--out", type=str, default="results/gpu/e6")
     p.add_argument("--print-env", action="store_true")
     return p
@@ -472,6 +579,7 @@ def main() -> int:
             "paper_claim": "3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144",
             "paper_claim_check": "3×4×2×2×3 = 144，与论文 §6.4 自洽（原稿的 5 档已由 72af7db 改为 4 档）",
         },
+        "h2": compute_h2(a, rows),
         "caveat": (
             "gpu_count 在可测量方法（dense / kv_budget_shared）上不是自由轴："
             "它们是单卡测量，不涉及跨设备通信。主表中的「2 GPU」维度只对"
@@ -488,6 +596,17 @@ def main() -> int:
     print(f"数据点：计划 {payload['grid']['n_points_planned']} / "
           f"实测 {payload['grid']['n_points_measured']} / "
           f"阻断 {payload['grid']['n_points_blocked']}")
+    h2 = payload["h2"]
+    if h2.get("h2_passed") is None:
+        print(f"H2 判定：跳过（{h2.get('h2_note', '')}）")
+    else:
+        print(f"H2 判定：passed={h2['h2_passed']}  规则={h2['h2_aggregation_rule']}  "
+              f"{h2['h2_n_passed']}/{h2['h2_n_lengths']} 通过  "
+              f"未定={h2['h2_unresolved_lengths']}  "
+              f"最差质量提升={h2['h2_worst_quality_gain_pp']:.3f}pp  "
+              f"最差 prefill 加速={h2['h2_worst_prefill_speedup']:.3f}x")
+        if not h2["h2_passed"] and h2["h2_unresolved_lengths"]:
+            print("  [分辨率不足] 存在无法判定的长度；这**不是**「H2 未达标」。")
     if not admissible["admissible"]:
         print(f"[不可入主表] {admissible['reason']}")
     print(f"结果已写入 {out}")

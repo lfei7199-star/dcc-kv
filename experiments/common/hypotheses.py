@@ -40,8 +40,9 @@ H2 的口径与它的未决点
 - ``no-judge`` 尚无
 
 截至今日本仓库**H1 与 H4 是 ``judged``**：H1 由
-``experiments/cpu/e3_edge_conditioning.py`` 的 ``h1_criterion_met`` 字段产出，
-H4 由 ``experiments/gpu/e5_gpu_ablation.py`` 的 A5 产出；H2 / H3 / H5 为
+``experiments/cpu/e3_edge_conditioning.py`` 的 ``h1_criterion_met`` 字段产出
+（2026-09-16 起该脚本默认走留出协议），H4 由
+``experiments/gpu/e5_gpu_ablation.py`` 的 A5 产出；H2 / H3 / H5 为
 ``no-judge``。这个分布由 :data:`UNJUDGED` 暴露出来，避免它被忘记。
 
 （2026-09-15 更正：此前 H1 被登记为 ``no-judge``，note 称「E3 测的是配对显著
@@ -49,12 +50,24 @@ H4 由 ``experiments/gpu/e5_gpu_ablation.py`` 的 A5 产出；H2 / H3 / H5 为
 恰恰就是拿 KL 的 CI 下界与 0.5 比较。这个错位由独立监督查出，见
 `docs/commit_log.md` 第 22 条。）
 
-``no-judge`` **不等于**「结论未定」—— 它表示**判据未接**。E6 能产出 H2 所需的
-两个原始量，但「按什么聚合 4 个上下文长度」属于方法学决定；未定之前本模块
-不代调用方猜测，也不生成一个看似权威的布尔值。
+``no-judge`` **不等于**「结论未定」—— 它表示**判据未接**。
+
+H2 的跨长度聚合规则已于 2026-09-16 定下（见 :data:`H2_LENGTH_AGGREGATION`
+与 :func:`h2_pass_across_lengths`），因此 H2 的缺口再降一级：从「按什么聚合
+未定」降为「**参数待测**」（非劣边界 ``delta`` 与噪声底线依赖 E6 的重复 run）。
+判定仍为 ``no-judge`` —— 规则接好了，但 E6 还没产出可供它消费的数字。
+
+**规则为什么是「每个长度分别判定、全通过才算成立」而不是把 4 个长度池化**
+
+池化（对 4 个长度求平均后与阈值比较）会让某个长度上的大额提升**掩盖**另一个
+长度上的退化。H2 的表述是「质量提升 ≥ 1.5 pp」，它是一个可在外推区间上被
+证伪的普遍主张；若它在 4 个长度里有 1 个不成立，「平均成立」并不等于该主张
+成立。这与 E11 定超参数默认值时"必须报最差单格退化"是同一条纪律：
+**先看最差的那一格，再看平均。**
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
@@ -70,6 +83,11 @@ __all__ = [
     # H2 前提「质量相近」的判定（2026-09-16）
     "QUALITY_COMPARABLE_REFERENCE",
     "QUALITY_COMPARABLE_MAX_DELTA_PP",
+    # H2 跨上下文长度的聚合规则（2026-09-16）
+    "H2_LENGTH_AGGREGATION",
+    "H2PerLength",
+    "H2AcrossLengths",
+    "h2_pass_across_lengths",
     # 注册表
     "HypothesisSpec",
     "HYPOTHESES",
@@ -216,6 +234,154 @@ def quality_comparable_non_inferior(
     return bool(ci_low_pp > -delta_pp)
 
 
+# ---------------------------------------------------------------------------
+# H2 跨上下文长度的聚合（2026-09-16）
+# ---------------------------------------------------------------------------
+H2_LENGTH_AGGREGATION = "all"
+"""H2 在多个上下文长度上的聚合规则：**每个长度分别判定、全部通过才算成立**。
+
+取值只有 ``"all"``。之所以不做成可配置的开关：另一条路（池化）会改变命题的
+真值条件，那是**方法学决定**而不是运行参数 —— 把它做成参数只会让两种不同的
+主张共用一个假设编号。真要改用池化，应当先改 H2 的表述本身。
+"""
+
+
+@dataclass(frozen=True)
+class H2PerLength:
+    """H2 在**单个**上下文长度上的三个原始量。
+
+    Attributes:
+        length: 上下文长度（token 数）。
+        quality_gain_pp: 相对共享压缩的质量提升，单位百分点。
+        prefill_speedup: prefill 加速比（1.10 表示快 10%）。
+        quality_comparable: 该长度上是否满足「质量相近」前提
+            （判定程序见 :func:`quality_comparable_non_inferior`）。
+    """
+
+    length: int
+    quality_gain_pp: float
+    prefill_speedup: float
+    quality_comparable: bool
+
+
+@dataclass(frozen=True)
+class H2AcrossLengths:
+    """H2 跨长度的聚合结果。
+
+    Attributes:
+        passed: 全部长度都通过 :func:`h2_pass` 时为 True。
+        rule: 固化为 ``H2_LENGTH_AGGREGATION``，写进落盘产物以便复现判定口径。
+        n_lengths / n_passed / n_failed: 计数。
+        failing_lengths: 未通过的长度列表（**按原顺序**，便于直接定位）。
+        worst_quality_gain_pp: 最差的一个长度的质量提升（忽略未定长度的 ``nan``）。
+            **必须与 passed 同报** —— 只报均值会让"某个长度明显退化、其余长度
+            大幅提升"读起来像全面胜利。
+        worst_prefill_speedup: 最差的一个长度的 prefill 加速比。
+        quality_comparable_all: 是否**每个**长度都满足「质量相近」前提。
+        unresolved: 无法判定的长度（``quality_comparable`` 为 None 时）。这些既不算
+            通过也不算失败 —— 记为「分辨率不足」而不是「未达标」。
+    """
+
+    passed: bool
+    rule: str
+    n_lengths: int
+    n_passed: int
+    n_failed: int
+    failing_lengths: Tuple[int, ...]
+    worst_quality_gain_pp: float
+    worst_prefill_speedup: float
+    quality_comparable_all: bool
+    unresolved: Tuple[int, ...] = ()
+
+    def to_dict(self) -> Dict[str, object]:
+        """摊平为可 JSON 落盘的字典（供 E6 结果结构使用）。"""
+        return {
+            "h2_passed": self.passed,
+            "h2_aggregation_rule": self.rule,
+            "h2_n_lengths": self.n_lengths,
+            "h2_n_passed": self.n_passed,
+            "h2_n_failed": self.n_failed,
+            "h2_failing_lengths": list(self.failing_lengths),
+            "h2_worst_quality_gain_pp": self.worst_quality_gain_pp,
+            "h2_worst_prefill_speedup": self.worst_prefill_speedup,
+            "h2_quality_comparable_all": self.quality_comparable_all,
+            "h2_unresolved_lengths": list(self.unresolved),
+        }
+
+
+def _finite_min(values):
+    """忽略 non-finite 的最小值；全为 non-finite 时返回 ``nan``。
+
+    为什么不能用内置 ``min``：未定长度的原始量被记为 ``nan``，而 ``nan`` 在
+    比较中不可传递（``min(nan, 1.0)`` 的结果取决于顺序）。若直接 ``min``，
+    「最差质量提升」这一栏会随机地变成 ``nan``，读者会以为数据坏了。
+    最差值的用途是**防掩盖**（某个长度明显退化不能被其余长度的大幅提升掩盖），
+    因此宁可省略不可比项，也不能让它变成无意义的 nan 而不作说明。
+    """
+    fin = [v for v in values if v is not None and math.isfinite(v)]
+    return min(fin) if fin else float("nan")
+
+
+def h2_pass_across_lengths(points) -> H2AcrossLengths:
+    """把各上下文长度的 H2 原始量聚成一个判定（规则见 :data:`H2_LENGTH_AGGREGATION`）。
+
+    Args:
+        points: :class:`H2PerLength` 的可迭代对象。
+
+    Returns:
+        :class:`H2AcrossLengths`。
+
+    Raises:
+        ValueError: ``points`` 为空，或某个 ``quality_comparable`` 既不是
+            ``bool`` 也不是 ``None``。
+
+    ``quality_comparable`` 允许取 ``None``，表示该长度上**无法判定**该前提
+    （例如重复 run 的噪声底线尚未取得 ⇒ 容差区间为空）。这种情况下该长度被
+    记入 ``unresolved`` 而**不计入** ``n_failed``，且整体 ``passed`` 为 False ——
+    「分辨率不足」与「确实没达标」是两个不同的结论，不能合并。
+    """
+    items = list(points)
+    if not items:
+        raise ValueError("points 为空：没有任何上下文长度可供判定")
+
+    n_passed = 0
+    failing: list = []
+    unresolved: list = []
+    for pt in items:
+        if pt.quality_comparable is None:
+            unresolved.append(pt.length)
+            continue
+        if not isinstance(pt.quality_comparable, bool):
+            raise ValueError(
+                f"quality_comparable 必须是 bool 或 None，"
+                f"length={pt.length} 收到 {pt.quality_comparable!r}"
+            )
+        if h2_pass(
+            pt.quality_gain_pp,
+            pt.prefill_speedup,
+            quality_comparable=pt.quality_comparable,
+        ):
+            n_passed += 1
+        else:
+            failing.append(pt.length)
+
+    n_failed = len(failing)
+    return H2AcrossLengths(
+        passed=(n_passed == len(items)),
+        rule=H2_LENGTH_AGGREGATION,
+        n_lengths=len(items),
+        n_passed=n_passed,
+        n_failed=n_failed,
+        failing_lengths=tuple(failing),
+        worst_quality_gain_pp=_finite_min(pt.quality_gain_pp for pt in items),
+        worst_prefill_speedup=_finite_min(pt.prefill_speedup for pt in items),
+        quality_comparable_all=all(
+            pt.quality_comparable is True for pt in items
+        ),
+        unresolved=tuple(unresolved),
+    )
+
+
 def h3_pass(drop_without_beta_pp: float, drop_without_value_pp: float) -> bool:
     """H3：移除 β 后质量退化 ≥ 0.5 点；移除 V 回归后 ≥ 1.0 点。
 
@@ -280,7 +446,8 @@ HYPOTHESES: Dict[str, HypothesisSpec] = {
         note=(
             "E3 的 `h1_criterion_met` 用 KL 的 CI 下界与 H1_MIN_KL 比较（严格大于），"
             "已在 e3_edge_conditioning.py 中改为调用 h1_pass，不再写裸 0.5。"
-            "但该判据建在 E3 的 H1 网格上，与 H2 一样尚未按留出集重跑。"
+            "2026-09-16 起 E3 默认走 --protocol heldout（缺口 M9），"
+            "H1 的探针也改为留出集；in-sample 仅供复现旧数字。"
         ),
     ),
     "H2": HypothesisSpec(
@@ -295,13 +462,17 @@ HYPOTHESES: Dict[str, HypothesisSpec] = {
         },
         boundary="closed",
         source="docs/release_checklist.md §4（2026-09-15 定稿为逻辑与）",
-        judge="h2_pass",
+        judge="h2_pass_across_lengths",
         code_status="no-judge",
         note=(
-            "两个原始量由 E6 产出，但「按什么聚合 4 个上下文长度」未定，故判据未接。"
-            "「质量相近」的定义已于 2026-09-16 给出（论文 §7、reproducibility.md §6、"
-            "本模块 quality_comparable_non_inferior），但非劣边界 delta 与噪声底线"
-            "两个参数依赖 E6 的重复 run —— 缺口已由「定义缺失」降为「参数待测」。"
+            "跨长度的聚合规则已于 2026-09-16 定为"
+            " `H2_LENGTH_AGGREGATION='all'`（每个长度分别判定、全通过才算成立），"
+            "落点 h2_pass_across_lengths 已接线并在 E6 结果结构中产出字段。"
+            "judge 指聚合入口；单长度原语仍是 h2_pass。"
+            "「质量相近」的判定程序已给出（quality_comparable_non_inferior，"
+            "论证见论文 §7、摘要见 reproducibility.md §6）。"
+            "仍为 no-judge 的唯一原因：非劣边界 delta 与噪声底线依赖 E6 的重复 run，"
+            "**参数待测** —— 缺口已由「定义缺失」→「聚合未定」→ 此。"
         ),
     ),
     "H3": HypothesisSpec(

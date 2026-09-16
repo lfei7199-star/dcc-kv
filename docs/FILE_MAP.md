@@ -1,10 +1,10 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**152** 个受控文件 = 61 `.py` / 23 `.csv` / 22 `.json` /
+> 统计口径：`git ls-tree -r HEAD`（**162** 个受控文件 = 63 `.py` / 28 `.csv` / 25 `.json` /
 > 17 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
 > `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
-> 不含编译产物与本地素材（见 §9）。其中 **51 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
+> 不含编译产物与本地素材（见 §9）。其中 **59 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
 > （决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
 
@@ -101,7 +101,7 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `README.md` | 147 | 实验总览：CPU/GPU 分工、编号体系（E0–E11 / A1–A5）、如何跑 |
+| `README.md` | 149 | 实验总览：CPU/GPU 分工、编号体系（E0–E13 / A1–A5）、如何跑 |
 | `__init__.py` | 15 | 声明 `experiments` 包 |
 | `run_cpu.sh` | 65 | CPU 实验入口 |
 | `run_gpu.sh` | 135 | GPU 实验入口（封装 `torchrun`）。⚠️ 数组展开必须用 `"${ARR[@]}"`，**不能**写 `"${ARR[@]:-}"`（后者会退化成空字符串参数） |
@@ -111,9 +111,9 @@
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
 | `__init__.py` | 9 | 声明 `common` 包 |
-| `synthetic.py` | 826 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等） |
+| `synthetic.py` | 854 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等）。`mass_error` 已标废弃，公开偏移版本为 `absolute_mass_error`（列名 `eps_mass_abscommon_*`） |
 | `report.py` | 203 | 结果汇总：`summarize`（median / p5 / p95 / bootstrap CI）、配对检验、`save_json` / `save_csv` |
-| `hypotheses.py` | 346 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`）。2026-09-16 新增 H2 前提「质量相近」的判定程序 `quality_comparable_non_inferior`（入参显式含 `delta_pp` / `noise_floor_pp`，越出可行区间即 `ValueError` 而**拒绝执行**）与两个常量（`QUALITY_COMPARABLE_REFERENCE = "dense"`、非劣边界上界 = 1.5 pp） |
+| `hypotheses.py` | 517 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`）。2026-09-16 新增 H2 前提「质量相近」的判定程序 `quality_comparable_non_inferior`（入参显式含 `delta_pp` / `noise_floor_pp`，越出可行区间即 `ValueError` 而**拒绝执行**）与两个常量（`QUALITY_COMPARABLE_REFERENCE = "dense"`、非劣边界上界 = 1.5 pp）。2026-09-16 补 H2 的**跨长度聚合入口** `h2_pass_across_lengths`（逐长度分别判定、全通过才成立；前提未定记 `unresolved` 而非 `failed`），已接入 `e6_main_table.py` |
 | `beta_variants.py` | 652 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解） |
 
 ### 3.2 `experiments/cpu/` —— 机制级实验（任意多核机器可复现，无需权重/NCCL）
@@ -122,15 +122,17 @@
 |---|---|---|
 | `e0_order_invariance.py` | 277 | 顺序无关性（归并 ⊕ 的交换律/结合律实证） |
 | `e1_interface_shapes.py` | 181 | 构造接口的形状与 dtype 契约 |
-| `e2_fidelity_curve.py` | 211 | 保真度随预算变化的曲线 |
+| `e2_fidelity_curve.py` | 249 | 保真度随预算变化的曲线（**FP64**，$B$ 含 $B=L_s$ 边界） |
 | `e2b_beta_convention.py` | 435 | **β 口径判定**：系数应为 1；度量必须建在归并侧（源块 + 固定上下文块拼接后再与 Dense 比） |
-| `e3_edge_conditioning.py` | 603 | **边级条件化**：20 组配对检验（17 显著 / 3 不显著 / 0 反向）—— H2 机制级证据。⚠️ `run_h2` 存在**样本内评估**（同一批 Query 又构造又评估，未走 `heldout_split`），其 Δ 在按留出集重跑前**不得**作为 H2 证据（见 `commit_log.md` §S） |
+| `e3_edge_conditioning.py` | 701 | **边级条件化**：H1（KL/JS/Jaccard）+ H2 配对检验。**默认留出协议**（fit / eval 两池互不相交，`--eval-fraction`）；`--protocol in-sample` 仅用于复现旧数字。留出后 H2 优势是目的端分离度的函数（强度 0 无优势） |
 | `probe_e3_heldout.py` | 226 | **E3 留出集判定探针**（一次性，保留以便复现）：同场景并排跑 in-sample 与 heldout 两套口径，只打印不写结果。结论：负对照上样本内口径造出 +0.156 的假优势；主线 \|Δ\| 缩水约 31%；方向稳定性 20/20 → 18/20 |
 | `e4_dist_equivalence.py` | 283 | 分布式等价性（单进程 mock） |
-| `e5a_mechanism_ablation.py` | 229 | A3 的机制级版本（重构误差口径，对应 GPU 版的任务指标口径） |
+| `e5a_mechanism_ablation.py` | 234 | A3 的机制级版本（重构误差口径，对应 GPU 版的任务指标口径）；落 `results/cpu/a3/`，用 `absolute_mass_error` |
 | `e9_knob_localization.py` | 389 | **M–B 旋钮定位**：375 格扫描，分离"可达上界（B）"与"能否触及上界（M）" |
 | `e10_beta_stability.py` | 656 | **β 稀疏塌缩**的定位与修复；把 β 分解为"块级常数分量（收益）"与"per-key 离散分量（代价）" |
 | `e11_lambda_tuning.py` | 774 | λ_β 调参（尺度无关的相对正则强度） |
+| `e12_representative_query.py` | 421 | **代表 Query 投影维度 $d_p$** 的扫描（`$d_p\in\{4,8,16,32,64\}$` + 无投影参照），报 JL 畸变 / 覆盖率 / 下游误差；5 种子 + 留出 |
+| `e13_bound_tightness.py` | 657 | **误差界式 (37) 的紧致度检验**：逐 Query 比对 RHS/LHS（`rel_tol=1e-9`）与前置条件违反率，含块数轴（性质 3）；5760 个 Query、零反例 |
 | `c10_baseline_diagnosis.py` | 379 | 基线诊断：为何 `test_fast_kv_*` / `test_apb_*` 从未被 pytest 收集（包导出缺失 + `budget == L_s` 根本没压缩） |
 
 ### 3.3 `experiments/gpu/` —— 任务级与系统级实验（需 A100/H100 + NCCL + 真实权重）
@@ -190,9 +192,9 @@
 | `build.sh` | 70 | 编译入口（**必须 xelatex**：`ctex` 与 `acmart` 冲突，改用 `xeCJK`）。⚠️ `set -e`：出错会**静默中断**，看起来像成功 |
 | `fetch_refs.sh` | 74 | 拉取参考文献 PDF 到 `literature/` |
 | `.gitignore` | 23 | 忽略 `literature/` 与 LaTeX 中间产物 |
-| `sections/05-analysis.tex` | 262 | **第 5 章 复杂度与误差分析**。通信量、计算复杂度、误差分解与误差界、异步流水的理论加速上限 |
-| `sections/06-experiment.tex` | 875 | **第 6 章 实验方案**。设置、评测协议与元数据规范、**已验证的 CPU 实验**（E0–E11 / A3 机制级）、**待执行的 GPU 实验**（E5–E8，含 2026-09-16 新设的 **A4** 压缩 × 异步交互）、结果报告规范。§6.2 的 H1–H5 阈值已显式标注为**待验假设** |
-| `sections/07-discussion.tex` | 201 | **第 7 章 讨论 + 第 8 章 结论**（两章写在同一文件，`\section{结论}` 在 L153）。2026-09-16 新增小节「「质量相近」的判定」（标签 `sec:quality-comparable`） |
+| `sections/05-analysis.tex` | 303 | **第 5 章 复杂度与误差分析**。通信量、计算复杂度、误差分解与误差界、异步流水的理论加速上限 |
+| `sections/06-experiment.tex` | 1050 | **第 6 章 实验方案**。设置、评测协议与元数据规范、**已验证的 CPU 实验**（E0–E11 / A3 机制级）、**待执行的 GPU 实验**（E5–E8，含 2026-09-16 新设的 **A4** 压缩 × 异步交互）、结果报告规范。§6.2 的 H1–H5 阈值已显式标注为**待验假设** |
+| `sections/07-discussion.tex` | 216 | **第 7 章 讨论 + 第 8 章 结论**（两章写在同一文件，`\section{结论}` 在 L153）。2026-09-16 新增小节「「质量相近」的判定」（标签 `sec:quality-comparable`） |
 | `figures/preamble.tex` | 36 | 图的公共样式（颜色、字体、tikzlibrary） |
 | `figures/fig1_architecture.tex` | 57 | 图 1 架构总览 |
 | `figures/fig2_async_pipeline.tex` | 76 | 图 2 异步流水时序 |
@@ -208,12 +210,12 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `commit_log.md` | 2313+ | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
+| `commit_log.md` | 2400+ | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
 | `git_strategy.md` | 418 | Git 管理策略：分支、commit 体例、tag、实验可追溯。§8.1 记录 **`results/` 入库**的决定与体积策略 |
 | `release_checklist.md` | 170 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
-| `reproducibility.md` | 199 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值；2026-09-16 起附「质量相近」的完整定义摘要 |
-| `writing_scope_and_metrics.md` | 175 |
-| `gpu_execution_plan.md` | 264 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录第六轮/第四轮裁决的落实（D1–D6）与**仍开放的 4 项**（O1–O4） |
+| `reproducibility.md` | 215 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值；2026-09-16 起附「质量相近」的完整定义摘要 |
+| `writing_scope_and_metrics.md` | 182 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录历次裁决的落实（D1–D6）与仍开放项。**2026-09-16 第八轮：M1/M2/M3/M5/M9 全部关闭**（见 §4 后附注） |
+| `gpu_execution_plan.md` | 264 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对 |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
 
@@ -268,7 +270,7 @@
 | `.pytest_cache/`、`__pycache__/` | 工具缓存 |
 | `models/`、`data/`、`traces/` | 权重、数据集、profiling trace —— 由根 `.gitignore` 显式排除（体积大、可能涉许可） |
 
-> **`results/` 已不再属于本节。** 自 2026-09-16 起它**入库**（51 个文件、8.13 MB；`results/cpu/**` 全部 + `results/gpu/e8_cpu_reduced/**`），由根 `.gitignore` 末尾的 `!results/**` 显式放行 —— 目的是让论文中每个 CPU 数字都能随仓库复现。
+> **`results/` 已不再属于本节。** 自 2026-09-16 起它**入库**（59 个文件；`results/cpu/**` 全部 + `results/gpu/e8_cpu_reduced/**`），由根 `.gitignore` 末尾的 `!results/**` 显式放行 —— 目的是让论文中每个 CPU 数字都能随仓库复现。
 > 两条须知：① 该规则的**位置有约束**，必须排在 LaTeX 段的 `*.log` 之后，否则 `results/cpu/*_run.log` 仍会被挡掉；② `results/gpu/e8_cpu_reduced/` 是 **CPU 缩规模下的通路验证**，不是 GPU 机器上的实测。体积策略见 `docs/git_strategy.md` §8.1。
 
 ---
