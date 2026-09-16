@@ -24,7 +24,7 @@ Key 选择、可能是 β、可能是 Value 回归、可能是归约精度。两
 
 | 文件 | 对应 | 测什么 | 状态 |
 |---|---|---|---|
-| `e0_order_invariance.py` | E0 | 顺序 / 平衡树 / 随机树 × FP32/FP64 的归并误差 | ✅ 可运行 |
+| `e0_order_invariance.py` | E0 | 顺序 / 平衡树 / 随机树 × FP32/FP64 的归并误差；**置换次数 $n$ 的收敛阶梯**（`--perm-ladder`，默认 $1$…$1000$，同时给出「平衡树不劣」的符号分布） | ✅ 可运行 |
 | `e1_interface_shapes.py` | E1 | 形状、索引合法性、可复现性等 11 项不变量 | ✅ 可运行 |
 | `e2_fidelity_curve.py` | E2 | ε_mass(B)、ε_out(B) 曲线（**FP64**，含 $B=L_s$ 边界）+ 绝对质量误差 | ✅ 可运行 |
 | `e3_edge_conditioning.py` | E3 | H1（KL/JS/Jaccard）+ H2（配对 bootstrap + 置换检验）；**默认留出协议**（`--protocol in-sample` 仅供复现旧数字） | ✅ 可运行 |

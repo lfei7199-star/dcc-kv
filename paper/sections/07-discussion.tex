@@ -142,7 +142,7 @@ $\mathrm{CI}_{\text{low}}(\Delta) \in (-\delta, 0]$，则前提成立而方向�
 此时应如实写作「与精确注意力的差异未超过 $\delta$」，不得写作「与精确注意力相当」——
 后者会隐含一个并未被检验的等号。
 
-上述规则已落到代码：\texttt{hypotheses.py} 的 \texttt{h2\_pass\_across\_lengths}
+上述规则已落到代码：\texttt{hypotheses.py} 的 \texttt{h2\_pass\_}\allowbreak\texttt{across\_}\allowbreak\texttt{lengths}
 把逐长度判定聚成单一结论，且\textbf{「分辨率不足」与「未达标」分开记账}——
 某个长度的前提无法判定时记入 \texttt{unresolved} 而不计入 \texttt{failed}，
 整体结果为「不可判定」；\texttt{quality\_comparable\_non\_inferior} 在

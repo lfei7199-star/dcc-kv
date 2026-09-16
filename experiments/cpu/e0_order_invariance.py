@@ -9,7 +9,9 @@
 本脚本就是补这一项。三件事：
 
 1. **置换数量**：随机打乱的次数越多，越可能碰到误差最大的那个顺序。
-   逐个记录，看最大相对误差是否随置换数收敛（若发散，说明存在病态顺序）。
+   这里不止"逐个记录"，而是给出**累计最大误差随置换次数 n 的收敛阶梯**
+   （`--perm-ladder`）：若该量随 n 收敛，说明最大误差存在稳定上界、
+   不存在"越试越坏"的病态顺序；若仍单调上升，则已报的最大值只是**下界**。
 2. **归并树形状**：顺序（左深树）vs 平衡二叉树 vs 随机树。
    为什么重要 —— 异步 All-to-Allv 中消息到达顺序不可控，
    但**归并结构可由实现决定**；若平衡树显著优于左深树，
@@ -24,6 +26,7 @@
 ----
     python experiments/cpu/e0_order_invariance.py --out results/cpu/e0
     python experiments/cpu/e0_order_invariance.py --quick
+    python experiments/cpu/e0_order_invariance.py --perm-ladder 1 10 100 1000
 """
 
 from __future__ import annotations
@@ -148,11 +151,111 @@ def make_blocks(
 
 
 # =============================================================================
+# 置换数量的收敛阶梯
+# =============================================================================
+
+def perm_ladder(
+    states: List[OnlineSoftmaxState],
+    ref: torch.Tensor,
+    ladder: List[int],
+    seed: int,
+) -> List[Dict[str, Any]]:
+    """置换数量作为自变量的收敛阶梯。
+
+    对同一条随机置换序列逐次求相对误差，报告**前 n 次观测中的最大误差**。
+    读法：若该量随 n 迅速收敛，说明最大误差存在稳定上界，异步乱序到达不会因
+    "碰巧遇到某个病态顺序"而失控；若它随 n 持续上升且未见拐点，则当前报出的
+    最大值只是**下界**，安全边界尚无证据。
+
+    Args:
+        states: K 个块状态（顺序固定）
+        ref: 真值输出（把 K 个块拼起来做一次完整 softmax 注意力）
+        ladder: 递增的试验次数阶梯
+        seed: 随机置换的种子（固定后阶梯可复现）
+
+    Returns:
+        [{num_permutations, cumulative_max_rel_err}, ...]，按 ladder 升序
+
+    Raises:
+        ValueError: ladder 为空（空阶梯没有可报告的曲线）
+    """
+    if not ladder:
+        raise ValueError("ladder 不能为空：空阶梯没有可报告的收敛曲线")
+    if min(ladder) < 1:
+        raise ValueError(f"ladder 只能取正整数，得到 {min(ladder)}")
+    n_max = max(ladder)
+    g = torch.Generator().manual_seed(seed)
+    errs: List[float] = []
+    for _ in range(n_max):
+        perm = torch.randperm(len(states), generator=g).tolist()
+        permuted = [states[i] for i in perm]
+        errs.append(
+            relative_error(attention_output(merge_left_deep(permuted)), ref)
+        )
+
+    out: List[Dict[str, Any]] = []
+    running_max = 0.0
+    cursor = 0
+    for n in sorted(ladder):
+        while cursor < n:
+            running_max = max(running_max, errs[cursor])
+            cursor += 1
+        out.append({"num_permutations": n, "cumulative_max_rel_err": running_max})
+    return out
+
+
+# =============================================================================
+# 派生判据量
+# =============================================================================
+
+def experiment_summary(
+    rows: List[Dict[str, Any]],
+    ladder_all: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """把树形状对比与阶梯汇总成论文可直接引用的判据量。
+
+    两个量：
+      - tree_shape_balanced_wins / total：平衡树误差不大于顺序归并的格数。
+        读法看**符号分布而非单格**——单次实现的树间比较会被"本次顺序恰好
+        是否走运"支配，只有跨 (精度, K) 的整体符号分布才有解释力。
+      - ladder_ratio_200_to_1000_max_<dtype>：把试验次数从 200 提到 1000
+        （5 倍）时，累计最大相对误差的最大增长比。若该比值接近 1，说明
+        报出的最大值是稳定上界；若显著大于 1 且随 n 无拐点，则只是下界。
+
+    注意 FP64 一栏整体处于机器舍入量级（约 1e-16），其"增长比"
+    由 1--2 ULP 的抖动主导，不可与 FP32 一栏同口径比较。
+    """
+    out: Dict[str, Any] = {
+        "tree_shape_balanced_wins": sum(
+            1 for r in rows if r["balanced_better_than_seq"]
+        ),
+        "tree_shape_total": len(rows),
+    }
+
+    for dt in sorted({r["dtype"] for r in ladder_all}):
+        ratios: List[float] = []
+        for K in sorted({r["num_blocks"] for r in ladder_all if r["dtype"] == dt}):
+            per_n = {
+                r["num_permutations"]: r["cumulative_max_rel_err"]
+                for r in ladder_all
+                if r["dtype"] == dt and r["num_blocks"] == K
+            }
+            if 200 in per_n and 1000 in per_n and per_n[200] > 0:
+                ratios.append(per_n[1000] / per_n[200])
+        out[f"ladder_ratio_200_to_1000_max_{dt}"] = (
+            max(ratios) if ratios else None
+        )
+
+    return out
+
+
+# =============================================================================
 # 主实验
 # =============================================================================
 
 def run(args) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
+    ladder_all: List[Dict[str, Any]] = []
 
     for dtype_name, dtype in (("float32", torch.float32), ("float64", torch.float64)):
         for num_blocks in args.num_blocks:
@@ -192,6 +295,25 @@ def run(args) -> Dict[str, Any]:
                     )
                 )
 
+            # --- 置换数量的收敛阶梯（补 §6 E0 的待补项） ---
+            ladder_rows = perm_ladder(states, ref, args.perm_ladder, seed=args.seed)
+            ladder_max = ladder_rows[-1]["cumulative_max_rel_err"]
+            ladder_prev = (
+                ladder_rows[-2]["cumulative_max_rel_err"]
+                if len(ladder_rows) > 1
+                else ladder_max
+            )
+            ladder_tail_rel_growth = (
+                (ladder_max - ladder_prev) / ladder_prev if ladder_prev > 0 else 0.0
+            )
+            for _lr in ladder_rows:
+                ladder_all.append({
+                    "dtype": dtype_name,
+                    "num_blocks": num_blocks,
+                    "num_permutations": _lr["num_permutations"],
+                    "cumulative_max_rel_err": _lr["cumulative_max_rel_err"],
+                })
+
             perm_sum = R.summarize(errs_perm, "rel_err_permuted", "ratio", seed=args.seed)
             tree_sum = R.summarize(errs_tree, "rel_err_random_tree", "ratio", seed=args.seed)
 
@@ -206,6 +328,8 @@ def run(args) -> Dict[str, Any]:
                 "err_permuted_median": perm_sum.median,
                 "err_permuted_p95": perm_sum.p95,
                 "err_random_tree_median": tree_sum.median,
+                "ladder_final_max": ladder_max,
+                "ladder_tail_rel_growth": ladder_tail_rel_growth,
                 "balanced_better_than_seq": bool(err_bal <= err_seq),
                 "max_err_all": max(
                     [err_seq, err_bal, max(errs_perm), max(errs_tree)]
@@ -219,8 +343,17 @@ def run(args) -> Dict[str, Any]:
                 f"置换max={max(errs_perm):9.3e}  随机树={tree_sum.median:9.3e}  "
                 f"{'平衡≤顺序' if r['balanced_better_than_seq'] else '平衡>顺序'}"
             )
+            print(
+                f"     置换阶梯 max@{max(args.perm_ladder)}={ladder_max:9.3e}  "
+                f"尾部相对增长={ladder_tail_rel_growth:+.2%}"
+            )
 
-    return {"experiment": "E0", "rows": rows}
+    return {
+        "experiment": "E0",
+        "rows": rows,
+        "perm_ladder": ladder_all,
+        "summary": experiment_summary(rows, ladder_all),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -238,6 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="每个设定下的随机置换次数")
     p.add_argument("--num-trees", dest="num_trees", type=int, default=50,
                    help="每个设定下的随机归并树个数")
+    p.add_argument("--perm-ladder", dest="perm_ladder", type=int, nargs="+",
+                   default=[1, 2, 5, 10, 25, 50, 100, 200, 500, 1000],
+                   help="置换数量的收敛阶梯（累计最大相对误差随试验次数的曲线）")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", type=str, default="results/cpu/e0")
     p.add_argument("--quick", action="store_true")
@@ -250,6 +386,7 @@ def main() -> int:
         args.num_blocks = [2, 8, 32]
         args.num_permutations = 50
         args.num_trees = 20
+        args.perm_ladder = [1, 5, 25, 100]
 
     print("=" * 78)
     print("E0：Online Softmax 归并的顺序无关性")
@@ -263,11 +400,25 @@ def main() -> int:
     print("  - 顺序 vs 平衡树：若平衡树误差系统性更小，异步实现应改用平衡归并")
     print("    （消息成对缓冲后归并），因为它把树深从 K 降到 log2(K)。")
     print("  - 置换 max：异步乱序到达的最坏情况误差。这就是数值安全边界。")
+    print("  - 置换阶梯：看这个 max 随试验次数是否收敛。尾部相对增长接近 0")
+    print("    才是稳定上界；若仍在上升，报出的 max 只是下界。")
     print("  - FP32 vs FP64 的差距给出低精度下的量级参照（E8 需在 GPU 上规模化）。")
+
+    sm = payload["summary"]
+    print()
+    print("派生判据量：")
+    print(
+        f"  - 平衡树不劣于顺序归并：{sm['tree_shape_balanced_wins']}"
+        f"/{sm['tree_shape_total']} 格（看符号分布，不看单格）"
+    )
+    for dt in sorted(k for k in sm if k.startswith("ladder_ratio_")):
+        v = sm[dt]
+        print(f"  - {dt}: {v:.4f}" if v is not None else f"  - {dt}: (无)")
 
     out_dir = REPO_ROOT / args.out
     R.save_json(str(out_dir / "e0_results.json"), payload)
     R.save_csv(str(out_dir / "e0.csv"), payload["rows"])
+    R.save_csv(str(out_dir / "e0_perm_ladder.csv"), payload["perm_ladder"])
     print()
     print(f"结果已写入 {out_dir}")
     return 0

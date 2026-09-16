@@ -283,8 +283,10 @@ $T_{\text{comm}} / T_{\text{comp}}$ 的实测值，以便判断实测加速偏�
 
 需要指出，式~\eqref{eq:speedup-bound} 是理论上界，不含通信启动延迟、元数据交换开销、
 负载不均衡以及调度抖动。此外，式~\eqref{eq:comm-assoc} 保证的只是数值结果与接收顺序无关，而在线 Softmax
-状态归并本身引入浮点舍入差异；该差异的量级需通过数值实验界定
-（见 E0 与低精度下的 E8）。因此，异步实现的
+状态归并本身引入浮点舍入差异；该差异的量级已由 E0 界定（\S\ref{sec:exp-cpu}）：
+$\mathrm{FP32}$ 下不超过 $7.9\times10^{-7}$、$\mathrm{FP64}$ 下处于机器舍入量级，
+且不随乱序试验次数增长；低精度（$\mathrm{FP16}$/$\mathrm{BF16}$）下的失效边界仍需 E8。
+因此，异步实现的
 实测加速比应低于式~\eqref{eq:speedup-bound}，且二者之差可用于衡量实现质量。
 
 \subsection{小结}
@@ -297,6 +299,9 @@ $O(B_{s,r}(d_h+d_v))$，代价是 $|\mathcal{E}_s|$ 倍的构造开销与 $O(NM 
 加速比与上界的差距可以归因。
 
 需要明确的是，本节给出的误差界依赖 $\lambda_\beta$、$\lambda_v$ 与代表 Query 覆盖度等
-量，其实际紧致程度、以及 $\epsilon_{\text{mass}}$、$\epsilon_{\text{out}}$ 在各数据集
-上的经验分布，目前尚未测量。第~\ref{sec:experiment} 节给出测量方案，其中可在纯 CPU 环境
+量。其\emph{紧致程度}已在合成数据上被测量（见上文 E13 与第~\ref{sec:discussion} 节）：
+$\mathrm{RHS}/\mathrm{LHS}$ 中位 $2.10$、$95$ 分位 $3.51$、$5760$ 个 Query 零反例，
+故它是量级可用的界；但该比值、以及 $\epsilon_{\text{mass}}$ 与 $\epsilon_{\text{out}}$ 的
+经验分布，均由合成分布决定，\textbf{在真实模型与真实长文本上尚未测量}。
+第~\ref{sec:experiment} 节给出测量方案，其中可在纯 CPU 环境
 下复现的部分已标注，需要 GPU 的部分明确标为待执行。

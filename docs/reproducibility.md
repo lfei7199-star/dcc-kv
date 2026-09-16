@@ -126,6 +126,8 @@ bash experiments/run_gpu.sh e7 --plan      # 只打印四条条件清单
 ```bash
 bash experiments/run_cpu.sh              # 全部跑一遍（秒 ~ 分钟级）
 bash experiments/run_cpu.sh --quick      # 快速冒烟
+python experiments/cpu/e0_order_invariance.py       --out results/cpu/e0
+#   E0 的置换次数轴可单独调：--perm-ladder 1 10 100 1000
 python experiments/cpu/e12_representative_query.py --out results/cpu/e12
 python experiments/cpu/e13_bound_tightness.py       --out results/cpu/e13
 # E3 默认按留出协议；--protocol in-sample 仅用于复现历史数字（不得作 H2 证据）
@@ -134,7 +136,11 @@ python experiments/cpu/e3_edge_conditioning.py      --out results/cpu/e3
 
 CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一一对应。
 其中 **E13** 是式 (37) 误差界的首次数值检验（5760 个 Query、零反例），
-**E12** 是代表 Query 投影维度 d_p 的扫描。**E3 的旧样本内落盘保留在
+**E12** 是代表 Query 投影维度 d_p 的扫描。**E0** 给出在线归并的数值边界：
+置换次数 $n$ 的累计最大相对误差在 $n\le25$ 内即达 $n=1000$ 时的 $88\%$ 以上，
+且 $200\to1000$（$5$ 倍）的最大增长仅 $4.54\%$（$\mathrm{FP32}$）；
+平衡树相对顺序归并**没有系统性方向**（$12$ 格中 $7$ 格不劣、$5$ 格更差），
+故该规模下误差量级由浮点精度而非归并结构支配。**E3 的旧样本内落盘保留在
 `results/cpu/e3_in_sample/`，仅供口径对照，不得作为 H2 的证据。**
 
 ## 6. 预期结果
