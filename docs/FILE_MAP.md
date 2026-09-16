@@ -1,8 +1,8 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**165** 个受控文件 = 64 `.py` / 30 `.csv` / 25 `.json` /
-> 17 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
+> 统计口径：`git ls-tree -r HEAD`（**167** 个受控文件 = 64 `.py` / 30 `.csv` / 25 `.json` /
+> 19 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
 > `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
 > 不含编译产物与本地素材（见 §9）。其中 **61 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
 > （决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
@@ -25,6 +25,7 @@
 | 查"某个决定为什么这么定" | `docs/commit_log.md`（逐次提交报告） |
 | 查投稿前要做什么 | `docs/release_checklist.md` |
 | 查当前还有什么没解决 | `docs/commit_log.md` §P.2 |
+| **给合作者/师姐的进展汇报与代码导航** | **`reports/`**：`2026-09-16-progress-report.md`（进展 + 待办）、`code-and-files-guide.md`（代码与文件说明） |
 
 三条贯穿全仓库的硬约束（读任何文件前先知道）：
 
@@ -216,13 +217,15 @@
 | `release_checklist.md` | 170 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
 | `reproducibility.md` | 221 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值；2026-09-16 起附「质量相近」的完整定义摘要 |
 | `writing_scope_and_metrics.md` | 182 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录历次裁决的落实（D1–D6）与仍开放项。**2026-09-16 第八轮：M1/M2/M3/M5/M9 全部关闭**（见 §4 后附注）。第九轮补上 E0 的「置换次数」轴，论文 §6 里最后一条非 GPU 待补项关闭 |
-| `gpu_execution_plan.md` | 264 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对 |
+| `gpu_execution_plan.md` | 287 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对。**§2/§5/§6/§7 已于同日第九轮同步**：CPU 侧缺口（M1/M2/M3/M5/M9）全部标为已完成，G1–G6 未动，故 §0 结论不变 |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
 
 ---
 
-## 7. `scripts/` 与 `.github/`
+## 7. `scripts/` / `.github/` / `reports/`
+
+### 7.1 `scripts/` 与 `.github/`
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
@@ -232,6 +235,18 @@
 | `.github/PULL_REQUEST_TEMPLATE.md` | 55 | PR 模板 |
 | `.github/ISSUE_TEMPLATE/bug_report.md` | 49 | Bug 报告模板 |
 | `.github/ISSUE_TEMPLATE/feature_request.md` | 40 | 功能请求模板 |
+
+### 7.2 `reports/` —— 对外汇报与代码导航（2026-09-16 新增）
+
+面向**合作者**（而非维护者）的材料。与 `docs/` 的分工：`docs/` 讲过程与规范
+（给自己看），`reports/` 讲进展与导览（给别人看）。**文件名用英文、内容用中文** ——
+与仓库其余文件命名体例一致，且避免中文名在 git 终端输出里被转义成八进制、
+以及在 Linux / CI 上的潜在编码问题。
+
+| 文件 | 行数 | 作用与内容 |
+|---|---|---|
+| `2026-09-16-progress-report.md` | 200 | **进展汇报**（面向师姐）。一句话结论（论文非 GPU 内容已收口 + 当前仍不能租卡）、今日 6 项完成项（附证据）、论文/代码/证据三层状态快照、4 条风险、待完成事项分「CPU 可做 / 需租卡 / 需外部输入」、下一步计划、自查命令附录 |
+| `code-and-files-guide.md` | 367 | **代码与文件说明**。面向第一次接触仓库的人：怎么用本文档、项目做什么与**原创边界**、五分钟上手、目录总览、`src/` 逐模块、`experiments/` 逐脚本（含 15 个 CPU 实验一览）、测试的定位、论文与排版注意、`results/` 产物约定、`docs/` 各文件作用、**§10 已知缺口与诚实边界**（含引用数字的三条禁令） |
 
 ---
 
