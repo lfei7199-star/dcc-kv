@@ -3,11 +3,11 @@
 > 本文件按提交顺序倒序记录 `dcc-kv` 仓库的每一次提交：动机、改动清单、验证证据、遗留项。
 > 与 `docs/git_strategy.md`（规范）互补 —— 那份说「应该怎么提交」，这份说「实际提交了什么、验没验证过」。
 >
-> 生成时间：2026-09-16 22:25 (GMT+8)
-> 当前 HEAD：`3d76629`（分支 `paper/sections-5-8`；本文件本次补记为其后紧随的 docs 提交 ——
-> 自 `main`（`8a1d275`）分叉以来的第 42 次提交）
-> 本轮新增一条：`3d76629`（第 41 次，第 29 条，新增 `reports/` 两份对外文档，
-> 并同步已过时的 `gpu_execution_plan.md`）。
+> 生成时间：2026-09-20 12:55 (GMT+8)
+> 当前 HEAD：`c9ca6b0`（分支 `paper/sections-5-8`；本文件本次补记为其后紧随的 docs 提交 ——
+> 自 `main`（`8a1d275`）分叉以来的第 44 次提交）
+> 本轮新增一条：`c9ca6b0`（第 43 次，第 30 条，补齐 G1/G2/G3/G5 与 A4，
+> 并落实第五轮对抗性审查的 12 处修复）。
 > 上一轮：`89075bf`（第 39 次，第 28 条，补 E0 的置换次数轴，关闭 §6 最后一条
 > 非 GPU 待补项；并修掉 §5 与 E13 自相矛盾的收尾句与一处 22.8pt 真实溢出）、
 > `139b1b8`（第 38 次，第 27 条）。
@@ -35,6 +35,7 @@
 
 | # | 短哈希 | 日期 | 作者 | 类型 | 文件数 | +行 | −行 |
 |---|---|---|---|---|---|---|---|
+| 30 | `c9ca6b0` | 2026-09-20 12:41 | Saluneo | feat(gpu)+fix(audit) | 32 | 5865 | 182 |
 | 29 | `3d76629` | 2026-09-16 22:20 | Saluneo | docs(reports) | 4 | 631 | 28 |
 | 28 | `89075bf` | 2026-09-16 19:18 | Saluneo | exp(cpu)+paper | 14 | 1456 | 44 |
 | 27 | `139b1b8` | 2026-09-16 14:00 | Saluneo | exp(cpu)+paper | 31 | 20853 | 2140 |
@@ -64,11 +65,11 @@
 | 3 | `8a1d275` | 2026-09-08 09:15 | Mavis | fix(requirements) | 1 | 6 | 6 |
 | 2 | `fcd9718` | 2026-09-08 07:40 | Mavis | docs | 5 | 463 | 0 |
 | 1 | `7ebff65` | 2026-09-08 06:36 | Mavis | feat | 43 | 5382 | 0 |
-| | | | | **合计** | **297 次文件变更** | **245284** | **3015** |
+| | | | | **合计** | **329 次文件变更** | **251149** | **3197** |
 
-仓库当前规模：**167** 个受版本控制文件，其中 64 个 `.py`、10 个 `.tex`、19 个 `.md`、
+仓库当前规模：**178** 个受版本控制文件，其中 75 个 `.py`、10 个 `.tex`、19 个 `.md`、
 30 个 `.csv`、25 个 `.json`、6 个 `.log`（后三者**全部**来自 `results/`，共 61 个，见第 24 条）。
-新增的 2 个 `.md` 是 `reports/` 下的对外文档（见第 29 条）。
+本轮新增 **11 个 `.py`**：G1/G2/G3/G5 四个实现 + 7 个锚点文件（见第 30 条）。
 
 分支与推送状态：
 
@@ -77,7 +78,7 @@
                                                         第九轮（2026-09-16 22:10）本机代理
                                                         127.0.0.1:7890 启动后**一次推送即成功**，
                                                         `90934a6..cc582ae`，push exit 0）；
-                                                        本日志提交 `3d76629` 待推送
+                                                        本轮提交 `c9ca6b0` 与本日志提交待推送（本机代理 127.0.0.1:7890 已 LISTENING，具备推送条件）
 > ⚠️ 更正：上一版此处记「`139b1b8`/`e80b4b1`/`89075bf` 待推送 —— 代理无监听」，
 > 那是**代理未启动时**的中间状态；代理启动后一次推送即成功，4 个提交全部上去。
 > 阻塞点确实只在代理进程，**与提交内容、凭据均无关**。保留原文不抹除。
@@ -88,6 +89,114 @@
 
 ---
 
+## 30. `c9ca6b0` — 补齐 G1/G2/G3/G5 与 A4，落实第五轮对抗性审查的 12 处修复
+
+**日期**：2026-09-20 12:41 | **类型**：feat(gpu)+fix(audit) | **规模**：32 文件，+5865/−182
+
+### 动机
+
+两件事合并成一次提交，因为它们在**同一批文件里互相咬合**（`_forward.py` 同时承载 G2 的实现
+与 D2 的处置）。硬拆成 feat / fix 两次，会得到一个**测试不通过的中间态**，所以合并、分段叙述。
+
+**第一件**：租卡前的代码缺口 G1–G6（见第 26 条）里，G1（算子核）、G2（异步入口接真实前向）、
+G3（基线 GPU 化）、G5（评测集转换器）此前**只有设计没有代码**，A4 消融同样如此。本机无 CUDA，
+所以补齐有一个绕不开的前提：**实现必须 device-agnostic** —— 只有不出现任何 `cuda` 字面量，
+才有可能在本地把数值对拍完再上卡。理由不是优雅，是**可验证性**。
+
+**第二件**：补齐之后做第五轮对抗性审查。方式不是复述「脚本能跑 / `--plan` 通过」，
+而是**用最便宜的替身把真实路径重放一遍**（stub cache、stub 集合通信、2 进程 gloo），
+专门找那些「导入通过、计划通过、但在真实路径上是错的」缺陷。
+
+**结论**：G1–G5 的**数值实现本身干净**（上一轮自查的结论成立），但包在外面的
+**计量与记账层有 12 处缺陷**，其中两处是**判定级**的。
+
+> **本轮最该记住的一条**：审查一处「看起来已经写完」的代码，查它**测什么**比查它**算什么**
+> 更容易出成果。12 处缺陷里**没有一处是数学错的**，全部是「数字在落盘 / 判定时被贴错了标签」。
+
+### 两处判定级缺陷
+
+**D1 —— E6 的 prefill 计时窗口里从不出现裁剪后的 KV。**
+
+`measure_prefill` 跑 4 次前向，4 次都是 `input=4096, past=None`；`apply_kv_budget`
+在这条路径上只贡献开销。于是 `T_prefill(压缩) >= T_prefill(精确)`、加速比**结构上恒 <= 1**。
+这不是「H2 没达标」，而是「**H2 的加速臂不可能达标**」—— 把 `dcc_kv` 的 `measurable`
+直接翻成 `True`，会产出一个**看起来合格、实则永不达标**的 H2。
+
+处置：把该契约写成模块级常量 `PREFILL_TIMING_CONSUMES_COMPACT_KV` 并落进产物；
+量具失效时 `h2_pass_across_lengths` 记 `unresolved(reason=instrument)` 而**不是** `failed`。
+**「测不了」和「没达标」是两件事，混在一起就是替自己圆场。**
+
+**D11 —— `conftest.py` 的自动 marker 把 CPU 守卫静默关掉了。**
+
+它按 `item.name` 判名，而 `item.name` **含 parametrize id**。于是
+`@parametrize("sub", [..., "tests/gpu"])` 这种「以 gpu 为审查对象」的用例被判成 gpu 而默认排除
+—— 实测新写的 3 条设备索引锚点**根本没跑**，而全量测试照样报全绿。改用 `item.originalname`。
+
+**守卫失效不报错，是最危险的一类**：它不是让你漏看假绿，而是让假绿看起来是真的。
+
+### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src/dcc_kv_ref/attention_kernel.py`（新增，467 行） | **G1**：`CompactKV` 进 SDPA 的算子核。`PartialAttention` + `identity_compact` / `compact_kv_attention` / `dense_attention` / `merge_partial_attention`（Online Softmax 归并）/ `dcc_kv_attention`，另有 `default_scale` 与 `causal_visibility`（因果掩码按**位置**而非行序）。加性掩码统一为 `(*[1]*(q.ndim-2), Lq_or_1, B)` 并用真 `-inf` |
+| `experiments/gpu/_forward.py`（新增，426 行） | **G2**：把 `_comm.pack_compact_edge` 打出的行（K、β、V 三段拼接）解码回紧凑边 → 喂 G1 → 归并部分结果（`pipelined_attention`），产出 `ForwardResult` |
+| `src/baselines/operators.py`（新增，334 行） | **G3**：`ring_attention` / `fastkv_attention` / `apb_attention` 向量化算子，复用 G1 核，与 CPU 参考 **ULP 级**一致（原先逐 query 的 Python 循环语义权威但**不可用于计时**） |
+| `experiments/gpu/build_eval_set.py`（新增，557 行） | **G5**：LongBench 原生多选子集 → `_hf.score_choices` 认的 JSONL |
+| `tests/test_{attention_kernel,baseline_operators,build_eval_set,forward_pipeline,a4_interaction}.py`（新增） | 五组锚点（G1/G3/G5/G2/G4），纯 CPU 可跑 |
+| `tests/test_selfcheck_2026_09_18.py`（新增，320 行） | 2026-09-18 自查的已修缺陷锚点（此前一直未入库） |
+| `tests/test_adversarial_2026_09_20.py`（新增，516 行） | 本轮 12 处缺陷的锚点，每条**先证明「它本可以不被发现」** |
+| `conftest.py`（52→65） | 自动打 marker 改用 `item.originalname`（**D11**） |
+| `experiments/common/hypotheses.py`（517→812） | A4 交互判定 `a4_interaction_verdict` + `A4_CI_LEVEL` / `A4_MIN_BUDGET_LEVELS`；H2 的量具失效通路 |
+| `experiments/common/report.py`（203→390） | `bootstrap_ratio_ci`（A4 统计底座）+ `json_safe()`（**D10**） |
+| `experiments/gpu/e5_gpu_ablation.py`（653→1211） | A4 的 `a4_interaction_grid`；异步胞落 `t_comm_ms=nan` + `t_comm_ms_raw`（**D2**）、`warmup`/`iters`（**D3**） |
+| `experiments/gpu/e6_main_table.py`（441→692） | 契约与量具旗标落进产物；`prefill_instrument_valid` → `unresolved(reason=instrument)`（**D1**）；blockers 文案更正（**D7**） |
+| `experiments/gpu/_hf.py`（436→497） | 声明 `PREFILL_TIMING_CONSUMES_COMPACT_KV = False` |
+| `experiments/gpu/_env.py` / `_comm.py` / `e7` / `e8` | `warmup`/`iters` 落盘（**D3**）；E8 补运行元数据（**D9**） |
+| `src/experiment_metadata.py`（161→173） | `lambda_beta` 改引 `DEFAULT_LAMBDA_BETA`（**D8**） |
+| `tests/gpu/*.py` + `profiling/torch_profiler_runner.py` | 设备索引统一走 `_env.local_rank_of`（**D4**） |
+| `tests/test_gpu_pipeline.py`（400+→461） | 单侧 `>= 4` 改双边精确断言（**D5**） |
+| `experiments/README.md`（149→172） | A4 标为已实现；G1/G2/G3 从「缺口」移到「已补齐」；阻断表只剩 H0 与 G6 |
+| `docs/gpu_execution_plan.md`（287→317） | §0/§5 同步；新增 **H0** 缺口行；修 L34 断句残留（**D6/D12**） |
+| `docs/FILE_MAP.md`（301→313） | 受控文件 167→**178**；新增 11 个文件条目；校准本轮涉及文件的行数 |
+
+> 12 处缺陷按严重度：**D1**（prefill 量具）、**D11**（守卫被静默排除）为判定级；
+> **D2**（异步 comm_ms 是上界却当普通字段落盘）、**D8**（λ_β 默认值不同源）、
+> **D3**（重复次数不进产物）、**D4**（全局 rank 当设备序号）、**D9**（E8 无元数据）、
+> **D5**（单侧断言）、**D10**（裸 `NaN` 落盘）、**D6/D7/D12**（文档与 blockers 文案失真）
+> 为其余十处。逐条复现办法见 `tests/test_adversarial_2026_09_20.py` 的文件头。
+
+### 验证证据
+
+| 检查 | 结果 |
+|---|---|
+| 全量 pytest | **435 passed + 2 xfailed，7 deselected，0 failed**（共 437 项被收集；7 个 deselected 是真需要 CUDA 的遗留用例） |
+| 本轮新增锚点 | `test_adversarial_2026_09_20.py` **24 项**（H 组元守卫保证本文件自身的用例默认全部运行）；连同另 5 组与自查锚点，共 **185 项**被收集 |
+| 变异测试 | 对前四轮 9 处修复**逐个回退**验证：6 项行为型变异**全被抓**；另 6 项「未被抓」的变异**全落在文档 / print 文本上**，不承载行为 —— 即那 9 处确实锁住了 |
+| D1 独立复现 | `probe_prefill_uses_compact.py`（工作区根，不入库）：4 次前向全部 `past=None`，**传过 past 的次数 = 0** |
+| 暂存树计数 | **178** = 75 `.py` / 30 `.csv` / 25 `.json` / 19 `.md` / 10 `.tex` / 6 `.sh` / 6 `.log` / 1 `.bib` + 6 个点文件；`results/` **61** 不变 |
+| 提交后核对 | `git ls-tree -r HEAD` 行数 = **178**，与预期一致（防提交信息临时文件被误吞） |
+| 文档转义扫描 | 改动文档均 **0 控制字符、0 双反斜杠** |
+| 补丁幂等性 | 全部替换走一次性脚本 + `assert count == 1`，任一未命中即整体不写盘 |
+
+> ⚠️ **本轮在补丁工具自身踩了一坑，如实记录**：`FILE_MAP.md` 的首次同步用了
+> 「行首片段」当插入锚点，结果新行被插进原行**中间**，还吃掉了原行的尾部描述
+> （`compact_kv` / `apb_cpu` / `_hf` / `_forward` / `build_eval_set` 五行受损）。
+> 当场按 §10 的文件级还原（`git show HEAD:<path>`）取回原文，把插入改为**整行匹配**
+> 后重跑通过。**教训：「在某某行之后插入」必须按整行匹配，不能按行首前缀** ——
+> 前缀匹配在插入类操作里是静默错位，不报错。
+
+### 遗留
+
+- **H0**：把 G2 路径接进 HF forward。这是翻转 `dcc_kv` 的 `measurable` 的前置条件，
+  且决定 H2 的加速臂能否成立。**本次有意不做** —— 顺序反了只会得到一个永不达标的 H2。
+- **G6**：S1 go/no-go 入口 + GPU-marked 测试（否则 `pytest -m gpu` 在本机收集为空）。
+- 本机无 CUDA ⇒ 仓库内仍**没有任何 GPU 数值**。「代码写完」不等于「实验做了」。
+- `scripts/` 下 5 个 `.patch_*.py`（G2/G4 的一次性补丁）**留在工作区不入库**，
+  其承载的结论已由本节记录（G2 体例）。
+- 用户已裁决 H2 的处置为 **(a)+(b) 并行**：先做 H0 争取加速臂；若做不出来，
+  H2 维持 `no-judge`，论文里把「prefill 加速」写成待验证项，**不默认它存在**。
+
+---
 ## 29. `3d76629` — 新增对外进展汇报与代码文件说明，并同步过时的 GPU 执行计划
 
 **日期**：2026-09-16 22:20 | **类型**：docs(reports) | **规模**：4 文件，+631/−28
