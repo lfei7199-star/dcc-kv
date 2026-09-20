@@ -4,8 +4,11 @@
 > `experiments/gpu/README.md`（脚本级前置缺口）。
 > 本文件回答两个问题：**现在能不能租卡跑**、**跑完能不能把论文填完**。
 >
-> ⚠️ **2026-09-16 第九轮已同步**：§2 S0 / §5 / §6.1 / §6.2 / §6.3 / §7 六处按
-> 实际进展更新（CPU 侧缺口全部关闭，G1–G6 未动）。§0 的结论**不变**。
+> ⚠️ **2026-09-20 第十轮已同步**：G1/G2/G3/G4/G5 的**代码已写完**
+> （`src/dcc_kv_ref/attention_kernel.py`、`experiments/gpu/_forward.py`、
+> `src/baselines/operators.py`、`experiments/gpu/build_eval_set.py` 等），
+> 但仍**未提交**，且 **G6 未做**。§0 的结论**依然成立**，但原因变了：
+> 现在阻的不是「没有通路」，而是「通路还没接进 E6 的测量」——详见 §0。
 
 ---
 
@@ -27,24 +30,47 @@ python experiments/gpu/e6_main_table.py --plan
 也就是说：**以今天的代码租 8 卡跑一天，产出的主表里本文方法一栏是 `blocked`，
 三个基线里两个是 `blocked`。这张表填不进论文的任何一栏。**
 
-> ⚠️ **2026-09-16 第九轮复查**：本文件 §2 S0 表里那五项 CPU 侧缺口
-> （M1/M2/M3/M5/M9）**已全部关闭**，但下面 §0 表的 **G1–G6 代码缺口一条未动** ——
-> 因此上述结论**不变：现在仍不能租卡开跑**。变的只是「论文还剩多少非 GPU 内容」，
-> 那一项已归零（详见 §6.2 的更新）。
-三个基线里两个是 `blocked`。这张表填不进论文的任何一栏。**
+> ⚠️ **2026-09-20 第十轮复查**：§2 S0 的五项 CPU 侧缺口（M1/M2/M3/M5/M9）
+> 与 **G1/G2/G3/G4/G5 五项代码缺口**均已关闭（代码在工作区，尚未提交）；
+> **只剩 G6 未做**，外加一条本轮新识别的缺口 **H0**（见下表）。
+> 结论**不变：现在仍不能租卡开跑**，但阻断原因已经从「没有实现」变成
+> 「实现没有接进测量 + 唯一只能上机才知道的那项还没做」。
+
+**H0 是 2026-09-20 对抗性审查新识别的一条，且它最容易被误判为已关闭：**
+E6 的 `measure_point` 走 `_hf.measure_prefill`，而该函数的计时窗口里**只有一次
+全长前向**，裁剪后的 KV 从未被任何前向使用（桩模型实测：4 次前向 input 恒为 S、
+past 恒为 None）。于是对于任何压缩方法，
+
+```
+T_prefill(压缩) = 全长注意力耗时 + 压缩开销  >=  T_prefill(精确)
+```
+
+`prefill_speedup` **结构上恒 <= 1 < 1.10x**，H2 的第二个合取项永远不可能满足。
+⇒ 把 `METHOD_SPECS["dcc_kv"]["measurable"]` 直接翻成 `True` 是**错**的：
+它会得到一个确定性的假阴性（「压缩不加速 prefill」），而根源是量具。
+正确做法是先接 **E6 的注意力钩子**（算子核 + 注意力钩子），让 prefill 也走
+「只对紧凑 KV 做注意力」，再翻 `measurable`。在钩子就绪前，判定程序会按
+`_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV=False` 把该长度记为 **unresolved
+（原因 instrument）**，而不是未达标 —— 两条路径都已由测试锁住。
 
 阻断原因全部是**实现缺口**，与租什么卡无关：
 
-| # | 缺口 | 阻塞了 | 补什么 |
+| # | 缺口 | 状态（2026-09-20） | 文件 / 补什么的现状 |
 |---|---|---|---|
-| **G1** | `CompactKV` → GPU attention kernel | E5 的 A3、E6 的 `dcc_kv` | 一条能把紧凑 K/β/V 喂进 SDPA 的 GPU 通路 |
-| **G2** | 异步 All-to-Allv 的 GPU 入口 | E5 的 A5（真实模型版） | 基于 `_comm.run_async_pipeline` 接真实前向 |
-| **G3** | `ring` / `apb` / `fastkv` 的 GPU 实现 | E6 的 3 个基线 | 各自从 CPU 版迁移 |
-| **G4** | A4 的代码 | E5 的 A4 | 设计已定（论文 §6.3），写代码 |
-| **G5** | 评测集 JSONL 转换器 | E5-A2/A3、E6、E7 的**准确率** | 把 LongBench / RULER 转成 `_hf.EvalSample` 格式 |
-| **G6** | CUDA 构造可用性实测 | A1/A2 的构造口径 | `_env.probe_gpu_construction()` |
+| **G1** | `CompactKV` → GPU attention kernel | ✅ 代码已写（未提交） | `src/dcc_kv_ref/attention_kernel.py`（`compact_kv_attention` 等） |
+| **G2** | 异步 All-to-Allv 的 GPU 入口 | ✅ 代码已写（未提交） | `experiments/gpu/_forward.py`（`pipelined_attention`） |
+| **G3** | `ring` / `apb` / `fastkv` 的 GPU 实现 | ✅ device-agnostic 版已写（未提交） | `src/baselines/operators.py`。**注意 ring 是单进程模拟，不是 NCCL P2P ring** |
+| **G4** | A4 的代码 | ✅ 已写（未提交） | `e5_gpu_ablation.py` 的 `a4_interaction_grid` |
+| **G5** | 评测集 JSONL 转换器 | ✅ 已写（未提交） | `experiments/gpu/build_eval_set.py` |
+| **G6** | CUDA 构造可用性实测 | ❌ **未做** | `_env.probe_gpu_construction()`；只能上机 |
+| **H0** | E6 的注意力钩子（算子核 + 注意力钩子） | ❌ **未做**（新识别） | 让 E6 的 prefill 计时真的用上紧凑 KV；不做则 H2 的 prefill 项不可判 |
 
-其中 **G6 是唯一「只能上机才知道」的一项**，其余五项都能先在本地写、本地静态验证。
+其中 **G6 是唯一「只能上机才知道」的一项**；**H0 是唯一「能本地写、但极其容易被
+一句 `measurable: True` 假装完成」的一项** —— 见上面的说明。
+
+> 「代码已写」不等于「结论成立」。G1–G5 的实现全部只在 CPU 上做过等价性验证
+> （`tests/test_attention_kernel.py`、`tests/test_baseline_operators.py`、
+> `tests/test_forward_pipeline.py`）。GPU 侧一次都没跑过：本机无 CUDA。
 
 ---
 
@@ -205,11 +231,16 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
 
 ## 5. 租卡前 checklist
 
-- [ ] G1 `CompactKV → GPU attention kernel` 写完，CPU 侧静态测试通过
-- [ ] G2 异步流水接真实前向的入口写完
-- [ ] G3 三个基线的 GPU 版（或明确决定这一轮不声称与之对比）
-- [ ] G4 A4 的代码写完
-- [ ] G5 评测集 JSONL 就绪（含 `task` 字段，供 E7 条件 3 使用）
+- [x] G1 `CompactKV → GPU attention kernel` 写完，CPU 侧静态测试通过（`attention_kernel.py`）
+- [x] G2 异步流水接真实前向的入口写完（`_forward.py`）
+- [x] G3 三个基线的 device-agnostic 版写完；**但 ring 仍是单进程模拟**，
+      是否在本轮声称与 Ring Attention 对比需要单独决定
+- [x] G4 A4 的代码写完（`a4_interaction_grid`）
+- [x] G5 评测集转换器写完；**评测集本体仍需生成**（`build_eval_set.py` 是要输入端数据的）
+- [ ] **H0 E6 的注意力钩子接上**，并确认 `_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV`
+      随之翻正 —— 未接之前 H2 的 prefill 项一律记 unresolved
+- [ ] G6 CUDA 构造可用性实测（上机后第一件事）
+- [ ] 上面五项已写的代码**提交**（当前未提交 = 未入库）
 - [ ] `requirements.lock` 生成并与目标机 CUDA 版本核对（torch 版本声明目前三处不一致）
 - [ ] 目标机的 `NCCL` 版本确认（E5 需要）
 - [x] S0 的 CPU 侧缺口（M1/M2/M3/M5/M9）**全部完成**（`139b1b8`，2026-09-16）

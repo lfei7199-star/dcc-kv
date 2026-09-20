@@ -99,6 +99,13 @@ __all__ = [
     "h4_pass",
     "h5_pass",
     "quality_comparable_non_inferior",
+    # A4 压缩 × 异步交互的判据（2026-09-16，缺口 G4）
+    "A4_CI_LEVEL",
+    "A4_MIN_BUDGET_LEVELS",
+    "A4Cell",
+    "A4BudgetPoint",
+    "A4Interaction",
+    "a4_interaction_verdict",
 ]
 
 
@@ -256,12 +263,19 @@ class H2PerLength:
         prefill_speedup: prefill 加速比（1.10 表示快 10%）。
         quality_comparable: 该长度上是否满足「质量相近」前提
             （判定程序见 :func:`quality_comparable_non_inferior`）。
+        prefill_instrument_valid: 该长度的 prefill 加速比是否由**能体现压缩收益**
+            的量具测得。当前 E6 的 prefill 计时窗口里只有全长前向、裁剪后的 KV
+            从未被使用（`_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV`），因此这个量具
+            下 ``prefill_speedup`` 结构上恒 <= 1 < 1.10x。为 False 时该长度记
+            ``unresolved``（判不了），**不记 failed** —— 否则会把「量具测不出收益」
+            报成「方法没有收益」。钩子接好后置 True，判定自动恢复。
     """
 
     length: int
     quality_gain_pp: float
     prefill_speedup: float
     quality_comparable: bool
+    prefill_instrument_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -292,6 +306,7 @@ class H2AcrossLengths:
     worst_prefill_speedup: float
     quality_comparable_all: bool
     unresolved: Tuple[int, ...] = ()
+    unresolved_reasons: Tuple[Tuple[int, str], ...] = ()
 
     def to_dict(self) -> Dict[str, object]:
         """摊平为可 JSON 落盘的字典（供 E6 结果结构使用）。"""
@@ -306,6 +321,11 @@ class H2AcrossLengths:
             "h2_worst_prefill_speedup": self.worst_prefill_speedup,
             "h2_quality_comparable_all": self.quality_comparable_all,
             "h2_unresolved_lengths": list(self.unresolved),
+            # 为什么判不了，逐长度写下来：'resolution'（非劣边界未定）
+            # 与 'instrument'（量具测不出收益）是两件完全不同的事，
+            # 只报 unresolved 会让人以为是数据不够。
+            "h2_unresolved_reasons": {str(k): v
+                                      for k, v in self.unresolved_reasons},
         }
 
 
@@ -339,6 +359,10 @@ def h2_pass_across_lengths(points) -> H2AcrossLengths:
     （例如重复 run 的噪声底线尚未取得 ⇒ 容差区间为空）。这种情况下该长度被
     记入 ``unresolved`` 而**不计入** ``n_failed``，且整体 ``passed`` 为 False ——
     「分辨率不足」与「确实没达标」是两个不同的结论，不能合并。
+
+    同理，``prefill_instrument_valid`` 为 False 的长度也记 ``unresolved``（原因
+    记为 ``instrument``）：量具本身体现不了压缩收益时，算出来的加速比无论多少
+    都不构成对 H2 的证据。两种原因在 ``unresolved_reasons`` 里分开记录。
     """
     items = list(points)
     if not items:
@@ -347,9 +371,15 @@ def h2_pass_across_lengths(points) -> H2AcrossLengths:
     n_passed = 0
     failing: list = []
     unresolved: list = []
+    reasons: list = []
     for pt in items:
+        if not pt.prefill_instrument_valid:
+            unresolved.append(pt.length)
+            reasons.append((pt.length, "instrument"))
+            continue
         if pt.quality_comparable is None:
             unresolved.append(pt.length)
+            reasons.append((pt.length, "resolution"))
             continue
         if not isinstance(pt.quality_comparable, bool):
             raise ValueError(
@@ -379,6 +409,7 @@ def h2_pass_across_lengths(points) -> H2AcrossLengths:
             pt.quality_comparable is True for pt in items
         ),
         unresolved=tuple(unresolved),
+        unresolved_reasons=tuple(reasons),
     )
 
 
@@ -514,3 +545,268 @@ UNJUDGED: Tuple[str, ...] = tuple(
     hid for hid, spec in HYPOTHESES.items() if spec.code_status != "judged"
 )
 """尚未在代码侧接上判据的假设编号（顺序同 :data:`HYPOTHESES` 的定义序）。"""
+
+
+# ---------------------------------------------------------------------------
+# A4：压缩与异步的交互（**判据**，不属于 H1–H5）
+# ---------------------------------------------------------------------------
+#
+# A4 不是假设，而是一个**引用前提的检验**：A2 在固定同步模式下扫预算、A5 在固定
+# 预算下扫同步模式，两者各自把另一条轴边缘化。只有当两轴无显著交互时，它们的
+# 结果才可以分开引用。判据写在论文 §6.3，本段是它的机器可读形式。
+#
+# 为什么放在本模块而不是脚本里：这与 H1–H5 是同一条纪律 —— **判定程序只能有
+# 一份**。若把「区间是否重叠」写进 e5 脚本，日后改动（如换成重叠系数的阈值）
+# 不会有人发现，且没有测试能锁住它。
+
+A4_CI_LEVEL = 0.95
+"""A4 判定所用的置信水平（论文 §6.3 原文写 95% 置信区间）。"""
+
+A4_MIN_BUDGET_LEVELS = 4
+"""A4 二维格的最少预算档数（论文 §6.3 原文写「至少 4 档 B/L_s × {同步, 异步}」）。"""
+
+
+@dataclass(frozen=True)
+class A4Cell:
+    """二维格里的**一个格子**：某预算 × 某同步模式下的四项计时与 p50。
+
+    四项计时必须齐全。论文 §6.3 特意强调「同步」臂的所指是式~(serial-time) 的
+    纯串行实现（"等待全部通信完成后统一计算"），**不是**在设备间额外插一次屏障 ——
+    因此本结构只承载测量值，不对同步语义做任何解释。
+
+    异步格的 `t_comm_ms` 为 NaN，且 `timing_decomposition_valid=False`
+    --------------------------------------------------------------
+    「齐全」指四项都出现在结构里，**不**指四项都可用。异步臂的 `comm_ms`
+    只剩发起开销（原因见 `_forward.ForwardResult.to_dict` 与
+    `_comm.run_async_pipeline` 的同步纪律），拿它当通信时间会得出
+    「异步消掉了通信」这种度量产物式结论。故置 NaN（**不是 0** —— 0 会被读成
+    「通信为零」），原值保留在 `t_comm_ms_raw`。
+    `t_comp_ms` 在异步臂是**上界**（吸收了未完成的下一块传输）。
+    跨同步模式只有 `t_total_ms` 可比；要用拆解值请取同步格。
+    """
+
+    budget_ratio: float
+    budget: int
+    sync_mode: str              # "sync" | "async"
+    t_build_ms: float
+    t_comm_ms: float
+    t_comp_ms: float
+    t_total_ms: float
+    p50_ms: float
+    timing_decomposition_valid: bool = True
+    t_comm_ms_raw: float = float("nan")
+    timing_decomposition_note: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "budget_ratio": self.budget_ratio,
+            "budget": self.budget,
+            "sync_mode": self.sync_mode,
+            "t_build_ms": self.t_build_ms,
+            "t_comm_ms": self.t_comm_ms,
+            "t_comp_ms": self.t_comp_ms,
+            "t_total_ms": self.t_total_ms,
+            "p50_ms": self.p50_ms,
+            "timing_decomposition_valid": self.timing_decomposition_valid,
+            "t_comm_ms_raw": self.t_comm_ms_raw,
+            "timing_decomposition_note": self.timing_decomposition_note,
+        }
+
+
+@dataclass(frozen=True)
+class A4BudgetPoint:
+    """某个预算档上的**边缘**量：加速比的点估计与 95% CI、以及式(speedup-bound) 的上界。
+
+    加速比的 CI 由 `experiments.common.report.bootstrap_ratio_ci` 算出后传入 ——
+    本模块只做判定，不做统计（统计口径统一在 report.py）。
+    """
+
+    budget_ratio: float
+    budget: int
+    p50_sync_ms: float
+    p50_async_ms: float
+    speedup: float
+    speedup_ci_low: float
+    speedup_ci_high: float
+    t_comm_over_t_comp: float
+    theoretical_bound: float
+    t_build_share: float
+
+
+@dataclass(frozen=True)
+class A4Interaction:
+    """A4 的判定结果。
+
+    Attributes:
+        resolved: 数据是否足以判定（预算档数够不够、配对是否齐全）。
+            **False 表示"判不了"，不是"没有交互"** —— 这两者绝不能混。
+        all_ci_overlap: 全部预算档的加速比 95% CI 两两重叠。
+        interaction_observed: = not all_ci_overlap。
+        reporting_requirement: 报告义务。
+            ``"edge_results_may_be_cited_separately"`` —— 未观测到显著交互，
+            A2/A5 的边缘结果可独立引用（**这是有效结论，不是失败**）；
+            ``"must_report_2d_grid"`` —— 出现了可分辨结构，必须报二维格。
+        prediction_i_*: 论文 §6.3 的两条可证伪预测之一：S_obs(B) 随 B 上升，
+            并在 T_comm ≈ T_comp 的预算档附近接近上界。
+        prediction_ii_*: 预测之二：S_obs(B) 与上界之差随 B 减小而扩大。
+        monotone_fraction: 相邻预算档上单调一致的**比例**。刻意与布尔量同报：
+            严格单调在测量数据上常常差一格，只报布尔量会把"部分成立"读成"被证伪"。
+    """
+
+    resolved: bool
+    reason: str
+    n_budgets: int
+    budgets: Tuple[int, ...]
+    all_ci_overlap: bool
+    n_overlapping_pairs: int
+    n_pairs: int
+    interaction_observed: bool
+    reporting_requirement: str
+    monotone_speedup_in_budget: bool
+    monotone_fraction: float
+    prediction_i_holds: bool
+    prediction_ii_holds: bool
+    prediction_ii_monotone_fraction: float
+    gap_to_bound_at_min_budget: float
+    gap_to_bound_at_max_budget: float
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "a4_resolved": self.resolved,
+            "a4_reason": self.reason,
+            "a4_n_budgets": self.n_budgets,
+            "a4_budgets": list(self.budgets),
+            "a4_ci_level": A4_CI_LEVEL,
+            "a4_min_budget_levels": A4_MIN_BUDGET_LEVELS,
+            "a4_all_ci_overlap": self.all_ci_overlap,
+            "a4_n_overlapping_pairs": self.n_overlapping_pairs,
+            "a4_n_pairs": self.n_pairs,
+            "a4_interaction_observed": self.interaction_observed,
+            "a4_reporting_requirement": self.reporting_requirement,
+            "a4_monotone_speedup_in_budget": self.monotone_speedup_in_budget,
+            "a4_monotone_fraction": self.monotone_fraction,
+            "a4_prediction_i_holds": self.prediction_i_holds,
+            "a4_prediction_ii_holds": self.prediction_ii_holds,
+            "a4_prediction_ii_monotone_fraction": self.prediction_ii_monotone_fraction,
+            "a4_gap_to_bound_at_min_budget": self.gap_to_bound_at_min_budget,
+            "a4_gap_to_bound_at_max_budget": self.gap_to_bound_at_max_budget,
+            "a4_note": (
+                "「无交互」是有效结论而非失败 —— 它恰好是允许 A2 与 A5 的边缘结果"
+                "分开引用的前提。resolved=False 表示数据不足以判定，"
+                "不是「未观测到交互」。"
+            ),
+        }
+
+
+def _ci_overlap(lo1: float, hi1: float, lo2: float, hi2: float) -> bool:
+    """两个闭区间是否重叠。NaN 一律视为不重叠（信息缺失不能当成重叠）。"""
+    for v in (lo1, hi1, lo2, hi2):
+        if math.isnan(v):
+            return False
+    return (lo1 <= hi2) and (lo2 <= hi1)
+
+
+def a4_interaction_verdict(points) -> A4Interaction:
+    """A4 的判定程序（论文 §6.3）。
+
+    主判据：对四档预算的**加速比 95% CI** 做两两比较。
+    全部重叠 ⇒ 报告「未观测到显著交互」；出现可分辨结构 ⇒ 必须报二维格。
+
+    判据的方向性（要写进论文，否则会被读成一次检验）
+    ----------------------------------------------
+    「CI 不重叠」**不等于**「差异显著」，「CI 重叠」也**不等于**「无差异」——
+    区间重叠只是对显著性的一次粗略筛查。本判据取「**全部**两两重叠才算无交互」，
+    因此倾向于**多报**交互：档数越多越难全部重叠。这是有意选的方向 ——
+    假「有交互」的代价只是多报一张二维格，假「无交互」的代价是错称两条边缘
+    结果可以分开引用。故本判据只能当**筛查**用，不能当结论性检验引用；
+    真要下「无显著交互」的结论，须另做正式的交互效应检验。
+
+    两条可证伪预测同时评估，且都**同时给出比例**：
+        (i)  S_obs(B) 随 B 增大而上升，并在 T_comm ≈ T_comp 的预算档附近接近上界；
+        (ii) S_obs(B) 与上界之差随 B 减小而扩大。
+
+    Raises:
+        ValueError: 预算档数为 0（无数据时不该走到这里；空输入是调用方的 bug）。
+    """
+    pts = list(points)
+    if not pts:
+        raise ValueError("a4_interaction_verdict 需要至少一个预算档；空输入属调用方错误")
+
+    pts = sorted(pts, key=lambda p: p.budget)
+    budgets = tuple(int(p.budget) for p in pts)
+
+    if len(pts) < A4_MIN_BUDGET_LEVELS:
+        return A4Interaction(
+            resolved=False,
+            reason=(f"预算档数 {len(pts)} < 要求的最少 {A4_MIN_BUDGET_LEVELS} 档；"
+                    "数据不足以判定交互，这不等于「未观测到交互」"),
+            n_budgets=len(pts), budgets=budgets,
+            all_ci_overlap=False, n_overlapping_pairs=0, n_pairs=0,
+            interaction_observed=False,
+            reporting_requirement="insufficient_data",
+            monotone_speedup_in_budget=False, monotone_fraction=float("nan"),
+            prediction_i_holds=False, prediction_ii_holds=False,
+            prediction_ii_monotone_fraction=float("nan"),
+            gap_to_bound_at_min_budget=float("nan"),
+            gap_to_bound_at_max_budget=float("nan"),
+        )
+
+    # --- 主判据：两两 CI 重叠 ---
+    n_pairs = 0
+    n_overlap = 0
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            n_pairs += 1
+            if _ci_overlap(pts[i].speedup_ci_low, pts[i].speedup_ci_high,
+                           pts[j].speedup_ci_low, pts[j].speedup_ci_high):
+                n_overlap += 1
+    all_overlap = (n_pairs > 0 and n_overlap == n_pairs)
+
+    # --- 预测 (i)：加速比随预算单调不减 ---
+    diffs = [pts[k + 1].speedup - pts[k].speedup for k in range(len(pts) - 1)]
+    n_adj = len(diffs)
+    n_consistent = sum(1 for d in diffs if d >= 0.0)
+    monotone = (n_adj > 0 and n_consistent == n_adj)
+    frac = (n_consistent / n_adj) if n_adj else float("nan")
+
+    # 「接近上界」：取 |log(T_comm/T_comp)| 最小的档，看它是不是也是 gap 最小的档
+    def _balance(p: A4BudgetPoint) -> float:
+        r = p.t_comm_over_t_comp
+        if r <= 0 or math.isnan(r):
+            return float("inf")
+        return abs(math.log(r))
+
+    def _gap(p: A4BudgetPoint) -> float:
+        return p.theoretical_bound - p.speedup
+
+    balanced = min(pts, key=_balance)
+    closest = min(pts, key=_gap)
+    prediction_i = bool(monotone and balanced.budget == closest.budget)
+
+    # --- 预测 (ii)：gap 随预算减小而扩大 ---
+    gaps = [_gap(p) for p in pts]
+    gdiffs = [gaps[k + 1] - gaps[k] for k in range(len(gaps) - 1)]
+    n_ii = len(gdiffs)
+    n_ii_consistent = sum(1 for d in gdiffs if d <= 0.0)   # 预算增大 ⇒ gap 不增
+    prediction_ii = bool(n_ii > 0 and n_ii_consistent == n_ii
+                         and gaps[0] > gaps[-1])
+
+    return A4Interaction(
+        resolved=True,
+        reason=("全部预算档的加速比 95% CI 两两重叠 ⇒ 未观测到显著交互"
+                if all_overlap else
+                "出现可分辨结构 ⇒ 必须报二维格，不得只报两条边缘曲线"),
+        n_budgets=len(pts), budgets=budgets,
+        all_ci_overlap=all_overlap,
+        n_overlapping_pairs=n_overlap, n_pairs=n_pairs,
+        interaction_observed=not all_overlap,
+        reporting_requirement=("edge_results_may_be_cited_separately" if all_overlap
+                               else "must_report_2d_grid"),
+        monotone_speedup_in_budget=monotone,
+        monotone_fraction=frac,
+        prediction_i_holds=prediction_i,
+        prediction_ii_holds=prediction_ii,
+        prediction_ii_monotone_fraction=(n_ii_consistent / n_ii) if n_ii else float("nan"),
+        gap_to_bound_at_min_budget=gaps[0],
+        gap_to_bound_at_max_budget=gaps[-1],
+    )

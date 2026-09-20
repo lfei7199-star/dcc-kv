@@ -21,6 +21,16 @@ import torch.distributed as dist
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+# ---------------------------------------------------------------------------
+# 设备绑定：必须取自 LOCAL_RANK，不能用全局 rank
+# ---------------------------------------------------------------------------
+# 多节点下全局 rank 8 在第 2 个 8 卡节点上是 cuda:0，而 `cuda:{rank}` 单节点上
+# 恰好是对的 —— 所以这个错会一直藏着，直到上多节点才以"设备不存在"暴露。
+# 定义**只有一处**（experiments/gpu/_env.local_rank_of），这里不再自己拼。
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from experiments.gpu._env import local_rank_of as _local_rank  # noqa: E402
+
+
 # 全部测试加 gpu marker（即使 conftest 也会自动加）
 pytestmark = pytest.mark.gpu
 
@@ -40,7 +50,7 @@ def _init_nccl(rank, world_size, port):
     """初始化 NCCL。"""
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(_local_rank(rank))
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
@@ -54,9 +64,9 @@ def _cleanup():
 # ============================================================================
 def _2proc_all_reduce(rank, args):
     _init_nccl(rank, world_size=2, port=29520)
-    tensor = torch.tensor([float(rank + 1)] * 4, device=f"cuda:{rank}")
+    tensor = torch.tensor([float(rank + 1)] * 4, device=f"cuda:{_local_rank(rank)}")
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
-    expected = torch.tensor([3.0] * 4, device=f"cuda:{rank}")  # 1+2
+    expected = torch.tensor([3.0] * 4, device=f"cuda:{_local_rank(rank)}")  # 1+2
     assert torch.allclose(tensor, expected), f"rank {rank}: {tensor} != {expected}"
     _cleanup()
 
@@ -76,19 +86,19 @@ def _2proc_all_to_all_v(rank, args):
     d = 64
     if rank == 0:
         my_msgs = [
-            torch.randn(2, d, device=f"cuda:{rank}"),  # 2 给 rank 0
-            torch.randn(3, d, device=f"cuda:{rank}"),  # 3 给 rank 1
+            torch.randn(2, d, device=f"cuda:{_local_rank(rank)}"),  # 2 给 rank 0
+            torch.randn(3, d, device=f"cuda:{_local_rank(rank)}"),  # 3 给 rank 1
         ]
         send_sizes = [2, 3]
     else:
         my_msgs = [
-            torch.randn(3, d, device=f"cuda:{rank}"),
-            torch.randn(2, d, device=f"cuda:{rank}"),
+            torch.randn(3, d, device=f"cuda:{_local_rank(rank)}"),
+            torch.randn(2, d, device=f"cuda:{_local_rank(rank)}"),
         ]
         send_sizes = [3, 2]
 
     # 交换 sizes
-    send_sizes_t = torch.tensor(send_sizes, dtype=torch.long, device=f"cuda:{rank}")
+    send_sizes_t = torch.tensor(send_sizes, dtype=torch.long, device=f"cuda:{_local_rank(rank)}")
     recv_sizes_t = torch.empty_like(send_sizes_t)
     dist.all_to_all_single(recv_sizes_t, send_sizes_t)
 
@@ -98,7 +108,7 @@ def _2proc_all_to_all_v(rank, args):
     # 准备 recv
     recv_buf = torch.empty(
         (sum(recv_sizes_t.tolist()), d),
-        device=f"cuda:{rank}", dtype=torch.float32,
+        device=f"cuda:{_local_rank(rank)}", dtype=torch.float32,
     )
 
     # 实际数据交换
@@ -133,10 +143,10 @@ def _4proc_scaling(rank, args):
     _init_nccl(rank, world_size=4, port=29522)
     # 算 scaling
     N = 1024
-    tensor = torch.randn(N, device=f"cuda:{rank}")
+    tensor = torch.randn(N, device=f"cuda:{_local_rank(rank)}")
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     # 4 个进程求和，期望值 = 4 * (期望值)
-    expected = torch.randn(N, device=f"cuda:{rank}") * 4
+    expected = torch.randn(N, device=f"cuda:{_local_rank(rank)}") * 4
     assert torch.allclose(tensor, expected, atol=1e-3), "4-proc all_reduce incorrect"
     _cleanup()
 

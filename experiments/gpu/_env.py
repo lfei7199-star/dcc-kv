@@ -246,6 +246,8 @@ def build_metadata(
     projection_dim: int = 32,
     lambda_beta: float = 3e-2,   # 与 src.dcc_kv_ref.DEFAULT_LAMBDA_BETA 一致（E11）
     lambda_value: float = 1e-3,
+    warmup: int = 3,             # 重复次数：必须进产物，否则冒烟与合规不可区分
+    iters: int = 10,
     task: str = "unknown",
     precision: str = "bfloat16",
     interconnect: str = "unknown",
@@ -274,6 +276,8 @@ def build_metadata(
         projection_dim=projection_dim,
         lambda_beta=lambda_beta,
         lambda_value=lambda_value,
+        warmup=warmup,
+        iters=iters,
         rope_extension_used=rope_extension_used,
         rope_extension_disclosed=rope_extension_disclosed,
         task=task,

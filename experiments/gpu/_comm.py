@@ -327,6 +327,37 @@ def run_async_pipeline(
     return PipelineTiming(total_ms=total, comm_ms=comm_ms, comp_ms=comp_ms)
 
 
+def effective_chunk_count(
+    send_sizes: Sequence[int],
+    recv_sizes: Sequence[int],
+    n_chunks: int,
+) -> int:
+    """`_split_chunks` 实际会产出多少块。
+
+    规则与 `_split_chunks` 必须一致：
+        变长（send_sizes 或 recv_sizes 不全等）  → 1（不做分块）
+        n_chunks <= 1 或 B < 2                   → 1
+        否则                                     → ceil(B / max(1, B // n_chunks))
+
+    为什么要单独暴露它：异步流水在「退化为单块」时**没有任何可重叠的窗口**
+    （第 0 块的通信之后才轮到唯一的计算）。这个退化必须被记进产物，
+    否则读到 `speedup≈1.0` 的人会以为流水实现有问题，而实际是"这条轴上
+    根本没有重叠的机会"（同 `bee3388` 的教训：没有的轴要折叠，不能只加标注）。
+    """
+    world = len(send_sizes)
+    if world == 0 or len(recv_sizes) != world:
+        raise ValueError("send_sizes 与 recv_sizes 必须等长且非空")
+    flat_send = [int(s) for s in send_sizes]
+    flat_recv = [int(r) for r in recv_sizes]
+    if len(set(flat_send)) != 1 or len(set(flat_recv)) != 1:
+        return 1
+    B = flat_send[0]
+    if n_chunks <= 1 or B < 2:
+        return 1
+    per = max(1, B // int(n_chunks))
+    return (B + per - 1) // per
+
+
 def _split_chunks(
     payload: torch.Tensor,
     send_sizes: Sequence[int],
@@ -423,6 +454,7 @@ def make_comp_work(
 
 
 __all__ = [
+    "effective_chunk_count",
     "pack_compact_edge",
     "edge_message_bytes",
     "EdgePlan",

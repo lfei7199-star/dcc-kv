@@ -268,11 +268,26 @@ def test_pipelines_use_device_sync_never_collective_barrier(monkeypatch) -> None
     monkeypatch.setattr(_env, "device_sync",
                         lambda: n.__setitem__("syncs", n["syncs"] + 1))
 
+    eff = _comm.effective_chunk_count([B] * world, [B] * world, 2)
+    assert eff == 2, "本用例假定分块确实发生（否则就是退化情形，另有用例覆盖）"
+
     _comm.run_sync_pipeline(payload, [B] * world, [B] * world,
                             comp_work=lambda r: r.sum(dim=0), n_chunks=2)
+    n_sync = n["syncs"]
+
+    n["syncs"] = 0
     _comm.run_async_pipeline(payload, [B] * world, [B] * world,
                              comp_work=lambda r: r.sum(dim=0), n_chunks=2)
-    assert n["syncs"] >= 4, "两条流水线都应在每个计时段收尾做设备同步"
+    n_async = n["syncs"]
+
+    # 计数必须是**精确值**，不能只写下界。原断言是 `>= 4`：实测同步臂 4、异步臂 2、
+    # 合计 6，余量恒为 2 ⇒ 「异步臂多一次 device_sync」这种回归完全看不见。
+    # 而多一次 device_sync 恰恰就是那条把 overlap 抹平、加速比钉在 1.0 的失效
+    # 模式（device-wide 同步会等掉正在飞的下一块）。所以这里按臂分开、取等号：
+    #   同步臂：每块「通信段 + 计算段」各收尾一次 ⇒ 2 × 实际块数
+    #   异步臂：每轮只在 comp 段收尾一次（+ 末轮）⇒ 实际块数
+    assert n_sync == 2 * eff, f"同步臂 device_sync 次数应为 {2 * eff}，实得 {n_sync}"
+    assert n_async == eff, f"异步臂 device_sync 次数应为 {eff}，实得 {n_async}"
 
 
 def test_local_device_uses_local_rank_not_global_rank(monkeypatch) -> None:

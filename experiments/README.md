@@ -77,8 +77,8 @@ E9（375 格 M×B 扫描）落实为"两轴职责不同、必须同时扫"，见
 
 | 文件 | 对应 | 测什么 | 前置 |
 |---|---|---|---|
-| `e5_gpu_ablation.py` | A1/A2/A3/A5 | 通信集大小、预算扫描、组件拆分、异步 vs 同步 | ≥2 卡 + NCCL；A3 另有实现缺口 |
-| `e6_main_table.py` | E6 | 主表（模型 × 长度 × 同步 × 方法）+ 可扩展性 | 1 卡 + 权重（dense / kv_budget 可测） |
+| `e5_gpu_ablation.py` | A1/A2/A3/A4/A5 | 通信集大小、预算扫描、组件拆分、**压缩 × 异步交互**、异步 vs 同步 | ≥2 卡 + NCCL；A3 待 H0 |
+| `e6_main_table.py` | E6 | 主表（模型 × 长度 × 同步 × 方法）+ 可扩展性 | 1 卡 + 权重（`dense` / `kv_budget` 可测；**其余方法待 H0**） |
 | `e7_negative_results.py` | E7 | 四个负结果条件的强制报告 | 1 卡 + 权重 + 带 task 标签的评测集 |
 | `e8_low_precision.py` | E8 | FP16/BF16 下顺序无关性的失效边界 | GPU 权威；`--device cpu --allow-cpu` 可 reduced 复现 |
 
@@ -88,6 +88,8 @@ E9（375 格 M×B 扫描）落实为"两轴职责不同、必须同时扫"，见
   逐次计时、CUDA 构造可用性探测
 - `_comm.py` —— 变长 All-to-Allv、同步/异步流水、消息体积口径
 - `_hf.py` —— 模型加载、KV 预算约束、多项选择打分、prefill 计时
+- `_forward.py` —— **G2**：把通信层打出的行解码回紧凑边、喂进 G1 算子核、归并部分结果（`pipelined_attention`）
+- `build_eval_set.py` —— **G5**：把 LongBench 原生多选子集转成 `_hf.score_choices` 认的 JSONL（纯 CPU，转换口径见 `docs/commit_log.md` 第 30 条）
 
 ```bash
 bash experiments/run_gpu.sh e8 --print-env    # 体检，任何机器可跑
@@ -104,13 +106,22 @@ bash experiments/run_gpu.sh e5 --nproc 4     # E5
 
 | 缺口 | 阻塞了 | 补什么 |
 |---|---|---|
-| `CompactKV` → GPU attention kernel | A3、E6 的 `dcc_kv` | 一个能把紧凑 K/β/V 喂进 SDPA 的 GPU 通路 |
-| ~~构造链路 CUDA 可用性（上表 #4/#5）~~ —— **静态审计已通过，待 GPU 机实测** | A1/A2 的 GPU 构造口径 | `device=` 已补全（含 `key_selection.py:49`）。本机无 CUDA，"已修复"只是源码层面结论；须用 `_env.probe_gpu_construction()` 在目标机确认（该探测现已覆盖 `budget >= 块长` 的短路分支） |
-| `ring` / `apb` / `fastkv` 的 GPU 实现 | E6 的 3 个基线 | 各自从 CPU 版迁移到 GPU |
-| 异步 All-to-Allv 的 GPU 入口 | A5 的真实模型版 | 基于 `_comm.run_async_pipeline` 接真实前向 |
+| **H0**：`CompactKV` → HF forward 的注意力钩子 | A3、E6 的 `dcc_kv` 与三个基线 | 算子核（G1）与桥（G2）都已就位，但**还没接进 HF 的 forward** |
+| 构造链路 CUDA 可用性（上表 #4/#5） | A1/A2 的 GPU 构造口径 | 静态审计已通过，**待 GPU 机实测**：`device=` 已补全（含 `key_selection.py:49`），但本机无 CUDA，"已修复"只是源码层面结论；须用 `_env.probe_gpu_construction()` 在目标机确认 |
+| **G6**：S1 go/no-go 入口 | 上机前的最后一道闸 | `probe_gpu_construction()` 已有；还缺把探测结果写成 GO/NO-GO JSON 的入口，以及一个 GPU-marked 测试（否则 `pytest -m gpu` 在本机收集为空） |
 
 这些项在结果文件里以 `status: "blocked"` 落盘并附 `blockers` 清单，
 **不会**以 `null` 或省略的方式静默消失。
+
+### 2026-09-20：G1–G5 已补齐，阻断表只剩 H0 与 G6
+
+上表 4 项已消掉 3 项（CPU 侧测试全绿，详见 `docs/commit_log.md` 第 30 条）：
+
+- ~~`CompactKV` → GPU attention kernel~~ → `src/dcc_kv_ref/attention_kernel.py`（G1，device-agnostic，不出现任何 `cuda` 字面量，故在本机可对拍）
+- ~~`ring` / `apb` / `fastkv` 的 GPU 实现~~ → `src/baselines/operators.py`（G3，与 CPU 参考 **ULP 级**一致）
+- ~~异步 All-to-Allv 的 GPU 入口~~ → `experiments/gpu/_forward.py`（G2，把打包含接进算子核）
+
+⚠️ **H0 不是"少写一个函数"，它决定 H2 的加速臂能不能成立。** E6 的 prefill 计时窗口里**从不出现裁剪后的 KV**（`_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is False`），所以 `T_prefill(压缩) ≥ T_prefill(精确)`、加速比结构上恒不超过 1。**先补钩子、再翻 `METHOD_SPECS` 的 `measurable`**；顺序反了只会得到一个永不达标的 H2。在钩子接上之前，H2 的量具被显式标为失效，判定走 `unresolved(reason=instrument)` 而**不是** `failed`。
 
 ### 顺带发现的一处论文算术错误 —— **已在 `72af7db` 修掉**
 

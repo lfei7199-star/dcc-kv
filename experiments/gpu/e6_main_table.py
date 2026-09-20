@@ -88,8 +88,10 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "gpu_required": 2,
         "desc": "FastKV 官方实现（共享压缩）",
         "blockers": [
-            "src/baselines/fast_kv_cpu.py 是 CPU 实现，无 GPU kernel。",
-            "共享压缩的多设备语义需要 dcc_kv_sync 的 GPU 版本。",
+            "（原 blocker「无 GPU kernel」已关闭：G3 的 src/baselines/operators.py "
+            "给出 device-agnostic 的 fastkv_attention，复用 G1 的紧凑 KV 核。）",
+            "仍需：E6 的注意力钩子（算子核 + 注意力钩子）把该算子接进 measure_point；"
+            "在此之前主表里的 prefill 一列对它没有意义。",
         ],
     },
     "dcc_kv": {
@@ -97,11 +99,16 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "gpu_required": 2,
         "desc": "DCC-KV（逐边条件化 + 异步 All-to-Allv）",
         "blockers": [
-            "CompactKV → GPU attention kernel 缺失"
-            "（src/distributed/dcc_kv_sync_cpu.py 为 CPU 同步版）。",
-            "构造链路的 CUDA 可用性待 GPU 机实测（三处 device 缺陷已在 5b5ce98"
-            " 修复；本机无 CUDA，静态审计不能替代实测）。",
-            "异步 All-to-Allv 流水尚无 GPU 实现入口。",
+            "（原 blocker「CompactKV → GPU attention kernel 缺失」已关闭："
+            "src/dcc_kv_ref/attention_kernel.py 提供 compact_kv_attention。"
+            "原 blocker「异步流水无 GPU 入口」亦已关闭："
+            "experiments/gpu/_forward.py 的 pipelined_attention。）",
+            "**仍未接**：E6 的注意力钩子。这一条不能靠把 measurable 翻成 True 绕过 ——"
+            "当前 measure_point 走 _hf.measure_prefill，其计时窗口里只有全长前向、"
+            "裁剪后的 KV 从未被使用（见 _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV），"
+            "于是 prefill_speedup 结构上恒 <= 1，H2 的第二个合取项永远不可能满足，"
+            "跑出来的会是「压缩不加速 prefill」这种由量具造成的假阴性。",
+            "构造链路的 CUDA 可用性待 GPU 机实测（G6 未做；静态审计不能替代实测）。",
         ],
     },
     "ring": {
@@ -109,8 +116,10 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "gpu_required": 2,
         "desc": "Ring Attention（精确序列并行）",
         "blockers": [
-            "src/baselines/ring_attention_cpu.py 是 CPU 实现；"
-            "GPU 版需要 NCCL P2P ring 通信，仓库中无对应文件。",
+            "（原 blocker 部分关闭：G3 的 operators.ring_attention 已是"
+            "device-agnostic 实现。）但它复用 G1 的紧凑核、在**单进程内**模拟 ring，"
+            "不是 NCCL P2P ring；跨设备 ring 通信仍无实现，这是它与 dcc_kv 的"
+            "本质差别，不能拿单进程版当「Ring Attention 的 GPU 实现」。",
         ],
     },
     "apb": {
@@ -118,7 +127,9 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "gpu_required": 2,
         "desc": "APB（全网共享 anchor）",
         "blockers": [
-            "src/baselines/apb_cpu.py 是 CPU 实现，无 GPU kernel。",
+            "（原 blocker「无 GPU kernel」已关闭：operators.apb_attention 已"
+            "device-agnostic 化。）",
+            "仍需：E6 的注意力钩子接线（同 dcc_kv）。",
             "（原 blocker「APB 编号 2502.12085 待二次确认」已关闭：编号有效。）",
         ],
     },
@@ -277,6 +288,9 @@ def measure_point(
         "method_measurable": spec["measurable"],
         "num_repr_queries": a.M,
         "projection_dim": a.d_p,
+        # prefill 这一列的口径是否含压缩收益。False 时 prefill_speedup 不可用于
+        # H2 判定（原因见 _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV）。
+        "prefill_timing_consumes_compact_kv": _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV,
         "budget_ratio": budget_ratio,
         "compaction_mode": mode,
         "prefill_ms_median": ps.median,
@@ -343,6 +357,37 @@ def h2_points_from_rows(a: argparse.Namespace,
                 return r
         return None
 
+    def find_axis_free(method: str, model: str, ctx: int):
+        """查**不适用 sync/async 轴**的方法在该 (model, ctx) 上的行。
+
+        为什么必须有这个函数（自查发现，2026-09-18）
+        --------------------------------------------
+        `kv_budget_shared` 是单卡方法，`sync_axis_applies()` 为 False，
+        于是 main 的循环把它的 `sync_async` 写成 `SYNC_MODE_NA`（"n/a"）。
+        而本函数原先用 `a.sync_modes[0]`（"sync"）去查它 ⇒ **永远查不到**
+        ⇒ H2 的配对点恒为 0，`compute_h2` 每次都返回
+        「无可配对的数据点（dcc_kv / kv_budget_shared 未同时产出）」。
+        也就是说：折叠 sync 轴的修复（`bee3388` 的纪律）把 H2 的配对一起折叠掉了，
+        而当时**没有任何测试覆盖 h2_points_from_rows**（现已补
+        `tests/test_e6_h2_pairing.py`）。
+
+        语义：该轴对该方法不适用 ⇒ 它的行与模式无关，应按 (method, model, ctx) 查。
+        并**拒绝歧义** —— 若同一 (model, ctx) 上有多个候选且没有一个是
+        SYNC_MODE_NA，说明表的形状与预期不符，宁可返回 None（该长度记 unresolved）
+        也不猜一个模式出来，否则配出来的是两个不同测量条件下的量。
+        """
+        hits = [r for r in rows
+                if r.get("method") == method and r.get("model") == model
+                and r.get("context_length") == ctx]
+        if not hits:
+            return None
+        marked = [r for r in hits if r.get("sync_async") == SYNC_MODE_NA]
+        if len(marked) == 1:
+            return marked[0]
+        if len(hits) == 1:
+            return hits[0]
+        return None
+
     delta = getattr(a, "h2_delta_pp", None)
     floor = getattr(a, "h2_noise_floor_pp", None)
     delta_bad = getattr(a, "h2_delta_bad_pp", None)
@@ -352,7 +397,9 @@ def h2_points_from_rows(a: argparse.Namespace,
         for ctx in a.context_lengths:
             mode = a.sync_modes[0]
             r_dcc = find("dcc_kv", model, ctx, mode)
-            r_shr = find("kv_budget_shared", model, ctx, mode)
+            # 基线是单卡方法，其 sync/async 轴在表里被折叠 ⇒ 不能按模式查
+            # （否则配对恒为空；见 find_axis_free 的说明）。
+            r_shr = find_axis_free("kv_budget_shared", model, ctx)
             if r_dcc is None or r_shr is None:
                 continue
             acc_d, acc_s = r_dcc.get("accuracy"), r_shr.get("accuracy")
@@ -368,10 +415,13 @@ def h2_points_from_rows(a: argparse.Namespace,
                 # 那是 GPU 侧 E6 跑通后才能做的事（当前 dcc_kv 被阻断）。
                 comparable = None
 
+            # 量具是否体现压缩收益：由 _hf 的契约决定，不在本文件里写死。
+            instrument_ok = bool(_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV)
             if acc_d is None or acc_s is None or not ms_d or not ms_s:
                 points.append(H.H2PerLength(
                     length=ctx, quality_gain_pp=float("nan"),
                     prefill_speedup=float("nan"), quality_comparable=None,
+                    prefill_instrument_valid=instrument_ok,
                 ))
             else:
                 points.append(H.H2PerLength(
@@ -379,6 +429,7 @@ def h2_points_from_rows(a: argparse.Namespace,
                     quality_gain_pp=(acc_d - acc_s) * 100.0,
                     prefill_speedup=ms_s / ms_d,
                     quality_comparable=comparable,
+                    prefill_instrument_valid=instrument_ok,
                 ))
     return points
 
@@ -404,6 +455,14 @@ def compute_h2(a: argparse.Namespace,
         "（delta 与噪声底线尚未测量），记入 h2_unresolved_lengths，"
         "**不计入** h2_n_failed —— 分辨率不足不等于未达标。"
     )
+    out["h2_prefill_instrument_valid"] = bool(
+        _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV)
+    if not _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV:
+        out["h2_note"] += (
+            "；**prefill 量具无效**：当前 measure_point 的计时窗口里只有全长前向，"
+            "裁剪后的 KV 未被使用（_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV=False），"
+            "prefill_speedup 结构上恒 <= 1，故本长度记 unresolved 而不是未达标。"
+            "要让 H2 的第二个合取项可判，须先接 E6 的注意力钩子。")
     out["h2_params_supplied"] = {
         "delta_pp": getattr(a, "h2_delta_pp", None),
         "noise_floor_pp": getattr(a, "h2_noise_floor_pp", None),
@@ -553,6 +612,7 @@ def main() -> int:
         seed=a.seed, budget_ratio=a.budget_ratio,
         sync_async="both", num_repr_queries=a.M, projection_dim=a.d_p,
         task="main-table", precision=a.precision,
+        warmup=a.warmup, iters=a.iters,
         interconnect=a.interconnect,
         rope_extension_used=a.rope_extension_used,
         rope_extension_disclosed=a.rope_extension_disclosed,
@@ -578,6 +638,21 @@ def main() -> int:
             "n_points_blocked": sum(1 for r in rows if r["status"] == "blocked"),
             "paper_claim": "3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144",
             "paper_claim_check": "3×4×2×2×3 = 144，与论文 §6.4 自洽（原稿的 5 档已由 72af7db 改为 4 档）",
+        },
+        "repetitions": {
+            "warmup": a.warmup,
+            "iters": a.iters,
+            "norm_required_iters": 10,
+            "below_norm": bool(a.iters < 10),
+            "norm_source": "论文 §6.4「每点 >= 10 次 run」",
+            "note": ("below_norm 为真时该产物只作冒烟用，**不得**当作主表数据。"
+                     "此前该信息只打印在 stdout，产物里无从判别 —— "
+                     "于是 --iters 1 的冒烟结果与合规结果在 JSON 上无法区分。"),
+        },
+        "instrument": {
+            "prefill_timing_consumes_compact_kv": _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV,
+            "meaning": ("False ⇒ prefill 一列对压缩方法只含开销、不含收益，"
+                        "prefill_speedup 不可用于 H2 判定（该长度记 unresolved）。"),
         },
         "h2": compute_h2(a, rows),
         "caveat": (

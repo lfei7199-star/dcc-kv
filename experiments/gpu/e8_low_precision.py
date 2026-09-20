@@ -309,6 +309,19 @@ def main() -> int:
         "experiment": "E8",
         "device": a.device,
         "authoritative": a.device == "cuda",
+        # 元数据此前**完全缺失**：E5/E6/E7 都写了，只有 E8 没有，而 E8 恰恰
+        # 是最需要记录设备与精度口径的一个（低精度数值稳定性要按 dtype 解读）。
+        "metadata": _env.build_metadata(
+            run_id="e8-low-precision",
+            model_name="synthetic",
+            context_length=0,
+            seed=getattr(a, "seed", 42),
+            task="low-precision-numerics",
+            precision=", ".join(a.dtypes),
+            notes=("E8 无重复次数轴：测的是确定性误差界与置换散布，不是计时，"
+                   "故 warmup/iters 记 0 —— 含义是「该轴不存在」，不是「没跑」。"),
+            warmup=0, iters=0,
+        ).to_dict(),
         "rows": all_rows,
         "unsupported_combinations": failures,
         "caveat": (

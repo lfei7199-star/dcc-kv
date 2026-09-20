@@ -24,6 +24,16 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+# ---------------------------------------------------------------------------
+# 设备绑定：必须取自 LOCAL_RANK，不能用全局 rank
+# ---------------------------------------------------------------------------
+# 多节点下全局 rank 8 在第 2 个 8 卡节点上是 cuda:0，而 `cuda:{rank}` 单节点上
+# 恰好是对的 —— 所以这个错会一直藏着，直到上多节点才以"设备不存在"暴露。
+# 定义**只有一处**（experiments/gpu/_env.local_rank_of），这里不再自己拼。
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from experiments.gpu._env import local_rank_of as _local_rank  # noqa: E402
+
+
 pytestmark = pytest.mark.gpu
 
 
@@ -34,7 +44,7 @@ def _8b_worker(rank, args):
     import torch.distributed as dist
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(args["port"])
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(_local_rank(rank))
     dist.init_process_group(backend="nccl", rank=rank, world_size=args["world_size"])
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -42,13 +52,13 @@ def _8b_worker(rank, args):
     if rank == 0:
         print(f"Loading {model_path}...")
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, device_map=f"cuda:{rank}",
+        model_path, torch_dtype=torch.bfloat16, device_map=f"cuda:{_local_rank(rank)}",
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # 准备输入
     prompt = "The quick brown fox jumps over the lazy dog. " * 256  # 简化
-    inputs = tokenizer(prompt, return_tensors="pt").to(f"cuda:{rank}")
+    inputs = tokenizer(prompt, return_tensors="pt").to(f"cuda:{_local_rank(rank)}")
 
     # 跑 baseline（无压缩）
     if rank == 0:

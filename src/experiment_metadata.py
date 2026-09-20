@@ -71,8 +71,20 @@ class ExperimentMetadata:
     baseline: str = "unknown"
     num_repr_queries: int = 64
     projection_dim: int = 32
-    lambda_beta: float = 1e-3
+    # 与 src.dcc_kv_ref.calibration.DEFAULT_LAMBDA_BETA 一致（E11 定档）。
+    # 这里原先写的是 1e-3（E11 之前的旧值）：通过 build_metadata 构造时会被
+    # 显式实参覆盖，所以错值只在「直接构造 dataclass」时露出来 —— 而元数据
+    # 的 λ_β 是论文可复现性的一部分，不能有两套默认值。
+    lambda_beta: float = 3e-2
     lambda_value: float = 1e-3
+
+    # 重复次数。论文 §6.4 要求「每点 >= 10 次 run」，E5/E6/E7 也都有
+    # --iters/--warmup；但此前**没有任何地方把实际值写进产物**，于是
+    # `--iters 1` 的冒烟结果与合规结果在 JSON 上无法区分。
+    # 没有重复次数轴的实验（E8 是确定性误差界测量）记 0，含义是"该轴不存在"，
+    # 不是"没跑"。
+    warmup: int = 3
+    iters: int = 10
     rope_extension_used: Optional[str] = None
     rope_extension_disclosed: bool = False
 

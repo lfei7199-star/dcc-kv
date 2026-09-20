@@ -33,6 +33,16 @@ from .value_regression import (
     fit_compact_value,
 )
 from .compact_kv import CompactKV, build_compact_kv
+from .attention_kernel import (
+    PartialAttention,
+    causal_visibility,
+    compact_kv_attention,
+    dense_attention,
+    default_scale,
+    dcc_kv_attention,
+    identity_compact,
+    merge_partial_attention,
+)
 
 __all__ = [
     # online softmax
@@ -60,4 +70,13 @@ __all__ = [
     # compact KV
     "CompactKV",
     "build_compact_kv",
+    # attention kernel（G1）
+    "PartialAttention",
+    "default_scale",
+    "causal_visibility",
+    "identity_compact",
+    "compact_kv_attention",
+    "dense_attention",
+    "merge_partial_attention",
+    "dcc_kv_attention",
 ]

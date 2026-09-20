@@ -463,6 +463,7 @@ def main() -> int:
             seed=a.seed, budget_ratio=a.budget_ratio, sync_async="sync",
             task="negative-results", precision=a.precision,
             interconnect=a.interconnect,
+            warmup=a.warmup, iters=a.iters,
         ).to_dict(),
         "reporting_rule": (
             "按 §6.4 与发布清单：E7 的任何一条结论，无论正负，都必须进入正文。"

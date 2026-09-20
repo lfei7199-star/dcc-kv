@@ -22,13 +22,23 @@ import torch.distributed as dist
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+# ---------------------------------------------------------------------------
+# 设备绑定：必须取自 LOCAL_RANK，不能用全局 rank
+# ---------------------------------------------------------------------------
+# 多节点下全局 rank 8 在第 2 个 8 卡节点上是 cuda:0，而 `cuda:{rank}` 单节点上
+# 恰好是对的 —— 所以这个错会一直藏着，直到上多节点才以"设备不存在"暴露。
+# 定义**只有一处**（experiments/gpu/_env.local_rank_of），这里不再自己拼。
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from experiments.gpu._env import local_rank_of as _local_rank  # noqa: E402
+
+
 pytestmark = pytest.mark.gpu
 
 
 def _init(rank, world_size, port):
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(_local_rank(rank))
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
@@ -53,7 +63,7 @@ def _sync_vs_async_worker(rank, args):
     compress_ratio = bytes_compact / bytes_full
 
     # 同步版本：阻塞发送
-    sync_tensor = torch.randn(B, d_h, device=f"cuda:{rank}")
+    sync_tensor = torch.randn(B, d_h, device=f"cuda:{_local_rank(rank)}")
     torch.cuda.synchronize()
     sync_start = time.perf_counter()
     dist.all_to_all_single(
@@ -65,7 +75,7 @@ def _sync_vs_async_worker(rank, args):
     sync_time = time.perf_counter() - sync_start
 
     # 异步版本：非阻塞发送 + 计算
-    async_tensor = torch.randn(B, d_h, device=f"cuda:{rank}")
+    async_tensor = torch.randn(B, d_h, device=f"cuda:{_local_rank(rank)}")
     torch.cuda.synchronize()
     async_start = time.perf_counter()
     handle = dist.all_to_all_single(
@@ -81,8 +91,8 @@ def _sync_vs_async_worker(rank, args):
     async_time = time.perf_counter() - async_start
 
     # 收集到 rank 0
-    sync_time_t = torch.tensor([sync_time], device=f"cuda:{rank}")
-    async_time_t = torch.tensor([async_time], device=f"cuda:{rank}")
+    sync_time_t = torch.tensor([sync_time], device=f"cuda:{_local_rank(rank)}")
+    async_time_t = torch.tensor([async_time], device=f"cuda:{_local_rank(rank)}")
     dist.gather(sync_time_t, [torch.zeros_like(sync_time_t) for _ in range(args["world_size"])] if rank == 0 else None, dst=0)
     dist.gather(async_time_t, [torch.zeros_like(async_time_t) for _ in range(args["world_size"])] if rank == 0 else None, dst=0)
 
