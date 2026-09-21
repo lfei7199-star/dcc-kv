@@ -304,10 +304,26 @@ def dense_attention(
     if causal:
         if query_positions is None:
             raise ValueError("causal=True 时必须给出 query_positions")
-        pos_k = torch.arange(int(keys.shape[0]), device=keys.device) + int(block_offset)
-        logits = logits.masked_fill(
-            pos_k.reshape(1, -1) > query_positions.reshape(-1, 1), float("-inf")
+        Lk = int(keys.shape[-2])
+        Lq = int(query.shape[-2])
+        if int(query_positions.numel()) != Lq:
+            raise ValueError(
+                f"query_positions 长度 {int(query_positions.numel())} != Lq={Lq}；"
+                "掩码必须逐 query 给出（长度不足会静默地只掩住前几行）"
+            )
+        pos_k = torch.arange(Lk, device=keys.device) + int(block_offset)
+        # 掩码必须与 logits **同维**（前导维留 1）。
+        # 旧实现写的是 `keys.shape[0]` 配二维形状 (1, -1) / (-1, 1)：在
+        # keys 为 [H, Lk, d_h] 时，前者取到了 H（g=2、Lk=24 直接 RuntimeError
+        # 报尺寸 2 vs 24），后者让前导维被当作 query 维广播 —— 而 H == Lk 时
+        # **不报错、只算错**。与 compact_kv_attention 的掩码同源，此处一并收口。
+        if int(logits.dim()) < 2:
+            raise ValueError(f"logits 至少 2 维，得到 {int(logits.dim())}")
+        mask = (
+            pos_k.reshape(*([1] * (logits.dim() - 1)), Lk)
+            > query_positions.reshape(*([1] * (logits.dim() - 2)), Lq, 1)
         )
+        logits = logits.masked_fill(mask, float("-inf"))
     lse = torch.logsumexp(logits, dim=-1)
     safe = torch.where(torch.isfinite(lse), lse, torch.zeros_like(lse))
     p = torch.exp(logits - safe.unsqueeze(-1))

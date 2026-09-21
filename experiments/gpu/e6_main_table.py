@@ -112,7 +112,10 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
             "kv_budget_shared 走的是**同一条** apply_kv_budget（共享裁剪）路径 —— "
             "没有目的端条件化构造，也没有 G2 的 pipelined_attention。二者质量差"
             "会恒为 0，H2 的 quality_gain 无从谈起。翻 measurable 之前必须让 "
-            "dcc_kv 行改走 build_compact_kv + _forward.pipelined_attention 的真实链路。",
+            "dcc_kv 行改走 build_compact_kv + _forward.pipelined_attention 的真实链路。"
+            "（2026-09-21 补：所需**工具已就绪** —— src/distributed/attention_hook.py "
+            "的 dcc_attention 上下文管理器 + HookConfig(dcc_world=...)，本机 tiny Llama "
+            "端到端验证到 ULP 级；尚未接进本脚本的方法行，E6 也还没有 --dcc-world 参数。）",
             "构造链路的 CUDA 可用性待 GPU 机实测（G6 未做；静态审计不能替代实测）。",
         ],
     },

@@ -332,3 +332,51 @@ def test_returns_partial_with_expected_fields():
     assert p.out.shape == (Q.shape[0], V.shape[-1])
     assert p.n_keys == K.shape[0]
     assert bool(p.is_finite().all())
+
+def test_dense_causal_mask_supports_leading_dims():
+    """`dense_attention` 的因果掩码必须支持带前导维的 query/keys。
+
+    2026-09-21 修：旧实现写的是
+
+        pos_k = torch.arange(int(keys.shape[0]), ...)
+        logits.masked_fill(pos_k.reshape(1, -1) > query_positions.reshape(-1, 1), -inf)
+
+    两处都把「最后一维是 key 维」的假设写成了「第 0 维」：
+
+    * `keys.shape[0]` 在 keys 为 `[H, Lk, d_h]` 时取到 H —— 实测 H=2、Lk=24
+      直接 `RuntimeError` 报尺寸 2 vs 24（症状指向 matmul/广播，真因在索引）；
+    * 掩码按二维形状构造，前导维会被当作 query 维广播 —— 而 **H == Lk 时
+      不报错、只算错**，比第一条更坏。
+
+    它是在接 H0 的注意力钩子时被真实前向撞出来的：钩子按 kv head 分组后，
+    交给 dense_attention 的 query 就是 `[g, Lq, d_h]`（g = H_q / H_kv > 1）。
+
+    本锚点比的是 **ULP 级等价**，不是逐位 —— 分组改变了 GEMM 的 M 维。
+    """
+    torch.manual_seed(0)
+    H, Lq, Lk, d = 3, 5, 7, 4
+    assert H != Lk, "取 H 与取 Lk 若相等，这个缺陷会隐身，锚点就没判别力了"
+    q = torch.randn(H, Lq, d, dtype=torch.float64)
+    k = torch.randn(H, Lk, d, dtype=torch.float64)
+    v = torch.randn(Lk, d, dtype=torch.float64)
+    pos = torch.arange(Lq)
+
+    got = dense_attention(q, k, v, causal=True, query_positions=pos).out
+    exp = torch.stack([
+        dense_attention(q[h], k[h], v, causal=True, query_positions=pos).out
+        for h in range(H)
+    ])
+    assert got.shape == exp.shape == (H, Lq, d)
+    # 只能 ULP 级一致，**不是**逐位：把 H 个 head 一次算与逐 head 算，GEMM 的
+    # M 维不同（H*Lq 对 Lq），BLAS 据此选分块核 ⇒ 同一元素的浮点累加顺序会变。
+    # 这与 query_chunk 是同一现象（那里沿 query 维分块），实测 float64 差
+    # 1.11e-16 与 float32 差 1.19e-07，各约 1 ULP，**两档都不逐位相同**。
+    dev = (got - exp).abs().max().item()
+    assert dev < 1e-12, f"带前导维的因果掩码与逐 head 展开差 {dev:.3e}"
+
+    # 逐 head 那一档必须真的施加了因果，否则上面是「两个都错」
+    full = dense_attention(q[0], k[0], v, causal=False, query_positions=pos).out
+    assert not torch.allclose(exp[0], full), "因果掩码没有起作用"
+
+    with pytest.raises(ValueError, match="query_positions"):
+        dense_attention(q, k, v, causal=True, query_positions=torch.arange(Lq - 1))

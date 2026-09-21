@@ -463,7 +463,7 @@ def measure_prefill(
     `_one()`：
         ① `lm.model(src_ids, use_cache=True)`          —— 源端构造，两臂共有
         ② `apply_kv_budget(cache, B)`                  —— 仅压缩臂
-        ③ `lm.model(dst_ids, past_key_values=cache)`   —— 目的端前向
+        ③ `lm.model(dst_ids, past_key_values=cache, position_ids=...)   —— 目的端前向
 
     ③ 让 ① 与 ② 的产物真正进入计时窗口：两臂在这一步的唯一差别是 cache 的
     KV 长度（dense = S，压缩 = B）。① 不可被压缩降低，故它是比值里的公共项
@@ -504,7 +504,18 @@ def measure_prefill(
                             mode=compaction_mode)
         # ③ 目的端：只对 cache 中的 KV 做注意力（H0 的收益载体）
         if dst_ids is not None:
-            lm.model(input_ids=dst_ids, past_key_values=cache, use_cache=True)
+            # position_ids 必须显式给出（2026-09-21 修）。裁剪后 cache 的
+            # get_seq_length() 返回的是**实际张量长度 B**（实测确认，不是原长 S），
+            # 缺省会让 dst 的 RoPE 位置从 B 起算：实测与正确位置差 4.9e-3，
+            # 而 dense 参照臂的路径差只有 9.7e-8 —— 差 5 个数量级。更关键的是
+            # dense 臂不裁剪、位置本就是 S..，于是两臂的**目的端位置不一致**，
+            # 「两臂唯一差别是 KV 长度」不再成立。这一条与 score_choices 早已
+            # 显式给 position_ids 的做法对齐（见其文档要点 ②）。
+            position_ids = torch.arange(
+                int(seq_len), int(seq_len) + int(dst_ids.shape[1]), device=device
+            ).unsqueeze(0).expand(batch_size, -1)
+            lm.model(input_ids=dst_ids, past_key_values=cache, use_cache=True,
+                     position_ids=position_ids)
         del out
 
     if torch.cuda.is_available():

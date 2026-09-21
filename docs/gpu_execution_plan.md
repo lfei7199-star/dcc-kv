@@ -12,6 +12,17 @@
 > 但阻断原因第二次变化：从「通路没接进测量」变成「**量具修好了，可被测量的那条
 > 通路还不是本文方法**」—— `dcc_kv` 仍与 `kv_budget_shared` 共用同一条共享裁剪
 > 路径，两者质量差恒为 0。**所以翻 `measurable` 仍然不可以**，详见 §0。
+>
+> ⚠️ **2026-09-21 第二次更新（同日后半程）**：H0 的**方法侧**已写完 ——
+> `src/distributed/attention_hook.py`（把 G1 的算子核挂进真实模型 attention 的钩子）
+> 与其锚点 `tests/test_attention_hook.py`。本机用**本地构造的 tiny Llama** 做了端到端
+> 验证：dense 参照臂（β≡0、B=L_s）与原生前向差 **9.7e-08**（float32 的 ULP 级），
+> 即形状 / 转置 / GQA 分组 / 位置 / 因果 / 还原六个维度一并接通。**但结论没有变**：
+> 钩子只是让「把 `dcc_kv` 行接成真实方法」这件事**具备了条件**，它还没接进
+> `measure_point`（E6 的 `--dcc-world` **尚未加入 CLI**，钩子侧已有 `HookConfig.dcc_world`）。`measurable` 依然不可翻。
+> 本次一并修掉两个**实现缺陷** —— 都是「接钩子」这件事撞出来的：`dense_attention` 的
+> 因果掩码在前导维下的静默错误，以及 `measure_prefill` 目的端缺 position_ids 导致
+> 两臂位置不一致。详见 `commit_log.md` 第 32 条。
 
 ---
 
@@ -88,6 +99,12 @@ mode = "identity" if method == "dense" else a.compaction_mode
 **能翻 `measurable` 的充要条件**：`dcc_kv` 在 `measure_point` 里走 G2 的
 `pipelined_attention`，而不是与 `kv_budget_shared` 同一分支。
 
+**2026-09-21 稍后**：这个条件的前半**已经有工具了** ——
+`src/distributed/attention_hook.py` 提供 `dcc_attention(model, HookConfig(...))`
+上下文管理器，两段式（`source_phase` / `destination_phase`）跑真实前向，并在本机
+CPU 上用 tiny Llama 验证到 ULP 级。**接线**（挂进 `measure_point` 的 `dcc_kv` 分支、
+连同 E6 的 `--dcc-world` 入口）仍未做，故上表状态是「工具就绪、接线未做」，而不是「已完成」。
+
 阻断原因全部是**实现缺口**，与租什么卡无关：
 
 | # | 缺口 | 状态（2026-09-21） | 文件 / 补什么的现状 |
@@ -98,7 +115,7 @@ mode = "identity" if method == "dense" else a.compaction_mode
 | **G4** | A4 的代码 | ✅ 已提交（`c9ca6b0`） | `e5_gpu_ablation.py` 的 `a4_interaction_grid` |
 | **G5** | 评测集 JSONL 转换器 | ✅ 已提交（`c9ca6b0`） | `experiments/gpu/build_eval_set.py` |
 | **G6** | CUDA 构造可用性实测 | ❌ **未做** | `_env.probe_gpu_construction()`；只能上机 |
-| **H0** | E6 的注意力钩子（算子核 + 注意力钩子） | ✅ **已接**（2026-09-21） | `_hf.measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV=True`。**但只修了量具**：`dcc_kv` 仍与 `kv_budget_shared` 共用 `apply_kv_budget` ⇒ 质量差恒为 0 |
+| **H0** | E6 的注意力钩子（算子核 + 注意力钩子） | ✅ 量具侧已接；⚠️ **方法侧工具就绪、接线未做**（2026-09-21） | 量具侧：`_hf.measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV=True`。方法侧：`src/distributed/attention_hook.py`（本机 tiny Llama 验证到 ULP 级）。**仍未接进 `measure_point`** ⇒ `dcc_kv` 与 `kv_budget_shared` 仍共用 `apply_kv_budget`，质量差恒为 0 |
 
 其中 **G6 是唯一「只能上机才知道」的一项**。**H0 已于 2026-09-21 接上，但它恰好
 演示了为什么那句 `measurable: True` 不等于完成**：钩子接上后量具灵敏了，可
@@ -276,10 +293,14 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
       是否在本轮声称与 Ring Attention 对比需要单独决定
 - [x] G4 A4 的代码写完（`a4_interaction_grid`）
 - [x] G5 评测集转换器写完；**评测集本体仍需生成**（`build_eval_set.py` 是要输入端数据的）
-- [x] **H0 E6 的注意力钩子接上**（2026-09-21）：`measure_prefill` 三段化
+- [x] **H0 量具侧**接上（2026-09-21）：`measure_prefill` 三段化
       （源端构造 → 压缩 → 目的端前向）、`PREFILL_TIMING_CONSUMES_COMPACT_KV=True`、
-      E6 加 `--dest-fraction`。**量具已灵敏，但未翻 `measurable`** ——
-      `dcc_kv` 的构造路径仍与 `kv_budget_shared` 共用，质量臂仍为空
+      E6 加 `--dest-fraction`
+- [x] **H0 方法侧**写完（2026-09-21）：`src/distributed/attention_hook.py` +
+      `tests/test_attention_hook.py`（本机 tiny Llama 端到端；dense 参照臂与原生
+      前向差 9.7e-08）
+- [ ] **把钩子接进 `measure_point` 的 `dcc_kv` 分支**（连同 E6 的 `--dcc-world` 入口）——
+      这才是 H0 真正完成的判据。量具已灵敏、工具已就绪，**但未翻 `measurable`**
 - [ ] G6 CUDA 构造可用性实测（上机后第一件事）
 - [x] 上面五项已写的代码**提交**（`c9ca6b0`，2026-09-20；H0 于 2026-09-21 提交）
 - [ ] **把 `dcc_kv` 的构造路径独立出来**（G2 的 `pipelined_attention` 接进
@@ -364,3 +385,6 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
 > 即可租卡」这个推论**依然不成立** —— 第 5 项的前置现在是 **G6** 与
 > **`dcc_kv` 通路独立**。清单确实在缩短，但缩短的不是「能不能开跑」，
 > 而是「开跑之后能不能拿到有用的数」。
+>
+> **2026-09-21 再补**：让 `dcc_kv` 通路独立所需的**工具**（H0 方法侧钩子）已就绪，
+> 但**接线**仍未做；**G6 依旧是唯一「只能上机才知道」的一项**。

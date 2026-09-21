@@ -100,10 +100,12 @@ from src.dcc_kv_ref import attention_kernel as K       # noqa: E402
 SCRIPT = "experiments/gpu/e5_gpu_ablation.py"
 
 A3_MISSING_PREREQUISITES = [
-    "注意力替换钩子：紧凑 K/β/V → 注意力的**算子核**已就绪"
-    "（src/dcc_kv_ref/attention_kernel.py，2026-09-16），但还缺把它挂进真实模型 "
-    "forward 的钩子（src/distributed/attention_hook.py）。没有钩子就无法把四个"
-    "变体（full / no_beta / no_value / no_both）喂进真实模型的注意力。",
+    "注意力替换钩子：**已就绪**（2026-09-21）。算子核在 "
+    "src/dcc_kv_ref/attention_kernel.py；把四个变体（full / no_beta / no_value / "
+    "no_both）喂进真实模型注意力的钩子在 src/distributed/attention_hook.py"
+    "（本机 tiny Llama 端到端验证：dense 参照臂与原生前向差 9.7e-08）。"
+    "**剩余的是接线**：A3 仍未调用该钩子；且它的对照必须走多设备路径 —— "
+    "单进程 harness 只有单一目的端，无法区分 DCC-KV 与 FastKV。",
     "构造链路的 CUDA 可用性：三处 device 缺陷（representative_query / "
     "value_regression / key_selection）已在 5b5ce98 修复，但本机无 CUDA 无法实测，"
     "须由 _env.probe_gpu_construction() 在目标机上确认。",

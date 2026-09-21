@@ -581,10 +581,15 @@ def test_g2_json_safe_does_not_touch_finite_values():
 # I. 引用完整性：写进源码/文档的测试路径必须真实存在
 # =============================================================================
 
-# 只认带 tests/ 前缀的路径。刻意不认裸文件名 —— 同目录互指是允许的，
-# 本文件开头就那样引用了 test_selfcheck_2026_09_18.py。
+# 认带 src/ | experiments/ | tests/ 前缀的仓库内 .py 路径。刻意不认裸文件名
+# —— 同目录互指是允许的，本文件开头就那样引用了 test_selfcheck_2026_09_18.py。
 # 用 [.] 而不是反斜杠转义，少一层转义就少一个静默出错的机会。
-_REF_TEST_PATH = re.compile(r'tests/(?:gpu/|profiling/)?test_[A-Za-z0-9_]+[.]py')
+#
+# 2026-09-21 扩展：原先把面只开在 tests/...test_*.py 上，于是
+# src/distributed/attention_hook.py 被两处源码引用却**不存在**这件事，
+# 守卫完全看不见 —— 而它正是 measurable 的前置缺口（H0 的方法侧）。
+# 扩展前先扫过全仓：58 条引用零误报，故可以把面开大。
+_REF_PY_PATH = re.compile(r'(?:src|experiments|tests)/[A-Za-z0-9_/]*[A-Za-z0-9_]+[.]py')
 
 # 扫描面 = 源码 + docs。**不含 .github/** —— 那里的 PR 模板拿一个虚构的
 # 测试文件名当占位符示例，它是示例不是引用，收进来会造成永久误报。
@@ -593,7 +598,12 @@ _REF_SCAN_GLOBS = ('experiments/**/*.py', 'src/**/*.py', 'tests/**/*.py',
 
 
 def test_i1_every_referenced_test_file_exists():
-    """源码/文档里写下的测试路径必须真实存在。
+    """源码/文档里写下的仓库内 .py 路径必须真实存在。
+
+    扫描面自 2026-09-21 起含 src/ 与 experiments/，不再只守 tests/：
+    同一类错（引用一个不存在的东西）在源码路径上同样出现过 ——
+    src/distributed/attention_hook.py 被 attention_kernel 与 e5 各引一次，
+    而文件当时并不存在。
 
     实证依据：本仓库**两次**出现「引用了从未存在的测试文件」——
     `experiments/gpu/_hf.py` 的 H0 契约说明指向一个不存在的 H0 锚点文件，
@@ -609,7 +619,7 @@ def test_i1_every_referenced_test_file_exists():
     for pattern in _REF_SCAN_GLOBS:
         for path in sorted(REPO.glob(pattern)):
             text = path.read_text(encoding='utf-8', errors='replace')
-            for m in _REF_TEST_PATH.finditer(text):
+            for m in _REF_PY_PATH.finditer(text):
                 referenced.setdefault(m.group(0), []).append(
                     path.relative_to(REPO).as_posix())
 
@@ -619,5 +629,6 @@ def test_i1_every_referenced_test_file_exists():
                for rel, where in referenced.items()
                if not (REPO / rel).exists()}
     assert not missing, (
-        '引用了不存在的测试文件（会被读成「已有覆盖」）：' + repr(missing))
+        '引用了不存在的仓库内 .py 路径（会被读成「已有实现/已有覆盖」）：'
+        + repr(missing))
 
