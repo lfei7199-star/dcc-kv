@@ -100,6 +100,14 @@ traces/
 *.orig
 .cache/
 
+# 一次性确定性补丁脚本（2026-09-21 决定）
+# 体例：这类脚本承载的是「某次改动是怎么打的」，改动本身入库、脚本不入库
+# （见 docs/commit_log.md）。此前它们散落在 scripts/ 下且未被跟踪，全靠
+# 「记得别用 git add -A」这条人肉约定——现已移出仓库（归档见仓库外
+# `_archive/spent_patches/ARCHIVE_NOTE.md`）。此条把约定从「靠人记」升级为
+# 「结构上挡住」，因为 `git add -A` 吞临时文件的事在本仓库已犯过两次。
+scripts/.patch_*.py
+
 # 敏感信息
 .env
 .env.local
