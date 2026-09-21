@@ -122,6 +122,18 @@ bash experiments/run_gpu.sh e5 --nproc 4     # E5
 - ~~异步 All-to-Allv 的 GPU 入口~~ → `experiments/gpu/_forward.py`（G2，把打包含接进算子核）
 
 ⚠️ **H0 不是"少写一个函数"，它决定 H2 的加速臂能不能成立。** E6 的 prefill 计时窗口里**从不出现裁剪后的 KV**（`_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is False`），所以 `T_prefill(压缩) ≥ T_prefill(精确)`、加速比结构上恒不超过 1。**先补钩子、再翻 `METHOD_SPECS` 的 `measurable`**；顺序反了只会得到一个永不达标的 H2。在钩子接上之前，H2 的量具被显式标为失效，判定走 `unresolved(reason=instrument)` 而**不是** `failed`。
+（历史记录）⚠️ **H0 不是"少写一个函数"，它决定 H2 的加速臂能不能成立。**
+E6 的 prefill 计时窗口里**从不出现裁剪后的 KV**
+（`_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is False`），所以
+`T_prefill(压缩) ≥ T_prefill(精确)`、加速比结构上恒不超过 1；顺序反了只会得到
+一个永不达标的 H2。该常量已于 2026-09-21 翻为 `True`，此段的结论**保留原文**
+以留痕。
+
+✅ **2026-09-21 收尾**：H0 接线完成（`b44a7b3`），H2 的**质量侧**前提也接通了
+逐样本配对（`12ece9d`）—— `measure_point` 落 `accuracy_per_sample` 与
+`eval_sample_keys`，配对 CI 由 `report.paired_bootstrap` 算，**配对前先逐位比对
+两份键**（不同源即拒绝配对）。H2 因此不再是"结构性判不出来"，只剩参数取值
+（`--h2-delta-pp` / `--h2-noise-floor-pp`，刻意无默认值）。
 
 ### 顺带发现的一处论文算术错误 —— **已在 `72af7db` 修掉**
 

@@ -19,6 +19,13 @@
 > 更坏（读者会以为已经写过了）。已补齐，并加了一条守卫
 > （`tests/test_adversarial_2026_09_20.py::test_i4_*`：`docs/*.md` 里不得有未闭合的表格行）。
 > 另：本表行数字段**普遍陈旧**，本轮只把被改动的那些按实测刷新（见下），其余登记备查。
+> ⚠️ **2026-09-21 第四次更新（`12ece9d`）**：行数字段按实测刷新 11 处
+> （`hypotheses.py` / `_hf.py` / `e6_main_table.py` /
+> `test_adversarial_2026_09_20.py` / `commit_log.md` / `reproducibility.md` /
+> `gpu_execution_plan.md` / `writing_scope_and_metrics.md` / `release_checklist.md` /
+> `code-and-files-guide.md` / `experiments/README.md`）。
+> **本文件的「行数」字段在历次局部更新中会累积陈旧值** —— 每轮只刷新当时被改动的
+> 那些，其余保持旧值不变，故引用前请以文件实际内容为准。
 
 
 ---
@@ -118,7 +125,7 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `README.md` | 149 | 实验总览：CPU/GPU 分工、编号体系（E0–E13 / A1–A5）、如何跑 |
+| `README.md` | 171 | 实验总览：CPU/GPU 分工、编号体系（E0–E13 / A1–A5）、如何跑 |
 | `__init__.py` | 15 | 声明 `experiments` 包 |
 | `run_cpu.sh` | 65 | CPU 实验入口 |
 | `run_gpu.sh` | 135 | GPU 实验入口（封装 `torchrun`）。⚠️ 数组展开必须用 `"${ARR[@]}"`，**不能**写 `"${ARR[@]:-}"`（后者会退化成空字符串参数） |
@@ -130,7 +137,7 @@
 | `__init__.py` | 9 | 声明 `common` 包 |
 | `synthetic.py` | 854 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等）。`mass_error` 已标废弃，公开偏移版本为 `absolute_mass_error`（列名 `eps_mass_abscommon_*`） |
 | `report.py` | 390 | 结果汇总：`summarize`（median / p5 / p95 / bootstrap CI）、配对检验、`save_json` / `save_csv` |
-| `hypotheses.py` | 812 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`）。2026-09-16 新增 H2 前提「质量相近」的判定程序 `quality_comparable_non_inferior`（入参显式含 `delta_pp` / `noise_floor_pp`，越出可行区间即 `ValueError` 而**拒绝执行**）与两个常量（`QUALITY_COMPARABLE_REFERENCE = "dense"`、非劣边界上界 = 1.5 pp）。2026-09-16 补 H2 的**跨长度聚合入口** `h2_pass_across_lengths`（逐长度分别判定、全通过才成立；前提未定记 `unresolved` 而非 `failed`），已接入 `e6_main_table.py` |
+| `hypotheses.py` | 825 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`）。2026-09-16 新增 H2 前提「质量相近」的判定程序 `quality_comparable_non_inferior`（入参显式含 `delta_pp` / `noise_floor_pp`，越出可行区间即 `ValueError` 而**拒绝执行**）与两个常量（`QUALITY_COMPARABLE_REFERENCE = "dense"`、非劣边界上界 = 1.5 pp）。2026-09-16 补 H2 的**跨长度聚合入口** `h2_pass_across_lengths`（逐长度分别判定、全通过才成立；前提未定记 `unresolved` 而非 `failed`），已接入 `e6_main_table.py` |
 | `beta_variants.py` | 652 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解） |
 
 ### 3.2 `experiments/cpu/` —— 机制级实验（任意多核机器可复现，无需权重/NCCL）
@@ -163,11 +170,11 @@
 | `__init__.py` | 17 | **声明 CPU/GPU 两套证据的量纲关系**（E3↔A2、A3 机制↔A3 任务、E0↔E8），并明确不可互推 |
 | `_env.py` | 622 | 环境闸门（`probe` / `enforce`，不达标退出码 3）、计时（`benchmark_ms`；窗口内只做 `device_sync()`，集合 barrier 留窗口外）、设备绑定（`local_rank_of` / `local_device`，取 `LOCAL_RANK`）、`CUDA_CONSTRUCTION_DEFECTS` 历史清单、元数据构造 |
 | `_comm.py` | 469 | 变长 All-to-Allv（阻塞 / 异步）、同步与异步流水线（`run_sync_pipeline` / `run_async_pipeline`）、分块 `_split_chunks`（逐 dst 取片，尺寸自洽）、体积口径（`make_uniform_plan`） |
-| `_hf.py` | 873 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时（**2026-09-21 起三段化**：源端构造 → 压缩 → 目的端前向，由 `PREFILL_TIMING_CONSUMES_COMPACT_KV=True` 声明且压缩臂缺 `dest_len` 即抛错）、KV 字节数 | **2026-09-21 补（`b44a7b3`）**：`attn_hook` 参数打通三个入口（`measure_prefill` / `score_choices` / `evaluate`）；新增 `prompt_split`，成为源段 / 目的端本地段切分的**唯一出处**（此前计时侧与评测侧各算一遍，实测导致同一行的预算读数对不上质量侧）；钩子路径下 `measure_prefill` 开**两个**计时窗口（含构造的 `prefill_ms_*` + 只目的端的 `dest_ms_*`，后者才是 kernel-matched 的量）；`_token_bound` 从**真实词表**取随机 token 上界（写死 1000 会让词表 < 1000 的模型死在 `F.embedding`，症状指向 embedding、真因在输入生成） |
+| `_hf.py` | 897 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时（**2026-09-21 起三段化**：源端构造 → 压缩 → 目的端前向，由 `PREFILL_TIMING_CONSUMES_COMPACT_KV=True` 声明且压缩臂缺 `dest_len` 即抛错）、KV 字节数 | **2026-09-21 补（`b44a7b3`）**：`attn_hook` 参数打通三个入口（`measure_prefill` / `score_choices` / `evaluate`）；新增 `prompt_split`，成为源段 / 目的端本地段切分的**唯一出处**（此前计时侧与评测侧各算一遍，实测导致同一行的预算读数对不上质量侧）；钩子路径下 `measure_prefill` 开**两个**计时窗口（含构造的 `prefill_ms_*` + 只目的端的 `dest_ms_*`，后者才是 kernel-matched 的量）；`_token_bound` 从**真实词表**取随机 token 上界（写死 1000 会让词表 < 1000 的模型死在 `F.embedding`，症状指向 embedding、真因在输入生成） |
 | `_forward.py` | 426 | **G2**：异步 All-to-Allv 接**真实前向**的桥接层。`make_uniform_layout`（统一布局，供等价性验证）/ `pack_edges`（变长 edge 打包）/ `chunk_source_sizes`（源端分段约定，与 `attention_hook.source_partition` 同款 —— 两处必须一致，否则"每段长度"在两套代码里不同值）/ `decode_edges` / `pipelined_attention`（同步、异步两条流水）/ `assert_same_answer`。计时纪律：`T_build / T_comm / T_comp / T_total` 必须**拆开报**；异步的 `comp_ms` 是**上界**（`wait(handle)` 之后不允许任何 device-wide 同步，否则把正在飞的集合通信也等掉 ⇒ overlap 恒为 0）；同步与异步之间**只有 `total_ms` 可比**。⚠️ 单卡下真 `dist.all_to_all_single` 退化成一次本地拷贝、`chunks_effective=1`、**没有可重叠窗口** |
 | `build_eval_set.py` | 557 | **G5**：评测集转换器 —— 把 LongBench 转成 `_hf.EvalSample` 的 JSONL。为什么需要它：E5-A2/A3、E6、E7 的**准确率列全部依赖它**，而 `_hf.score_choices` 只认 `{prompt, choices, answer, task, length_tag}` 这种多项选择形态。含 `convert_records` / `validate_samples`（转换后自检）/ `write_jsonl` / `write_report` 与 `run_selftest`（无数据也能跑）。⚠️ **评测集本体仍需生成** —— 本脚本是纯转换器，需要外部的 LongBench 输入数据 |
 | `e5_gpu_ablation.py` | 1211 | **A1** 通信集大小、**A2** 压缩预算扫描、**A3** 组件拆分（被阻断，拒绝产假数字）、**A5** 异步 vs 同步（H4 判据走 `hypotheses.h4_pass`）。**A4**（压缩 × 异步交互，2026-09-20 已实现）。**A3 仍被阻断** —— 但**理由已换**（2026-09-21）：G1 算子核与 H0 的钩子都已就绪（`src/distributed/attention_hook.py`），真正剩下的是**逐边条件化的多设备语义**：单进程 harness 只有单一目的端，无法区分 DCC-KV 与 FastKV，故 A3 的对照必须走多设备路径。在此之前拒绝产假数字 |
-| `e6_main_table.py` | 1108 | 主表与可扩展性。`gpu_count` 记为**方法要求**而非自由轴；sync/async 轴对单卡方法**折叠**（不生成两行相同的数）。⚠️ **2026-09-21 更新**：H0 已接（量具灵敏了），但 `dcc_kv` 等 4 个方法**仍** `measurable: False` —— 真实阻塞换了：`dcc_kv` 与 `kv_budget_shared` 仍走同一条 `apply_kv_budget`（共享裁剪）⇒ 质量差恒为 0。此时翻 `measurable` 会得到**假阳性**（拿一条不是本文方法的通路去判质量臂）。prefill 加速比分子已改判为 **dense**。**同日补**：H0 的**方法侧**钩子已就绪（`src/distributed/attention_hook.py`，本机 tiny Llama 端到端验证），但它**尚未接进 `measure_point` 的方法行** —— E6 的 `--dcc-world` **尚未加入 CLI**（钩子侧已有 `HookConfig.dcc_world`），接线完成前 `dcc_kv` 行仍与 `kv_budget_shared` 同路 | ⚠️ **已被 `b44a7b3` 修正**（上句保留）：`dcc_kv` 的 **`measurable` 已翻为 `True`**，其方法行改走 `attention_hook`；E6 加 `--dcc-world`（**无默认值**）/ `--dcc-budget-mode` / `--ranks`（默认 1）/ `--lambda-beta`。同轮另三处口径修正：折叠判据推广为「**本次运行真的没有多卡**」（`--ranks 1` 时 `dcc_kv` 的 sync 轴也折叠）；prefill 加速比落**两列**（`prefill_speedup_kernel_matched` 给 H2 用，`prefill_speedup_native` 只作端到端参考；**缺同核列时记 unresolved 而非 failed**）；计时与评测共用同一份 `_hf.prompt_split` |
+| `e6_main_table.py` | 1279 | 主表与可扩展性。`gpu_count` 记为**方法要求**而非自由轴；sync/async 轴对单卡方法**折叠**（不生成两行相同的数）。⚠️ **2026-09-21 更新**：H0 已接（量具灵敏了），但 `dcc_kv` 等 4 个方法**仍** `measurable: False` —— 真实阻塞换了：`dcc_kv` 与 `kv_budget_shared` 仍走同一条 `apply_kv_budget`（共享裁剪）⇒ 质量差恒为 0。此时翻 `measurable` 会得到**假阳性**（拿一条不是本文方法的通路去判质量臂）。prefill 加速比分子已改判为 **dense**。**同日补**：H0 的**方法侧**钩子已就绪（`src/distributed/attention_hook.py`，本机 tiny Llama 端到端验证），但它**尚未接进 `measure_point` 的方法行** —— E6 的 `--dcc-world` **尚未加入 CLI**（钩子侧已有 `HookConfig.dcc_world`），接线完成前 `dcc_kv` 行仍与 `kv_budget_shared` 同路 | ⚠️ **已被 `b44a7b3` 修正**（上句保留）：`dcc_kv` 的 **`measurable` 已翻为 `True`**，其方法行改走 `attention_hook`；E6 加 `--dcc-world`（**无默认值**）/ `--dcc-budget-mode` / `--ranks`（默认 1）/ `--lambda-beta`。同轮另三处口径修正：折叠判据推广为「**本次运行真的没有多卡**」（`--ranks 1` 时 `dcc_kv` 的 sync 轴也折叠）；prefill 加速比落**两列**（`prefill_speedup_kernel_matched` 给 H2 用，`prefill_speedup_native` 只作端到端参考；**缺同核列时记 unresolved 而非 failed**）；计时与评测共用同一份 `_hf.prompt_split` |
 | `e7_negative_results.py` | 486 | 负结果四条件：短上下文 / 低预算 / 强 retrieval / batch=1 |
 | `e8_low_precision.py` | 348 | 低精度（FP16/BF16）归并算子与失效边界 |
 
@@ -195,7 +202,7 @@
 | `test_forward_pipeline.py` | 532 | **G2 的锚点**（stub 顶掉集合通信后可纯 CPU 跑）。核心不变式只有一条：**流水只改变“什么时候算”，不改变“算什么”**。另有打包/解码互逆、块内源切分、退化为单块时如实上报。⚠️ 为躲开 conftest 的按名自动打标（含 `gpu` / `nccl` / `end_to_end` / `async_overlap` 会被默认排除），本文件**刻意避开这些词** |
 | `test_a4_interaction.py` | 409 | **G4（A4 压缩 × 异步交互）的锚点**。A4 是**唯一**把测量与判定都放在设备无关路径上的消融，故本文件用 stub **真跑一遍** `a4_interaction_grid` 而非只查字符串（字符串检查挡不住“接线接反”）。三类锚点：判定语义、接线纪律（判据不得被重新实现、CI 水平不得硬编码）、测量正确性（A4 计算侧必须是真实算子核，T_comm/T_comp 取自同步臂） |
 | `test_selfcheck_2026_09_18.py` | 362 | **2026-09-18 自查的回归锚点**：每条对应一个已修缺陷，且都是“形状/量级/文件名都正常、不报错但结论错或永远出不来”的那一类（如 `paired_bootstrap` 方向反了、`save_csv` 遇混合行整表 `ValueError`、`h4_pass=None` 被折进“未达标”） | **2026-09-21 补（`b44a7b3`）**：T6 新增一条 —— **单卡下表里写出的 `dcc_kv` 行 `sync_async` 也是 `"n/a"`**，H2 配对必须仍能找到它（旧实现只给基线做了轴无关查找，dcc 那一侧仍按 `sync_modes[0]` 查 ⇒ 折叠后配对恒为空；这是 `bee3388` 给基线修过的同一个坑在 `dcc_kv` 身上的第二次） |
-| `test_adversarial_2026_09_20.py` | 729 | **2026-09-20 对抗性审查 + 2026-09-21 H0 接线的回归锚点**：12 处已修缺陷（D1–D12）各一条，每条先证明「它本可以不被发现」。**A 组已于 2026-09-21 改写** —— 原锁「量具失敏 ⇒ 加速比结构上恒不超 1」，现锁「目的端看到的 KV 必须等于 B、两臂唯一差别就是那个长度、漏给 `dest_len` 必须抛错、分子必须是 dense」；B 组异步臂 `comm_ms` 是上界（落 `nan` 而非 0）；C 组重复次数与 `lambda_beta` 默认值必须进产物且与项目默认**同源**；D 组用 AST 扫设备索引（`set_device(rank)` / `f"cuda:{rank}"`）；E 组双边同步次数断言；F/G 组 E8 元数据与 `json_safe`；**H 组元守卫**保证本文件自身的用例默认全部运行；**I 组（2026-09-21 新增、同日扩展）**断言源码与 `docs/*.md` 里引用的**仓库内任意 `.py` 路径**真实存在（原先只守 `tests/test_*.py`，于是 `src/distributed/attention_hook.py` 被两处源码引用却不存在这件事它看不见） | **2026-09-21 第三次更新（`b44a7b3`）**：A 组的分子由 dense 改为 **kernel-matched**（同核），并新增「缺列时不得回落 native、且不得把 nan 比成未达标」；另新增 **I4**：`docs/*.md` 里不得有**未闭合的表格行**（`FILE_MAP.md` 曾有 4 行以 ``| **G1`` 这种半截形态存在，而它的职责恰是逐项说明每个受控文件） |
+| `test_adversarial_2026_09_20.py` | 989 | **2026-09-20 对抗性审查 + 2026-09-21 H0 接线的回归锚点**：12 处已修缺陷（D1–D12）各一条，每条先证明「它本可以不被发现」。**A 组已于 2026-09-21 改写** —— 原锁「量具失敏 ⇒ 加速比结构上恒不超 1」，现锁「目的端看到的 KV 必须等于 B、两臂唯一差别就是那个长度、漏给 `dest_len` 必须抛错、分子必须是 dense」；B 组异步臂 `comm_ms` 是上界（落 `nan` 而非 0）；C 组重复次数与 `lambda_beta` 默认值必须进产物且与项目默认**同源**；D 组用 AST 扫设备索引（`set_device(rank)` / `f"cuda:{rank}"`）；E 组双边同步次数断言；F/G 组 E8 元数据与 `json_safe`；**H 组元守卫**保证本文件自身的用例默认全部运行；**I 组（2026-09-21 新增、同日扩展）**断言源码与 `docs/*.md` 里引用的**仓库内任意 `.py` 路径**真实存在（原先只守 `tests/test_*.py`，于是 `src/distributed/attention_hook.py` 被两处源码引用却不存在这件事它看不见） | **2026-09-21 第三次更新（`b44a7b3`）**：A 组的分子由 dense 改为 **kernel-matched**（同核），并新增「缺列时不得回落 native、且不得把 nan 比成未达标」；另新增 **I4**：`docs/*.md` 里不得有**未闭合的表格行**（`FILE_MAP.md` 曾有 4 行以 ``| **G1`` 这种半截形态存在，而它的职责恰是逐项说明每个受控文件） |
 `tests/gpu/`（默认跳过）：
 
 | 文件 | 行数 | 内容 |
@@ -237,12 +244,12 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `commit_log.md` | 3098 | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
+| `commit_log.md` | 3199 | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
 | `git_strategy.md` | 418 | Git 管理策略：分支、commit 体例、tag、实验可追溯。§8.1 记录 **`results/` 入库**的决定与体积策略 |
-| `release_checklist.md` | 170 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
-| `reproducibility.md` | 270 | 可复现性说明。§6 的 H1–H5 及其阈值：2026-09-21 起口径来源改为**论文原件（`AuthorKit27` 第 7 章）+ 仓库内机器可读实现 `hypotheses.py`**（原先声明「以 blueprint §3 为准」，该原件不在库内、已裁决不再作为权威锚点，原 C11 关闭）；2026-09-16 起附「质量相近」的完整定义摘要；H2 的 prefill 加速比分子于 2026-09-21 改判为 **dense** |
-| `writing_scope_and_metrics.md` | 182 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录历次裁决的落实（D1–D6）与仍开放项。**2026-09-16 第八轮：M1/M2/M3/M5/M9 全部关闭**（见 §4 后附注）。第九轮补上 E0 的「置换次数」轴，论文 §6 里最后一条非 GPU 待补项关闭 |
-| `gpu_execution_plan.md` | 449 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对。**§0/§5/§6/§7 已于 2026-09-21 第二次同步**：G1–G5 已**提交**（`c9ca6b0`），**H0 已接**（`measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV` 翻正 + E6 加 `--dest-fraction`）。**未变的是结论，变了的是理由**：现在阻的是「`dcc_kv` 的构造路径还没独立」（仍与 `kv_budget_shared` 共用共享裁剪 ⇒ 质量差恒为 0）与 **G6 未做**；翻 `measurable` 仍不可以（否则得到假阳性） | ⚠️ **已被 `b44a7b3` 修正**（上句保留）：**接线已完成、`measurable` 已翻**；§0/§5/§7 已第三次同步，口径变化三条（sync 轴折叠判据推广、prefill 加速比两列、计时与评测同一份切分） |
+| `release_checklist.md` | 177 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
+| `reproducibility.md` | 293 | 可复现性说明。§6 的 H1–H5 及其阈值：2026-09-21 起口径来源改为**论文原件（`AuthorKit27` 第 7 章）+ 仓库内机器可读实现 `hypotheses.py`**（原先声明「以 blueprint §3 为准」，该原件不在库内、已裁决不再作为权威锚点，原 C11 关闭）；2026-09-16 起附「质量相近」的完整定义摘要；H2 的 prefill 加速比分子于 2026-09-21 改判为 **dense** |
+| `writing_scope_and_metrics.md` | 181 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录历次裁决的落实（D1–D6）与仍开放项。**2026-09-16 第八轮：M1/M2/M3/M5/M9 全部关闭**（见 §4 后附注）。第九轮补上 E0 的「置换次数」轴，论文 §6 里最后一条非 GPU 待补项关闭 |
+| `gpu_execution_plan.md` | 460 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对。**§0/§5/§6/§7 已于 2026-09-21 第二次同步**：G1–G5 已**提交**（`c9ca6b0`），**H0 已接**（`measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV` 翻正 + E6 加 `--dest-fraction`）。**未变的是结论，变了的是理由**：现在阻的是「`dcc_kv` 的构造路径还没独立」（仍与 `kv_budget_shared` 共用共享裁剪 ⇒ 质量差恒为 0）与 **G6 未做**；翻 `measurable` 仍不可以（否则得到假阳性） | ⚠️ **已被 `b44a7b3` 修正**（上句保留）：**接线已完成、`measurable` 已翻**；§0/§5/§7 已第三次同步，口径变化三条（sync 轴折叠判据推广、prefill 加速比两列、计时与评测同一份切分） |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
 
@@ -271,7 +278,7 @@
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
 | `2026-09-16-progress-report.md` | 200 | **进展汇报**（面向师姐）。一句话结论（论文非 GPU 内容已收口 + 当前仍不能租卡）、今日 6 项完成项（附证据）、论文/代码/证据三层状态快照、4 条风险、待完成事项分「CPU 可做 / 需租卡 / 需外部输入」、下一步计划、自查命令附录 |
-| `code-and-files-guide.md` | 367 | **代码与文件说明**。面向第一次接触仓库的人：怎么用本文档、项目做什么与**原创边界**、五分钟上手、目录总览、`src/` 逐模块、`experiments/` 逐脚本（含 15 个 CPU 实验一览）、测试的定位、论文与排版注意、`results/` 产物约定、`docs/` 各文件作用、**§10 已知缺口与诚实边界**（含引用数字的三条禁令） |
+| `code-and-files-guide.md` | 370 | **代码与文件说明**。面向第一次接触仓库的人：怎么用本文档、项目做什么与**原创边界**、五分钟上手、目录总览、`src/` 逐模块、`experiments/` 逐脚本（含 15 个 CPU 实验一览）、测试的定位、论文与排版注意、`results/` 产物约定、`docs/` 各文件作用、**§10 已知缺口与诚实边界**（含引用数字的三条禁令） |
 
 ---
 
