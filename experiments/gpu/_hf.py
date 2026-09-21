@@ -29,6 +29,33 @@
 多机版本需要 `src/distributed` 的异步路径。本模块负责提供
 **可比的、有意义的任务指标基线**，以及论文 A1/A2/A5/A6 所需的
 prefill 计时口径。
+
+关于 `attn_hook`（H0 方法侧，2026-09-21 接入）
+----------------------------------------------
+`measure_prefill` / `score_choices` / `evaluate` 都有一个可选的 `attn_hook`
+参数（`src.distributed.attention_hook.HookConfig`）。给了它，前向就走钩子，
+源端由钩子的 state 携带、目的端只带自己的 KV；不给则走本模块原有的
+`apply_kv_budget` 路径。两条路径的**测量口径不同，不能混比**：
+
+    attn_hook=None      —— 「直接裁缓存」，源端 KV 留在 cache 里；
+    attn_hook=HookConfig —— 「目的端条件化构造 + 紧凑 KV 注意力」，
+                            源端**不在** cache 里（目的端前向传 past=None）。
+
+目的端与源端的分工（评测路径）
+------------------------------
+`score_choices` 按 `dest_fraction` 把提示词切成两段：**前 (1-f) 段是源端**
+（被压缩），**后 f 段是目的端自己的本地段**（保持精确、且是唯一合法的条件化
+query 来源）。这样切的原因不是形式好看，而是两条硬约束：
+
+1. 目的端在真实系统里**本来就有自己的本地上下文**（提问/指令），压掉它会
+   系统性低估准确率，而"整段本地上下文消失"在形状与量级上都看不出来；
+2. 构造紧凑块用的 query 会进选键 / β 拟合 / V 回归。若拿**被打分的
+   continuation**当条件化 query，就等于让压缩过程看见了答案 —— 仓库纪律
+   明确禁止（`E9` 的 oracle 是作弊上界，同款道理）。用目的端本地段作 query
+   来源，则越界在结构上不可能发生。
+
+同口径也施加于非钩子基线：`kv_budget_shared` 只裁**源段**、保留同一段目的端
+本地段，否则两边的"保留了多少精确 token"不同，质量差里混进了预算不对齐。
 """
 
 from __future__ import annotations
@@ -48,6 +75,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.gpu import _env  # noqa: E402
+from src.distributed import attention_hook as _A  # noqa: E402
 
 
 # =============================================================================
@@ -288,6 +316,30 @@ def load_eval_file(path: str, limit: Optional[int] = None) -> List[EvalSample]:
     return samples
 
 
+def prompt_split(prompt_tokens: int, dest_fraction: float) -> Tuple[int, int]:
+    """把提示词切成 `(源段长度, 目的端本地段长度)`。
+
+    `dest_fraction = 0` ⇒ 整条提示词都是源端（即本仓库 2026-09-21 之前的口径）；
+    `> 0` ⇒ 尾部那一段是目的端自己的本地上下文（见模块文档「目的端与源端的分工」）。
+
+    尾段取 `round(f * S)` 而不是 `int()`：整数截断在 S=4096、f=0.25 上就差 0 个，
+    但在 f 很小（如 0.001）时会**恒为 0** —— 于是"目的端本地段"这条轴看起来
+    存在、实际从未生效。四舍五入后仍可能为 0（样本太短），此时由调用方决定
+    是报错还是退化成"无目的端"。
+    """
+    S = int(prompt_tokens)
+    f = float(dest_fraction)
+    if not (0.0 <= f < 1.0):
+        raise ValueError(
+            f"dest_fraction 必须落在 [0, 1)，得到 {dest_fraction}；"
+            "=1 意味着源段为空（无物可压），>1 会算出负长度。"
+        )
+    if S < 1:
+        raise ValueError(f"提示词长度为 {S}，无法切分")
+    n_dst = int(round(f * S))
+    return S - n_dst, n_dst
+
+
 @torch.no_grad()
 def score_choices(
     lm: LoadedModel,
@@ -295,6 +347,8 @@ def score_choices(
     budget_ratio: Optional[float] = None,
     compaction_mode: str = "identity",
     max_prompt_tokens: Optional[int] = None,
+    attn_hook: Optional[Any] = None,
+    dest_fraction: float = 0.0,
 ) -> Dict[str, Any]:
     """对一个样本的每个选项打分，返回正确选项与其得分。
 
@@ -302,16 +356,28 @@ def score_choices(
     （长度归一），这是长文 QA 评测里的常规做法。所有选项共用**同一份
     prefill 结果**（各自持一份副本），因此选项差异不会污染 prefill 计时。
 
-    两处实现细节是正确性的前提，不要"优化"掉：
+    四处实现细节是正确性的前提，不要"优化"掉：
 
     1. **每个选项一份 cache 副本。** 前缀只算一次（prefill 的代价是 O(S²)，
        不能按选项重算），但 `DynamicCache` 在前向中会**就地追加**新 token：
        若所有选项共用同一对象，第 2 个选项就会在"前缀 + 第 1 个选项的
        continuation"之上继续生成，选项之间的比较不再同源。
-    2. **必须显式传 position_ids。** 预算裁剪后 cache 长度为 B < S；若留空，
-       transformers 会把 continuation 的绝对位置算成 B..B+T-1 而不是
+    2. **必须显式传 position_ids。** 预算裁剪后 cache 长度会短于原文；若留空，
+       transformers 会把 continuation 的绝对位置算成"实际张量长度.."而不是
        S..S+T-1，RoPE 的相对距离整体错位，准确率会被系统性低估。
        （保留位置子集本身不改被保留 key 的表示，见模块文档。）
+    3. **源段与目的端本地段分开处理**（`dest_fraction > 0` 时）。目的端本地段
+       保持精确，且是唯一合法的条件化 query 来源 —— 拿被打分的 continuation
+       去条件化等于让压缩看见答案（见模块文档）。
+    4. **钩子路径下目的端前向不传源端 cache**（`past_key_values=None`）：
+       源端由钩子的 state 携带，传进去会让源端被算两遍，且钩子会抛错拦下。
+
+    Args:
+        attn_hook: `attention_hook.HookConfig` 或 None。给了就由钩子接管
+            注意力（源端由状态携带），此时 `dest_fraction` 必须 > 0 ——
+            否则没有目的端本地段，既无从构造条件化块，也就没有合法的
+            条件化 query 来源。
+        dest_fraction: 目的端本地段占提示词的比例（见 `prompt_split`）。
     """
     tok = lm.tokenizer
     device = lm.device
@@ -321,35 +387,83 @@ def score_choices(
     if max_prompt_tokens is not None:
         prompt_ids = prompt_ids[:, -max_prompt_tokens:]
     S = int(prompt_ids.shape[1])
+    n_src, n_dst = prompt_split(S, dest_fraction)
+    src_ids = prompt_ids[:, :n_src]
+    dst_ids = prompt_ids[:, n_src:] if n_dst > 0 else None
 
-    prefix = lm.model(input_ids=prompt_ids, use_cache=True)
-    cache = prefix.past_key_values
-    if budget_ratio is not None:
-        apply_kv_budget(cache, budget=max(1, int(round(budget_ratio * S))),
-                        mode=compaction_mode)
+    if n_src < 1:
+        raise ValueError(
+            f"dest_fraction={dest_fraction} 在 S={S} 上把源段压成 {n_src} 个 token："
+            "源段为空 ⇒ 没有可压缩的内容，'压缩后质量'与'不压缩'不再可比。"
+        )
 
-    scores: List[float] = []
-    for choice in sample.choices:
-        cont_ids = tok(choice, return_tensors="pt",
-                       add_special_tokens=False).input_ids.to(device)
-        if cont_ids.numel() == 0:
-            scores.append(float("-inf"))
-            continue
-        T = int(cont_ids.shape[1])
-        # 复用前缀：每个选项拿到裁剪后 cache 的**独立副本**（见函数文档 ①），
-        # 且必须显式给出绝对位置（见函数文档 ②）
-        past = copy.deepcopy(cache)
-        position_ids = torch.arange(S, S + T, device=device).unsqueeze(0)
-        out = lm.model(input_ids=cont_ids, past_key_values=past,
-                       use_cache=True, position_ids=position_ids)
-        logits = out.logits[0]                       # [T, V]
-        # 第 i 个 continuation token 由第 i-1 个位置的 logits 预测
-        prev = torch.cat([prefix.logits[0, -1:, :], logits[:-1, :]], dim=0)
-        lp = torch.log_softmax(prev.float(), dim=-1)
-        tgt = cont_ids[0]
-        scores.append(float(lp.gather(-1, tgt[:, None]).mean()))
+    hook_path = attn_hook is not None
+    if hook_path and n_dst < 1:
+        raise ValueError(
+            f"钩子路径要求目的端本地段非空，而 dest_fraction={dest_fraction} 在 "
+            f"S={S} 上算出 {n_dst} 个 token。目的端本地段同时承担两个角色："
+            "① 目的端自己的上下文（压掉它会低估准确率）；"
+            "② **唯一合法**的条件化 query 来源（用被打分的 continuation 去条件化"
+            "等于让压缩看见答案）。两条都不能缺，故这里拒绝执行而不是退化。"
+        )
+    if hook_path and budget_ratio is not None:
+        raise ValueError(
+            "钩子路径的预算由 attn_hook（HookConfig.budget / budget_ratio）给出；"
+            "同时再传 budget_ratio 会让'预算到底按谁算'变成猜。"
+            "请只保留一处声明。"
+        )
+    if hook_path and compaction_mode != "identity":
+        raise ValueError(
+            f"钩子路径自己完成构造（build_compact_kv），不接受 compaction_mode="
+            f"{compaction_mode!r}：那是 apply_kv_budget 的旋钮，两者作用在同一份 "
+            "cache 上会互相覆盖。请传 compaction_mode='identity'。"
+        )
+
+    if hook_path:
+        with _A.dcc_attention(lm.model, attn_hook) as st:
+            # ① 源段：只记录源端 K/V（输出不用）
+            st.source_phase()
+            lm.model(input_ids=src_ids, use_cache=True)
+            # ② 目的端探针：**这一段是 unique 合法的条件化 query 来源**
+            dest_pos = torch.arange(n_src, S, device=device).unsqueeze(0)
+            st.destination_phase(compacts="build")
+            probe = lm.model(input_ids=dst_ids, use_cache=True,
+                             position_ids=dest_pos)
+            base_logit = probe.logits[0, -1, :]
+            base_cache = probe.past_key_values        # 只含目的端本地段
+            # ③ 各选项：复用同一批条件化块（不得重建 —— 重建就用上了被打分的 token）
+            st.destination_phase(compacts="reuse")
+            scores = _score_continuations(
+                lm, sample.choices, base_cache, base_logit, S, device)
+            hook_summary = st.summary()
+    else:
+        prefix = lm.model(input_ids=src_ids, use_cache=True)
+        cache = prefix.past_key_values
+        base_logit = prefix.logits[0, -1, :]
+        if budget_ratio is not None:
+            # 只裁**源段**：目的端本地段保持精确，与钩子路径同结构（见模块文档）
+            apply_kv_budget(cache, budget=max(1, int(round(budget_ratio * n_src))),
+                            mode=compaction_mode)
+        if dst_ids is not None:
+            dest_pos = torch.arange(n_src, S, device=device).unsqueeze(0)
+            dest_out = lm.model(input_ids=dst_ids, past_key_values=cache,
+                                use_cache=True, position_ids=dest_pos)
+            cache = dest_out.past_key_values
+            base_logit = dest_out.logits[0, -1, :]
+        scores = _score_continuations(
+            lm, sample.choices, cache, base_logit, S, device)
+        hook_summary = None
 
     pred = int(max(range(len(scores)), key=lambda i: scores[i]))
+    # 预算一律按**源段**长度算：源段才是被压缩的对象。钩子路径的预算来自
+    # HookConfig（可能又是相对口径），故这里显式解析一次再落盘 —— 否则产物里
+    # 看不出"实际保留了多少条 key"，而那是读这张表的第一件事。
+    if hook_path:
+        budget_tokens: Optional[int] = int(attn_hook.resolve_budget(n_src))
+    elif budget_ratio is not None:
+        budget_tokens = max(1, int(round(budget_ratio * n_src)))
+    else:
+        budget_tokens = None
     return {
         "task": sample.task,
         "length_tag": sample.length_tag,
@@ -359,7 +473,41 @@ def score_choices(
         "correct": int(pred == sample.answer),
         "scores": scores,
         "prompt_tokens": S,
+        "source_tokens": int(n_src),
+        "dest_tokens": int(n_dst),
+        "budget_tokens": budget_tokens,
+        "compression_path": ("attn_hook" if hook_path else
+                             ("apply_kv_budget" if budget_ratio is not None else "none")),
+        "attn_hook": hook_summary,
     }
+
+
+def _score_continuations(lm, choices, cache, base_logit, S, device) -> List[float]:
+    """逐选项打分。所有选项都从**同一份前缀**的独立副本出发（见函数文档 ①）。
+
+    `base_logit` 是预测第一个 continuation token 的那个位置的 logits
+    （有目的端本地段时它来自目的端那一段，否则来自源段末尾）。
+    """
+    tok = lm.tokenizer
+    scores: List[float] = []
+    for choice in choices:
+        cont_ids = tok(choice, return_tensors="pt",
+                       add_special_tokens=False).input_ids.to(device)
+        if cont_ids.numel() == 0:
+            scores.append(float("-inf"))
+            continue
+        T = int(cont_ids.shape[1])
+        past = copy.deepcopy(cache)
+        position_ids = torch.arange(S, S + T, device=device).unsqueeze(0)
+        out = lm.model(input_ids=cont_ids, past_key_values=past,
+                       use_cache=True, position_ids=position_ids)
+        logits = out.logits[0]                       # [T, V]
+        # 第 i 个 continuation token 由第 i-1 个位置的 logits 预测
+        prev = torch.cat([base_logit.reshape(1, -1), logits[:-1, :]], dim=0)
+        lp = torch.log_softmax(prev.float(), dim=-1)
+        tgt = cont_ids[0]
+        scores.append(float(lp.gather(-1, tgt[:, None]).mean()))
+    return scores
 
 
 def evaluate(
@@ -368,9 +516,17 @@ def evaluate(
     budget_ratio: Optional[float] = None,
     compaction_mode: str = "identity",
     max_prompt_tokens: Optional[int] = None,
+    attn_hook: Optional[Any] = None,
+    dest_fraction: float = 0.0,
 ) -> Dict[str, Any]:
-    """对样本集评测，返回总体准确率与按任务/长度的分组准确率。"""
-    rows = [score_choices(lm, s, budget_ratio, compaction_mode, max_prompt_tokens)
+    """对样本集评测，返回总体准确率与按任务/长度的分组准确率。
+
+    钩子路径下**每条样本各建一个 state**（`score_choices` 内部开 `dcc_attention`
+    上下文）：源长逐样本变化，跨样本复用条件化块会被钩子以"源长变了"拦下 ——
+    那不是配置错误，而是"本该每条样本单独条件化"。
+    """
+    rows = [score_choices(lm, s, budget_ratio, compaction_mode, max_prompt_tokens,
+                          attn_hook=attn_hook, dest_fraction=dest_fraction)
             for s in samples]
     n = len(rows)
     acc = sum(r["correct"] for r in rows) / n if n else float("nan")
@@ -431,9 +587,61 @@ H0 接上后的结构（现行为）
 缓存做 continuation 前向，压缩的收益（更短的上下文）确实进入了打分。现在两条
 路的语义一致：都走「只对紧凑 KV 做注意力」。
 
+钩子路径（`attn_hook`，2026-09-21 接入）下的三段
+------------------------------------------------
+`apply_kv_budget` 那条路把裁剪后的 KV 留在 cache 里，所以 ③ 的 past 就是
+裁剪结果。钩子路径不行：源端由钩子的 state 携带（**紧凑块带 β 与 V 回归，
+表达不成普通 KV**），因此 ③ 的 past 传 `None`，源端只在钩子里消费。于是：
+
+    ① 源端构造（两臂共有）
+    ② 不裁 cache —— 紧凑化发生在钩子内部
+    ③ 目的端前向（past=None）：源块由 state 提供，本地块是本次 token
+
+同一路径下本模块**另开一个计时窗口**：钩子把条件化块构造在 ③ 内部，所以窗口
+含 `T_build`（源端侧代价，按 `_comm.PipelineTiming` 的分账口径它不该算进
+目的端的计算）。第二个窗口先建好块再只计时目的端前向（`compacts="reuse"`），
+于是两臂的**唯一变量是目的端注意力消费的 KV 长度**（dense = S，dcc = B）。
+E6 用这个窗口算 kernel-matched 的加速比，用第一个窗口算端到端的那个。
+
 边界不变：本常量只声明**量具是否灵敏**，不声明任何结论；README 层面「不得主张
 通信性能 / 多卡可扩展性 / 任务质量」的约束不受影响。
 """
+
+
+def _token_bound(lm: LoadedModel) -> int:
+    """生成随机输入 token 的上界（不含）。
+
+    优先用模型/分词器的**真实词表大小**。原实现写死 `randint(0, 1000)`：对
+    8B 级模型碰巧成立（词表 ≫ 1000），但在任何 vocab < 1000 的模型上会直接死在
+    `F.embedding`，报的是 `IndexError: index out of range` —— 症状指向 embedding，
+    真因在输入生成，排查时会往权重/配置上找。取真实词表后，小模型也能跑，
+    这条测量路径才谈得上"写完即验证"。
+    """
+    # 一律用 getattr 取：测试里的桩模型（`_StubLM`）没有 `tokenizer` 属性，
+    # 直接写 `lm.tokenizer` 会在**构造候选列表**时就抛 AttributeError，
+    # 而"这个桩没有词表"本该由下一行的回退兜住 —— 报错指着 tokenizer、真因
+    # 在候选列表求值顺序，症状与真因分离（上一轮 dest_len / --iters 同款形态）。
+    candidates = (
+        (getattr(lm, "tokenizer", None), "vocab_size"),
+        (getattr(getattr(lm, "model", None), "config", None), "vocab_size"),
+    )
+    for obj, attr in candidates:
+        v = getattr(obj, attr, None)
+        if isinstance(v, int) and v > 0:
+            return int(v)
+    return 1000
+
+
+def _peak_gb() -> float:
+    """当前设备的最大已分配显存（GB）；无 CUDA 时为 0.0。"""
+    if not torch.cuda.is_available():
+        return 0.0
+    return torch.cuda.max_memory_allocated() / (1 << 30)
+
+
+def _reset_peak() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
 
 @torch.no_grad()
@@ -447,6 +655,8 @@ def measure_prefill(
     compaction_mode: str = "identity",
     max_prompt_tokens: Optional[int] = None,
     dest_len: int = 0,
+    attn_hook: Optional[Any] = None,
+    seed: int = 42,
 ) -> Dict[str, Any]:
     """测量 prefill 延迟分布、吞吐与峰值显存。
 
@@ -460,7 +670,7 @@ def measure_prefill(
     前 `seq_len` 个属于源端（构造 KV），后 `dest_len` 个是目的端自己的 query。
     切成一段而不是造两份随机串，是为了让两臂面对完全相同的 token 序列。
 
-    `_one()`：
+    原生路径（`attn_hook=None`）的 `_one()`：
         ① `lm.model(src_ids, use_cache=True)`          —— 源端构造，两臂共有
         ② `apply_kv_budget(cache, B)`                  —— 仅压缩臂
         ③ `lm.model(dst_ids, past_key_values=cache, position_ids=...)   —— 目的端前向
@@ -472,75 +682,173 @@ def measure_prefill(
     ③ 会就地扩展传入的 cache（HF 的正常行为）。因为 ① 每轮都新建 cache，该
     扩展不会跨迭代累积，故各次采样相互独立。
 
+    钩子路径（`attn_hook` 非 None）
+    -------------------------------
+    ① 源端构造（两臂共有）；② 不动 cache（紧凑化在钩子内部）；③ 目的端前向
+    **past=None** —— 源端由钩子 state 携带（紧凑块带 β 与 V 回归，表达不成普通
+    KV）。本路径下**开两个计时窗口**：
+
+    - `prefill_ms_*`：① + 构造 + ③，即"端到端含构造"的口径；
+    - `dest_ms_*`：**只** ③，复用预先建好的条件化块。两臂在这个窗口里的唯一
+      差别是目的端注意力消费的 KV 长度 ⇒ 这是 kernel-matched 的量，
+      E6 用它算 `prefill_speedup_kernel_matched`。
+
+    两个窗口都要报：把含构造的那个当"机制收益"会低估，把不含构造的那个当
+    "端到端"会高估 —— 而两者的差别（T_build）已经落在产物里（`n_builds`）。
+
     Args:
-        dest_len: 目的端 query 长度。**压缩臂（budget_ratio 非 None）必须 > 0**。
+        dest_len: 目的端 query 长度。**压缩臂与钩子路径都必须 > 0**。
+        attn_hook: `attention_hook.HookConfig` 或 None。给了就走钩子路径，
+            此时 **`budget_ratio` 必须为 None**（预算归钩子配置）且
+            `compaction_mode` 必须是 `"identity"` —— 两处各写一份预算 /
+            两个旋钮作用在同一份 cache 上，都只会产生歧义。
+        seed: 生成输入的随机种子。**两臂必须用同一个 seed**：否则 dense 臂与
+            dcc 臂看到的 token 序列不同，配对性就没了（而"两臂唯一差别是 KV
+            长度"这条断言正是配对性的全部内容）。
 
     Raises:
-        ValueError: `budget_ratio` 非 None 而 `dest_len <= 0`。此时**拒绝执行**，
-            而不是返回一个结构上恒 <= 1 的加速比 —— 静默返回会把量具缺陷读成
-            方法缺陷，这正是 H0 未接时的失效模式。
+        ValueError: 压缩臂/钩子路径而 `dest_len <= 0`（此时 ③ 不会发生，窗口里
+            没有任何一次前向使用紧凑 KV ⇒ 加速比结构上恒 <= 1；静默返回会把
+            量具缺陷读成方法缺陷，这正是 H0 未接时的失效模式）。
+        ValueError: 钩子路径下同时给了 `budget_ratio` / 非 identity 的
+            `compaction_mode`。
     """
-    if budget_ratio is not None and int(dest_len) <= 0:
+    hook_path = attn_hook is not None
+    if (budget_ratio is not None or hook_path) and int(dest_len) <= 0:
         raise ValueError(
-            "压缩臂必须给出 dest_len > 0：否则 _one() 的 ③ 不会发生，"
-            "计时窗口里没有任何一次前向使用裁剪后的 KV，"
+            "压缩臂必须给出 dest_len > 0：否则 ③ 不会发生，"
+            "计时窗口里没有任何一次前向使用紧凑 KV，"
             "prefill_speedup 结构上恒 <= 1（H0 未接时的失效模式）。"
+        )
+    if hook_path and budget_ratio is not None:
+        raise ValueError(
+            "钩子路径的预算由 attn_hook（HookConfig.budget / budget_ratio）给出；"
+            "同时再传 budget_ratio 会让'预算到底按谁算'变成猜。请只保留一处声明。"
+        )
+    if hook_path and compaction_mode != "identity":
+        raise ValueError(
+            f"钩子路径自己完成构造（build_compact_kv），不接受 compaction_mode="
+            f"{compaction_mode!r}：那是 apply_kv_budget 的旋钮。请传 'identity'。"
         )
 
     device = lm.device
     total_len = int(seq_len) + max(0, int(dest_len))
-    ids = torch.randint(0, 1000, (batch_size, total_len), device=device)
+    # 显式给种子：两臂要看到**同一串** token，否则"唯一差别是 KV 长度"不成立。
+    # 生成固定在 CPU 上再做 device 搬运 —— torch 不允许 CPU generator 生成
+    # CUDA 张量（会报 Expected a 'cuda' device type for generator）。
+    gen = torch.Generator().manual_seed(int(seed))
+    ids = torch.randint(0, _token_bound(lm), (batch_size, total_len),
+                        generator=gen).to(device)
     src_ids = ids[:, : int(seq_len)]
     dst_ids = ids[:, int(seq_len):] if int(dest_len) > 0 else None
+    dst_pos = (None if dst_ids is None else
+               torch.arange(int(seq_len), int(seq_len) + int(dst_ids.shape[1]),
+                            device=device).unsqueeze(0).expand(batch_size, -1))
 
-    def _one() -> None:
-        # ① 源端构造（两臂共有）
-        out = lm.model(input_ids=src_ids, use_cache=True)
-        cache = out.past_key_values
-        # ② 压缩（仅压缩臂）。其产出必须被 ③ 消费，否则不该静默通过。
-        if budget_ratio is not None:
-            apply_kv_budget(cache,
-                            budget=max(1, int(round(budget_ratio * seq_len))),
-                            mode=compaction_mode)
-        # ③ 目的端：只对 cache 中的 KV 做注意力（H0 的收益载体）
-        if dst_ids is not None:
-            # position_ids 必须显式给出（2026-09-21 修）。裁剪后 cache 的
-            # get_seq_length() 返回的是**实际张量长度 B**（实测确认，不是原长 S），
-            # 缺省会让 dst 的 RoPE 位置从 B 起算：实测与正确位置差 4.9e-3，
-            # 而 dense 参照臂的路径差只有 9.7e-8 —— 差 5 个数量级。更关键的是
-            # dense 臂不裁剪、位置本就是 S..，于是两臂的**目的端位置不一致**，
-            # 「两臂唯一差别是 KV 长度」不再成立。这一条与 score_choices 早已
-            # 显式给 position_ids 的做法对齐（见其文档要点 ②）。
-            position_ids = torch.arange(
-                int(seq_len), int(seq_len) + int(dst_ids.shape[1]), device=device
-            ).unsqueeze(0).expand(batch_size, -1)
-            lm.model(input_ids=dst_ids, past_key_values=cache, use_cache=True,
-                     position_ids=position_ids)
-        del out
+    dest_note = (
+        "未测（原生路径：目的端与源端共用同一次前向，无法只对目的端计时）。"
+        "本列只在钩子路径下有意义。"
+    )
+    dest_samples: Optional[List[float]] = None
+    dest_peak_gb: Optional[float] = None
+    hook_summary: Optional[Dict[str, Any]] = None
 
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    samples = _env.benchmark_ms(_one, warmup=warmup, iters=iters)
+    if not hook_path:
+        def _one() -> None:
+            # ① 源端构造（两臂共有）
+            out = lm.model(input_ids=src_ids, use_cache=True)
+            cache = out.past_key_values
+            # ② 压缩（仅压缩臂）。其产出必须被 ③ 消费，否则不该静默通过。
+            if budget_ratio is not None:
+                apply_kv_budget(cache,
+                                budget=max(1, int(round(budget_ratio * seq_len))),
+                                mode=compaction_mode)
+            # ③ 目的端：只对 cache 中的 KV 做注意力（H0 的收益载体）
+            if dst_ids is not None:
+                # position_ids 必须显式给出（2026-09-21 修）。裁剪后 cache 的
+                # get_seq_length() 返回的是**实际张量长度 B**（实测确认，不是原长 S），
+                # 缺省会让 dst 的 RoPE 位置从 B 起算：实测与正确位置差 4.9e-3，
+                # 而 dense 参照臂的路径差只有 9.7e-8 —— 差 5 个数量级。更关键的是
+                # dense 臂不裁剪、位置本就是 S..，于是两臂的**目的端位置不一致**，
+                # 「两臂唯一差别是 KV 长度」不再成立。这一条与 score_choices 早已
+                # 显式给 position_ids 的做法对齐（见其文档要点 ②）。
+                lm.model(input_ids=dst_ids, past_key_values=cache, use_cache=True,
+                         position_ids=dst_pos)
+            del out
 
-    peak_gb = 0.0
-    if torch.cuda.is_available():
-        peak_gb = torch.cuda.max_memory_allocated() / (1 << 30)
+        _reset_peak()
+        samples = _env.benchmark_ms(_one, warmup=warmup, iters=iters)
+        peak_gb = _peak_gb()
+        hook_note = ("未接（原生 apply_kv_budget 路径）：源端 KV 留在 cache 里，"
+                     "紧凑化不发生，故此行的质量与 dcc_kv 方法论无关。")
+    else:
+        with _A.dcc_attention(lm.model, attn_hook) as st:
+            def _one_full() -> None:
+                st.source_phase()
+                lm.model(input_ids=src_ids, use_cache=True)
+                st.destination_phase(compacts="build")
+                lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos)
+
+            _reset_peak()
+            samples = _env.benchmark_ms(_one_full, warmup=warmup, iters=iters)
+            peak_gb = _peak_gb()
+
+            # 建好块给第二个窗口复用（这一次不计时）。必须重跑一遍而不是
+            # 沿用窗口 1 最后一次的块：窗口 1 的每轮都在 ③ 内部重建，末轮的块
+            # 与"下一个源端前向"没有关系，而窗口 2 不跑源端前向 —— 直接复用
+            # 会让"块对应的源"与"配置声明的源"不是同一次前向。
+            st.source_phase()
+            lm.model(input_ids=src_ids, use_cache=True)
+            st.destination_phase(compacts="build")
+            lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos)
+            st.destination_phase(compacts="reuse")
+
+            def _one_dest() -> None:
+                lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos)
+
+            _reset_peak()
+            dest_samples = _env.benchmark_ms(_one_dest, warmup=warmup, iters=iters)
+            dest_peak_gb = _peak_gb()
+            hook_summary = st.summary()
+        dest_note = (
+            "只目的端前向，复用预先建好的条件化块 ⇒ 两臂在这个窗口里的唯一差别是"
+            "**目的端注意力消费的 KV 长度**（dense 臂 = S，dcc 臂 = B）。"
+            "不含 T_build（构造在窗口外）、不含源端构造。"
+            "kernel-matched 的加速比必须用这一列算 —— 用含构造的那一列会把"
+            "源端侧代价算进目的端。"
+        )
+        hook_note = ("已接（src/distributed/attention_hook.py）：源端由钩子 state "
+                     "携带，目的端前向 past=None，紧凑块带 β 与 V 回归。")
 
     med = sorted(samples)[len(samples) // 2]
     tokens = batch_size * seq_len
-    return {
+    out: Dict[str, Any] = {
         "seq_len": seq_len,
         "dest_len": int(dest_len),
         "batch_size": batch_size,
+        "seed": int(seed),
         "prefill_ms_samples": samples,
         "prefill_ms_median": med,
         "tokens_per_s_median": (tokens / (med / 1000.0)) if med > 0 else float("nan"),
         "peak_memory_gb": peak_gb,
         "budget_ratio": budget_ratio,
         "compaction_mode": compaction_mode,
+        "attn_hook": hook_summary,
+        "attn_hook_note": hook_note,
+        "dest_ms_samples": dest_samples,
+        "dest_ms_median": (None if dest_samples is None
+                           else sorted(dest_samples)[len(dest_samples) // 2]),
+        "dest_peak_memory_gb": dest_peak_gb,
+        "dest_window_note": dest_note,
+        "budget_tokens": (None if budget_ratio is None
+                          else max(1, int(round(budget_ratio * seq_len)))),
+        "budget_tokens_resolved": (None if hook_summary is None
+                                   else hook_summary.get(
+                                       "resolved_budget_by_source_len", {})),
         "kv_bytes_full": 2 * lm.num_layers * lm.num_kv_heads * lm.head_dim
                          * seq_len * batch_size * _env.dtypes_for(lm.precision).itemsize,
     }
+    return out
 
 
 def kv_cache_bytes(lm: LoadedModel, seq_len: int, keep_ratio: float = 1.0,
@@ -557,6 +865,7 @@ __all__ = [
     "apply_kv_budget",
     "EvalSample",
     "load_eval_file",
+    "prompt_split",
     "score_choices",
     "evaluate",
     "measure_prefill",

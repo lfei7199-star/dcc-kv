@@ -202,16 +202,19 @@ def test_t6_h2_pairs_with_collapsed_baseline_row():
 
     修复前 h2_points_from_rows 用 sync_modes[0] 去查，配对点恒为 0。
 
-    2026-09-21 补：prefill 的分子改为 **dense**（论文 §7.5 把 H2 拆成互不
-    重叠的三段：与精确注意力不劣 / 相对共享压缩更高 / prefill 更快），所以
-    dense 行也成了配对必需项。三个方法的 prefill 取值**刻意两两不同**
-    （dcc 100 / shared 120 / dense 110）：若分子取回 shared 会得 1.2、
-    取 dcc 自己得 1.0，只有 dense 给出 1.1 —— 分子取错谁，这里立刻看得出来。
+    2026-09-21 两次口径修正（都在这条用例里立锚）：
+      * 分子先由 shared 改为 dense（论文 §7.5 把 H2 拆成互不重叠的三段：
+        与精确注意力不劣 / 相对共享压缩更高 / prefill 更快）；
+      * 再改为 **kernel-matched**（同一个算子核）。故 dcc 行必须带
+        `dest_ms_median` 与 `dest_ms_median_dense_kernel` 这一对量。
+    dcc 行的端到端 prefill(100) 与同核那一对（分母 10 / 分子 12）刻意不同值：
+    若有人拿 native（dense 110 / dcc 100 = 1.1）顶替，这里会得 1.1 而不是 1.2。
     """
     from experiments.gpu import e6_main_table as E
     rows = [
         {"method": "dcc_kv", "model": "m", "context_length": 4096,
-         "sync_async": "sync", "accuracy": 0.70, "prefill_ms_median": 100.0},
+         "sync_async": "sync", "accuracy": 0.70, "prefill_ms_median": 100.0,
+         "dest_ms_median": 10.0, "dest_ms_median_dense_kernel": 12.0},
         {"method": "kv_budget_shared", "model": "m", "context_length": 4096,
          "sync_async": E.SYNC_MODE_NA, "accuracy": 0.60, "prefill_ms_median": 120.0},
         {"method": "dense", "model": "m", "context_length": 4096,
@@ -220,13 +223,44 @@ def test_t6_h2_pairs_with_collapsed_baseline_row():
     pts = E.h2_points_from_rows(_e6_ns(), rows)
     assert len(pts) == 1, "H2 配对又断了"
     assert pts[0].quality_gain_pp == pytest.approx(10.0)
-    assert pts[0].prefill_speedup == pytest.approx(1.1)  # dense/dcc = 110/100
+    assert pts[0].prefill_speedup == pytest.approx(1.2)  # kernel-matched = 12/10
     assert pts[0].quality_comparable is None   # 未测出容差 ⇒ 记 unresolved，不是 False
 
     out = E.compute_h2(_e6_ns(), rows)
     assert out["h2_n_lengths"] == 1
     assert out["h2_unresolved_lengths"] == [4096]   # 分辨率不足，不是"未达标"
     assert out["h2_n_failed"] == 0
+
+
+def test_t6_h2_pairs_when_the_dcc_axis_is_folded_too():
+    """单卡（`--ranks` 1）下表里写出的 **dcc_kv 行自己**的 sync 也是 "n/a"。
+
+    2026-09-21 把折叠判据从「单卡方法」推广成「本次运行真的没有多卡」之后，
+    dcc_kv 的行也会被折叠；而 `h2_points_from_rows` 当时仍用
+    `a.sync_modes[0]`（"sync"）去查它 ⇒ **配对恒为空、H2 永远判不了**。
+
+    这是 `bee3388` 给 `kv_budget_shared` 修过的同一个坑（那次留下
+    `find_axis_free`）—— 在 dcc_kv 身上又踩了一次，且此前所有桩测试的 dcc 行
+    都写着 "sync"，覆盖不到。故本用例把 dcc 行写成 "n/a" 来钉住这一点。
+    """
+    from experiments.gpu import e6_main_table as E
+    rows = [
+        {"method": "dcc_kv", "model": "m", "context_length": 4096,
+         "sync_async": E.SYNC_MODE_NA, "accuracy": 0.70,
+         "prefill_ms_median": 100.0,
+         "dest_ms_median": 10.0, "dest_ms_median_dense_kernel": 12.0},
+        {"method": "kv_budget_shared", "model": "m", "context_length": 4096,
+         "sync_async": E.SYNC_MODE_NA, "accuracy": 0.60,
+         "prefill_ms_median": 120.0},
+    ]
+    a = _e6_ns(ranks=1)
+    assert E.dcc_row_modes(a) == [E.SYNC_MODE_NA], "单卡下 dcc 的轴应当折叠"
+    pts = E.h2_points_from_rows(a, rows)
+    assert len(pts) == 1, "dcc 行折叠后配对断了（同一个坑第三次）"
+    assert pts[0].quality_gain_pp == pytest.approx(10.0)
+    assert pts[0].prefill_speedup == pytest.approx(1.2)
+    # 真起了多卡时仍按 sync_modes[0] 查（与旧行为一致）
+    assert E.dcc_row_modes(_e6_ns(ranks=2)) == ["sync", "async"]
 
 
 def test_t6_h2_absent_dcc_row_still_no_points():

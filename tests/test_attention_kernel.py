@@ -380,3 +380,74 @@ def test_dense_causal_mask_supports_leading_dims():
 
     with pytest.raises(ValueError, match="query_positions"):
         dense_attention(q, k, v, causal=True, query_positions=torch.arange(Lq - 1))
+
+
+def test_dcc_kv_attention_causal_policies_are_decoupled():
+    """本地块与远端块的因果策略是**两件独立的事**，必须能分别指定。
+
+    踩过的形态（2026-09-21，接 H0 的钩子时暴露）：本函数原先只有
+    `query_positions` 一个开关 —— 给了它，本地**和**远端都做因果掩码；不给，
+    两边都全可见。而注意力的真实语义是第三种组合：**源块整体位于目的端 query
+    之前 ⇒ 对它全可见；本地块是同一段序列内部 ⇒ 因果**。旧接口表达不出它，
+    于是"远端也做因果"会把源 key 按 `selected_indices`（RMS 序，不是位置序）
+    当位置前缀切掉一部分 —— 形状与量级都正常，只有数值偏。
+
+    缺省推导（`None`）必须与旧版**逐位**一致，本锚点同时守这一条。
+    """
+    torch.manual_seed(0)
+    d, Lq, n_remote, n_local = 4, 4, 6, 4
+    Q = torch.randn(Lq, d, dtype=torch.float64)
+    R = torch.randn(n_remote, d, dtype=torch.float64)
+    VR = torch.randn(n_remote, d, dtype=torch.float64)
+    L = torch.randn(n_local, d, dtype=torch.float64)
+    VL = torch.randn(n_local, d, dtype=torch.float64)
+    qp = torch.arange(Lq)                      # 本地块的索引空间：0..Lq-1
+    sc = default_scale(d)
+    blk = [identity_compact(R, VR)]
+
+    def _ref(local_causal, remote_causal):
+        """独立参照：显式 matmul 写开，不走本模块的核。"""
+        lr = (Q @ R.T) * sc
+        ll = (Q @ L.T) * sc
+        pos = torch.arange(n_local).reshape(1, -1)
+        if local_causal:
+            ll = ll.masked_fill(pos > qp.reshape(-1, 1), float("-inf"))
+        if remote_causal:
+            rpos = torch.arange(n_remote).reshape(1, -1)
+            lr = lr.masked_fill(rpos > qp.reshape(-1, 1), float("-inf"))
+        p = torch.softmax(torch.cat([lr, ll], dim=-1), dim=-1)
+        return p @ torch.cat([VR, VL], dim=0)
+
+    # ① 新增的组合：远端全可见 + 本地因果（钩子要的就是这个）
+    got = dcc_kv_attention(
+        Q, blk, local_keys=L, local_values=VL,
+        query_positions=qp, local_causal=True, remote_causal=False)
+    dev = (got - _ref(True, False)).abs().max().item()
+    assert dev < 1e-12, f"解耦后的组合与显式参照差 {dev:.3e}"
+
+    # ② 另外两种组合必须给出**明显不同**的数，否则这条锚点没有判别力
+    both_visible = dcc_kv_attention(
+        Q, blk, local_keys=L, local_values=VL,
+        query_positions=None, local_causal=False, remote_causal=False)
+    both_causal = dcc_kv_attention(
+        Q, blk, local_keys=L, local_values=VL,
+        query_positions=qp, local_causal=True, remote_causal=True)
+    assert (got - _ref(False, False)).abs().max().item() > 1e-3,         "本地全可见与本地因果应当明显不同"
+    assert (both_visible - _ref(False, False)).abs().max().item() < 1e-12
+    assert (both_causal - _ref(True, True)).abs().max().item() < 1e-12
+    assert (got - both_causal).abs().max().item() > 1e-3,         "远端做因果与远端全可见应当明显不同"
+
+    # ③ 缺省推导必须与旧版逐位一致（不逐位就不算"兼容"）
+    assert torch.equal(
+        dcc_kv_attention(Q, blk, local_keys=L, local_values=VL, query_positions=qp),
+        both_causal), "缺省推导改动了旧行为（给 query_positions ⇒ 两边都因果）"
+    assert torch.equal(
+        dcc_kv_attention(Q, blk, local_keys=L, local_values=VL),
+        both_visible), "缺省推导改动了旧行为（不给 ⇒ 两边都全可见）"
+
+    # ④ 要因果就得给位置：只给开关不给位置必须报错（否则静默退化成全可见）
+    with pytest.raises(ValueError, match="local_causal=True"):
+        dcc_kv_attention(Q, blk, local_keys=L, local_values=VL,
+                         local_causal=True, remote_causal=False)
+    with pytest.raises(ValueError, match="remote_causal=True"):
+        dcc_kv_attention(Q, blk, local_keys=L, local_values=VL, remote_causal=True)

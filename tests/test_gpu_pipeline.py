@@ -31,6 +31,7 @@
 """
 from __future__ import annotations
 
+import ast
 import itertools
 import pathlib
 from typing import List, Tuple
@@ -329,32 +330,51 @@ def _ns(**kw):
 
 
 def test_e6_sync_axis_applies_only_to_multi_device_methods() -> None:
-    """sync/async 的自变量资格由"是否有跨设备通信"决定，不是写死的。"""
+    """折叠判据是**两个**条件的合取：既有跨设备通信，本次又真的起了多卡。
+
+    只满足前半个（2026-09-20 的旧判据）会在单卡模拟下凭空造出这条轴：
+    `dcc_kv` 的 `gpu_required` 是 2，而 `--dcc-world` 只是把源序列切段，
+    `gpu_count_observed` 仍是 1 ⇒ 生成的两行会**逐位相同**。
+    """
     e6 = _e6_module()
-    assert e6.sync_axis_applies("dense") is False
-    assert e6.sync_axis_applies("kv_budget_shared") is False
+    single_card = _ns(ranks=1)
+    two_cards = _ns(ranks=2)
+    # 单卡方法：无论几卡都没有这条轴
+    for m in ("dense", "kv_budget_shared"):
+        assert e6.sync_axis_applies(m, single_card) is False, m
+        assert e6.sync_axis_applies(m, two_cards) is False, m
+    # 多卡方法：只有本次真的起了多卡才算自变量
     for m in ("dcc_kv", "ring", "apb", "fastkv_official"):
-        assert e6.sync_axis_applies(m) is True, m
+        assert e6.sync_axis_applies(m, two_cards) is True, m
+        assert e6.sync_axis_applies(m, single_card) is False, m
 
 
 def test_e6_planned_points_counts_sync_axis_per_method() -> None:
-    """计划点数按各方法自身的轴累加：单卡方法的 sync 轴只贡献 1。
+    """计划点数按各方法自身的轴累加：折叠轴的方法只贡献 1。
 
     回归锚点：旧式 `n_models * n_ctx * n_sync * n_methods` 会把"永远不会被生成
     的数据点"算进计划数，计划数与实测数的差额会被误读成"漏跑"。
+
+    2026-09-21 补：折叠判据从「单卡方法」推广成「**本次运行没有真的用多卡**」。
+    `--ranks` 默认 1 ⇒ 单卡模拟下 `dcc_kv` 的 sync 轴同样不存在。
     """
     e6 = _e6_module()
     a = _ns(models=["m"], context_lengths=[4096, 8192],
             sync_modes=["sync", "async"], methods=["dense", "dcc_kv"])
-    # dense: 1 × 2 × 1 = 2（轴折叠）; dcc_kv: 1 × 2 × 2 = 4（轴展开）
-    assert e6.planned_points(a) == 6
-    # 旧口径：1 × 2 × 2 × 2 = 8 —— 多算了 2 个
+    # 单卡：两个方法都折叠 ⇒ 1 × 2 × 1 × 2 = 4
+    assert e6.planned_points(a) == 4
+    # 旧口径：1 × 2 × 2 × 2 = 8 —— 多算了 4 个永不生成的点
     assert e6.planned_points(a) != 8
 
-    # 六个方法全选时：4 个多卡方法展开、2 个单卡方法折叠
-    full = e6.planned_points(_ns())
+    # 真的起了多卡：dcc_kv 的轴展开 ⇒ 1 × 2 × (1 + 2) = 6
+    a2 = _ns(models=["m"], context_lengths=[4096, 8192],
+             sync_modes=["sync", "async"], methods=["dense", "dcc_kv"], ranks=2)
+    assert e6.planned_points(a2) == 6
+
+    # 六个方法全选：单卡全折叠；双卡时 4 个多卡方法展开、2 个单卡方法折叠
+    assert e6.planned_points(_ns()) == 1 * 2 * 6
     naive = 1 * 2 * 2 * 6
-    assert full == naive - 1 * 2 * (2 - 1) * 2
+    assert e6.planned_points(_ns(ranks=2)) == naive - 1 * 2 * (2 - 1) * 2
 
 
 def test_e6_single_device_rows_use_na_not_a_fake_sync_mode() -> None:
@@ -368,8 +388,132 @@ def test_e6_single_device_rows_use_na_not_a_fake_sync_mode() -> None:
            / "experiments" / "gpu" / "e6_main_table.py").read_text(encoding="utf-8")
     assert '"sync_mode_applicable": False' not in src, "标注又被写死了"
     # 三处：measure_point、blocked_point、主循环的 except 分支
-    assert src.count('"sync_mode_applicable": sync_axis_applies(method)') == 3
+    assert src.count('"sync_mode_applicable": sync_axis_applies(method, a)') == 3
     assert '[SYNC_MODE_NA]' in src, "主循环没有折叠该轴"
+    # 折叠判据必须带本次实参：不带就成了"只看 gpu_required"，单卡模拟下
+    # dcc_kv 会被误判为"有这条轴"（见 planned_points 与 sync_axis_applies）
+    assert "sync_axis_applies(method)" not in src
+    assert "sync_axis_applies(m)" not in src
+
+
+# ============================================================================
+# E6：H0 接线本身（2026-09-21）—— 「表里可测」必须等于「代码真的接了」
+# ============================================================================
+
+def test_e6_dcc_row_is_wired_to_the_hook() -> None:
+    """结构锚点：`dcc_kv` 行必须**真的**把 `HookConfig` 传下去。
+
+    只把 `measurable` 翻成 True 而不接线，会得到一张"看起来测得出数"、实际
+    仍走 `apply_kv_budget` 的表 —— 那时质量差恒为 0，而它会被读成
+    "DCC-KV 与共享压缩质量相当"。所以这里断言的是**接线**，不是"能跑起来"。
+    """
+    e6 = _e6_module()
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "experiments" / "gpu" / "e6_main_table.py").read_text(encoding="utf-8")
+    assert "_A.HookConfig(" in src, "没有构造钩子配置"
+    assert 'method == "dcc_kv"' in src, "没有 dcc_kv 分支"
+    # 两个入口各一次：measure_prefill（计时）与 evaluate（质量）
+    assert src.count("attn_hook=hook") == 2
+    # 评测必须把同一份源/目的端切分传下去，否则质量差里混进预算不对齐
+    assert "dest_fraction=a.dest_fraction" in src
+    # 钩子路径的预算归 HookConfig（`_hf` 会对"两处都声明"直接报错）
+    assert "budget_ratio=a.budget_ratio," in src
+    # 缺 --dcc-world 时拒绝执行，而不是猜一个段数
+    assert '"dcc_kv" in a.methods and a.dcc_world is None' in src
+
+
+def test_e6_measure_point_passes_the_hook_to_both_entry_points() -> None:
+    """AST 锚点：`measure_point` 内对两个 `_hf` 入口的调用都带 `attn_hook=`。
+
+    源码级守卫一律建在**结构**上（本仓库纪律）：`attn_hook=hook` 这串字符
+    出现在别处（例如注释）也能让上面那条通过，而 AST 锚点只看真实的调用。
+    """
+    e6 = _e6_module()
+    tree = ast.parse(pathlib.Path(e6.__file__).read_text(encoding="utf-8"))
+    fns = [n for n in ast.walk(tree)
+           if isinstance(n, ast.FunctionDef) and n.name == "measure_point"]
+    assert len(fns) == 1, "measure_point 的定义数不是 1"
+    seen = {}
+    for call in [n for n in ast.walk(fns[0]) if isinstance(n, ast.Call)]:
+        f = call.func
+        if not isinstance(f, ast.Attribute):
+            continue
+        base = f.value.id if isinstance(f.value, ast.Name) else None
+        if base == "_hf" and f.attr in ("measure_prefill", "evaluate"):
+            seen.setdefault(f.attr, []).append(
+                {k.arg: k.value for k in call.keywords if k.arg})
+    assert set(seen) == {"measure_prefill", "evaluate"}, sorted(seen)
+
+    # 断言建在**取值**上，不建在"这个词有没有出现"上：后者在
+    # `dest_fraction=0.0`、`attn_hook=None` 这类变异下照样通过（实测过）。
+    for name, kwsets in seen.items():
+        for kws in kwsets:
+            v = kws.get("attn_hook")
+            assert isinstance(v, ast.Name) and v.id in ("hook", "dense_hook"), (
+                name, "attn_hook 必须绑定到钩子配置，实测 "
+                + (ast.dump(v) if v is not None else "缺该关键字"))
+    assert len(seen["evaluate"]) == 1
+    d = seen["evaluate"][0].get("dest_fraction")
+    assert isinstance(d, ast.Attribute) and d.attr == "dest_fraction", (
+        "evaluate 必须拿到与计时同一份源/目的端切分（a.dest_fraction），实测 "
+        + (ast.dump(d) if d is not None else "缺该关键字"))
+
+
+def test_e6_timing_and_quality_share_the_same_split() -> None:
+    """计时路径的源长必须与评测路径同源（都走 `_hf.prompt_split`）。
+
+    实测踩到：计时侧把**整条** ctx_len 当源端再另加 dest_len，于是它压缩的源长
+    是 ctx_len、评测压缩的是 (1-f)·ctx_len —— 同一行里两个不同的压缩设置，
+    产物里的 `budget_tokens_resolved` 对不上质量那一侧（计时报 32、实际 24），
+    而"两臂唯一差别是 KV 长度"这条配对性也建在了一个不是评测所用的源上。
+    """
+    e6 = _e6_module()
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "experiments" / "gpu" / "e6_main_table.py").read_text(encoding="utf-8")
+    assert "_hf.prompt_split(ctx_len, a.dest_fraction)" in src
+    assert "a.dest_fraction * ctx_len" not in src, "又在两处各算一遍切分"
+    assert "source_len_by_context" in src, "payload 里的切分表也要同源"
+
+
+def test_e6_kernel_matched_speedup_refuses_none_instead_of_guessing() -> None:
+    """kernel-matched 加速比：缺任一端、或分母非正 ⇒ None（**不是** 0/1）。
+
+    None 与 0.0 / 1.0 是三个不同的意思。混用会让"没测出来"看起来像
+    "测出来是没有收益"，而这一列正是 H2 的第二个合取项。
+    """
+    e6 = _e6_module()
+    K = e6._kernel_matched_speedup
+    assert K({"dest_ms_median": 10.0,
+              "dest_ms_median_dense_kernel": 12.0}) == pytest.approx(1.2)
+    assert K({"dest_ms_median": 10.0}) is None            # 缺分子
+    assert K({"dest_ms_median_dense_kernel": 12.0}) is None   # 缺分母
+    assert K({}) is None
+    assert K({"dest_ms_median": 0.0,
+              "dest_ms_median_dense_kernel": 12.0}) is None   # 分母非正
+    assert K({"dest_ms_median": 10.0,
+              "dest_ms_median_dense_kernel": float("nan")}) is None
+    assert K({"dest_ms_median": 10.0,
+              "dest_ms_median_dense_kernel": float("inf")}) is None
+
+
+def test_e6_dcc_world_has_no_default_and_speedup_columns_are_declared() -> None:
+    """`--dcc-world` 无默认值；两列加速比各自有口径声明（不得互相冒充）。"""
+    e6 = _e6_module()
+    a = e6.build_parser().parse_args(["--plan"])
+    assert a.dcc_world is None, "--dcc-world 又有了默认值（= 没人声明过的假设）"
+    assert a.dcc_budget_mode == "per_edge", "主口径必须是 per_edge"
+    assert a.ranks == 1, "--ranks 默认必须是 1（默认单卡）"
+    assert a.lambda_beta is None, "未给时应回落到源码默认，而不是在 CLI 里再抄一份"
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "experiments" / "gpu" / "e6_main_table.py").read_text(encoding="utf-8")
+    assert '"prefill_speedup_columns"' in src, "payload 里没有两列口径声明"
+    assert "prefill_speedup_numerator" not in src, "旧的单列说法还在，会与两列冲突"
+    assert "attach_prefill_speedups(a, rows)" in src, "没有补 native 列的那一步"
+    # native 必须在 compute_h2 之前补好（H2 读 kernel-matched，但两列都落盘）
+    i_attach = src.index("attach_prefill_speedups(a, rows)")
+    i_h2 = src.index('"h2": compute_h2(a, rows),')
+    assert i_attach < i_h2, "补列的调用晚于 compute_h2"
 
 
 # ============================================================================

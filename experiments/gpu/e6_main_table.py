@@ -26,6 +26,43 @@
 因此本脚本对这类方法**折叠**该轴：只生成一行，`sync_async` 记为 `n/a`；
 `n_points_planned` 也按每个方法各自的轴累加，而不是用「方法数 × 同步模式数」一把乘。
 
+⚠️ **2026-09-21 补**：折叠的判据从「单卡方法」推广成「**本次运行没有真的用多卡**」。
+`dcc_kv` 的 `gpu_required` 是 2，但 `--dcc-world` 是**单卡模拟**（把源序列切成 W 段
+来模拟 W 个源端设备），跑起来 `gpu_count_observed` 仍是 1，**没有第二次设备参与**
+⇒ sync/async 这条轴在本表里同样不存在。若照 `gpu_required>1` 生成两行，两行会
+逐位相同 —— 那正是本节开头要避免的误读。故：
+
+    sync_axis_applies(method, a) = (gpu_required > 1) and (--ranks > 1)
+
+`--ranks` 默认 1，且**声称 >1 时本脚本会检查进程组**（没真的起多进程就直接
+以闸门退出码拒绝），免得"声明多卡、实际单卡"把轴凭空造出来。
+
+dcc_kv 行的 prefill 加速比有**两列**，各自命名、不得互相冒充
+---------------------------------------------------------
+H0 接上后，`dcc_kv` 行的目的端前向走钩子（源端由 state 携带、紧凑块带 β 与 V
+回归）。于是这条比值可以有两种分子，**它们回答的不是同一个问题**：
+
+    prefill_speedup_kernel_matched = 钩子dense臂的目的端耗时 / 钩子dcc臂的目的端耗时
+        —— 两臂走**同一个算子核**（`attention_kernel` 的显式路径），唯一变量是
+           目的端注意力消费的 KV 长度（dense = S，dcc = B）。
+           **H2 的第二个合取项消费这一列**：它测的是机制。
+    prefill_speedup_native = dense 行的端到端 prefill / dcc 行的端到端 prefill
+        —— 分子分母**不是同一个核**（SDPA 融合核 vs 显式核），而且还差着构造
+           代价与源端缓存是否留在 past 里。它是"我们的实现 vs 精确注意力"的
+           端到端数，**含实现差距**，不得当作机制收益。
+
+两列各自的产处（避免"哪一列缺了就静默降级"）
+------------------------------------------
+`prefill_speedup_kernel_matched` 的分子与分母**都在 dcc_kv 行内部测出**
+（`measure_point` 对同一份输入分别跑一次钩子 dense 臂与钩子 dcc 臂），
+因此它不依赖别的行是否在表里 —— H2 消费的正是这一列。
+`prefill_speedup_native` 需要 dense 行的端到端耗时，是**跨行**的量，
+由 `attach_prefill_speedups()` 在全部行收齐后补齐（必须在 `compute_h2`
+之前调用）；两列都会落进每一行产物，并各自带口径说明。
+
+**一列缺失时不得用另一列顶替**：kernel-matched 算不出时 H2 的那一格记
+unresolved，绝不回落到 native 列 —— 那正是"两列互冒充"。
+
 用法
 ----
     # 任何机器上都能跑：打印完整网格与每个方法的前置条件
@@ -42,6 +79,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import pathlib
 import sys
 import traceback
@@ -55,6 +93,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from experiments.common import report as R      # noqa: E402
 from experiments.gpu import _env, _hf            # noqa: E402
+from src.distributed import attention_hook as _A  # noqa: E402
 
 SCRIPT = "experiments/gpu/e6_main_table.py"
 
@@ -93,30 +132,39 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
             "（原 blocker「E6 的注意力钩子未接」已关闭：2026-09-21 的 H0 已接 —— "
             "measure_prefill 的压缩臂新增目的端前向（dest_len），裁剪后的 KV "
             "现在真的进入计时窗口。）",
-            "仍需：把该算子接进 measure_point 的**方法行**。当前 dcc_kv / "
-            "fastkv_official / apb 三行都还没走各自的真实链路。",
+            "仍需：把该算子接进 measure_point 的**方法行**。"
+            "（2026-09-21 补：dcc_kv 那行已接（attention_hook），"
+            "本行与 apb 行仍未接 —— 三行不再同状态。）",
         ],
     },
     "dcc_kv": {
-        "measurable": False,
+        "measurable": True,
         "gpu_required": 2,
-        "desc": "DCC-KV（逐边条件化 + 异步 All-to-Allv）",
+        "desc": "DCC-KV（逐边条件化 + 紧凑 KV 注意力；源端切分为单卡模拟）",
+        "impl": ("attn_hook: src/distributed/attention_hook.py（build_compact_kv + "
+                 "attention_kernel.dcc_kv_attention）"),
         "blockers": [
             "（原 blocker「CompactKV → GPU attention kernel 缺失」已关闭："
-            "src/dcc_kv_ref/attention_kernel.py 提供 compact_kv_attention。"
-            "原 blocker「异步流水无 GPU 入口」亦已关闭："
+            "src/dcc_kv_ref/attention_kernel.py 提供 compact_kv_attention。）",
+            "（原 blocker「异步流水无 GPU 入口」已关闭："
             "experiments/gpu/_forward.py 的 pipelined_attention。）",
-            "（原 blocker「E6 注意力钩子未接」亦已关闭：2026-09-21 H0 —— "
-            "measure_prefill 的压缩臂含目的端前向，裁剪后的 KV 真的进计时窗口。）",
-            "**仍未接：方法实现本身。** measure_point 对 dcc_kv 与 "
-            "kv_budget_shared 走的是**同一条** apply_kv_budget（共享裁剪）路径 —— "
-            "没有目的端条件化构造，也没有 G2 的 pipelined_attention。二者质量差"
-            "会恒为 0，H2 的 quality_gain 无从谈起。翻 measurable 之前必须让 "
-            "dcc_kv 行改走 build_compact_kv + _forward.pipelined_attention 的真实链路。"
-            "（2026-09-21 补：所需**工具已就绪** —— src/distributed/attention_hook.py "
-            "的 dcc_attention 上下文管理器 + HookConfig(dcc_world=...)，本机 tiny Llama "
-            "端到端验证到 ULP 级；尚未接进本脚本的方法行，E6 也还没有 --dcc-world 参数。）",
+            "（原 blocker「E6 注意力钩子未接」已关闭：2026-09-21 H0。"
+            "原 blocker「方法实现本身未接」亦已关闭：2026-09-21 稍后，"
+            "measure_point 的 dcc_kv 行改走 attention_hook —— 源端由钩子 state 携带，"
+            "紧凑块经 build_compact_kv 目的端条件化构造，注意力走 "
+            "dcc_kv_attention（即 G2 `_comp` 闭包的同一段计算）。）",
+            "**仍未满足预登记条件的字面部分**：G2 的 pipelined_attention 用**真** "
+            "dist.all_to_all_single，单卡（本脚本的观测口径 gpu_count_observed=1）下"
+            "它退化成一次本地拷贝、chunks_effective=1，**没有可重叠窗口**。"
+            "故本表对 dcc_kv **折叠 sync/async 轴**，产物里 sync_async 记 n/a；"
+            "async 的代价与收益只在 A5/E5 上测，不在这张表里。"
+            "**2026-09-21 记录**：此条是对预登记表述（原文写「走 G2 的 "
+            "pipelined_attention」）的**口径修正**，不是条件已满足 —— 修正理由与"
+            "原文一并留在 docs/gpu_execution_plan.md 与 commit_log.md。",
             "构造链路的 CUDA 可用性待 GPU 机实测（G6 未做；静态审计不能替代实测）。",
+            "单卡模拟**不体现逐边条件化的代价与收益**（所有源段看到同一批目的端 "
+            "query ⇒ 与共享压缩在数值上不可区分），见钩子 summary 的 "
+            "conditionalization_marginal_available=False。",
         ],
     },
     "ring": {
@@ -149,17 +197,37 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
 SYNC_MODE_NA = "n/a"
 
 
-def sync_axis_applies(method: str) -> bool:
-    """sync / async 是否是该方法的自变量。
+def ranks_exercised(a: argparse.Namespace) -> int:
+    """本次运行**真的**用到了几个 rank（见模块文档的同步轴折叠一节）。
 
-    判据是**该方法是否存在跨设备通信**，即它是否要求多卡
-    （`METHOD_SPECS[...]["gpu_required"] > 1`）。单卡方法没有可异步重叠的通信，
-    该轴对它不构成自变量 —— 给它生成两行只会得到两行逐位相同的数。
-
-    从 `gpu_required` 推导而不是写死 False：写死会在 dcc_kv 的 GPU 实现就绪后
-    仍把它的异步行标成"该轴不适用"，把"还没测"固化成"没这条轴"。
+    取 `--ranks`（默认 1）而不是运行时探测：`--plan` 在任何机器上都要能跑，
+    而规划数据点数时就得知道这条轴在不在。
     """
-    return METHOD_SPECS[method]["gpu_required"] > 1
+    return int(getattr(a, "ranks", 1))
+
+
+def sync_axis_applies(method: str, a: argparse.Namespace) -> bool:
+    """sync / async 是否是**本次运行**中该方法的自变量。
+
+    两个条件都要成立：
+
+    1. 该方法**存在**跨设备通信（`gpu_required > 1`）—— 单卡方法没有可异步
+       重叠的通信，该轴对它不构成自变量；
+    2. 本次运行**真的**起了多卡（`--ranks > 1`）—— 单卡跑多卡方法时该轴同样
+       不存在（`--dcc-world` 是单卡模拟，没有第二次设备参与）。
+
+    从这两个条件推导而不是写死 False：写死会在多卡跑通后仍把 dcc_kv 的异步行
+    标成"该轴不适用"，把"还没测"固化成"没这条轴"。反过来，只看 `gpu_required`
+    会在单卡模拟下生成两行**逐位相同**的数，而"两行一样"会被读成"异步没有收益"。
+
+    `a` **必填**（2026-09-21 收紧）：此前允许省略，省略时退化成"该方法原则上
+    有没有这条轴"。两个语义共用一个函数、且默认走的是**不安全**的那个（返回
+    True = 这条轴存在），是个脚枪 —— 谁忘了传 `a`，谁就在单卡下凭空造出两行
+    逐位相同的数。要问"原则上"，直接看 `METHOD_SPECS[m]["gpu_required"] > 1`。
+    """
+    if METHOD_SPECS[method]["gpu_required"] <= 1:
+        return False
+    return ranks_exercised(a) > 1
 
 
 # =============================================================================
@@ -175,7 +243,7 @@ def planned_points(a: argparse.Namespace) -> int:
     """
     total = 0
     for m in a.methods:
-        mult = len(a.sync_modes) if sync_axis_applies(m) else 1
+        mult = len(a.sync_modes) if sync_axis_applies(m, a) else 1
         total += len(a.models) * len(a.context_lengths) * mult
     return total
 
@@ -186,8 +254,8 @@ def print_plan(a: argparse.Namespace) -> int:
     n_sync = len(a.sync_modes)
     n_methods = len(a.methods)
     n_points = planned_points(a)
-    expanded = [m for m in a.methods if sync_axis_applies(m)]
-    collapsed = [m for m in a.methods if not sync_axis_applies(m)]
+    expanded = [m for m in a.methods if sync_axis_applies(m, a)]
+    collapsed = [m for m in a.methods if not sync_axis_applies(m, a)]
 
     print("=" * 78)
     print("E6 网格计划")
@@ -201,7 +269,9 @@ def print_plan(a: argparse.Namespace) -> int:
     if collapsed:
         overcount = n_models * n_ctx * (n_sync - 1) * len(collapsed)
         print(f"     sync/async 轴折叠的方法（{len(collapsed)}）：{collapsed}")
-        print(f"       —— 单卡方法，无跨设备通信，该轴不是自变量；"
+        print(f"       —— 本次运行 ranks={ranks_exercised(a)}："
+              f"该轴对这些方法不是自变量（单卡方法本就没有跨设备通信；"
+              f"多卡方法在单卡上跑时也没有第二次设备参与）。"
               f"若按简单相乘会虚增 {overcount} 个永不生成的数据点")
     if n_methods != 3:
         print(f"  ⚠ 注意：方法数是 {n_methods}，而论文的 144 是按「3 基线」算的。"
@@ -251,30 +321,95 @@ def measure_point(
     lm: _hf.LoadedModel,
     samples: Sequence[_hf.EvalSample],
 ) -> Dict[str, Any]:
-    """测量主表的一个数据点。"""
-    spec = METHOD_SPECS[method]
-    budget_ratio = None if method == "dense" else a.budget_ratio
-    mode = "identity" if method == "dense" else a.compaction_mode
+    """测量主表的一个数据点。
 
-    # H0：目的端 query 长度。两臂必须取同一个值 —— 加速比的分子与分母要来自
-    # 同一组 run（论文 §7.5 的「配对性」），否则比的不是同一件事。
-    dest_len = max(1, int(round(a.dest_fraction * ctx_len)))
+    dcc_kv 行走 H0 的方法侧钩子（2026-09-21 接线）
+    ----------------------------------------------
+    与 `dense` / `kv_budget_shared` 的差别不只在"压得更狠"：
+
+        dense / kv_budget_shared —— `apply_kv_budget` 路径：源端 KV **留在**
+            cache 里被裁剪，目的端前向直接消费这份 cache；
+        dcc_kv                  —— 钩子路径：源端由钩子 state 携带，目的端
+            前向传 `past=None`，紧凑块经 `build_compact_kv` 目的端条件化构造，
+            注意力走 `dcc_kv_attention`（与 G2 的 `_comp` 闭包同一段计算）。
+
+    两条路径下 `budget_ratio` / `compaction_mode` 的归属不同：钩子路径**必须**
+    把它们交给 `HookConfig`，由 `_hf` 显式拒绝"两处各写一份预算"。
+
+    ⚠️ 源端切分（`--dcc-world`）是**单卡模拟**：把源序列切成 W 段来模拟 W 个
+    源端设备。它不产生第二次设备参与，故 `gpu_count_observed` 仍是 1、
+    sync/async 轴被折叠、钩子 summary 里 `conditionalization_marginal_available`
+    为 False（所有段看到同一批 query ⇒ 与共享压缩在数值上不可区分）。
+    拿它当"多卡结果"是把模拟读成了测量。
+    """
+    spec = METHOD_SPECS[method]
+    hook: Optional[Any] = None
+    if method == "dcc_kv":
+        if a.dcc_world is None:
+            raise ValueError(
+                "dcc_kv 行必须给出 --dcc-world（源端段数）。它没有默认值："
+                "它决定每边的预算（per_edge 口径下 B_total/world），给个默认值"
+                "会把「本次模拟了几个源端设备」变成没人声明过的假设。"
+            )
+        hook = _A.HookConfig(
+            budget_ratio=a.budget_ratio,
+            dcc_world=int(a.dcc_world),
+            budget_mode=a.dcc_budget_mode,
+            n_repr=int(a.M), projection_dim=int(a.d_p),
+            lambda_beta=resolve_lambda_beta(a), seed=a.seed,
+        )
+    budget_ratio = (None if (method == "dense" or hook is not None)
+                    else a.budget_ratio)
+    mode = ("identity" if (method == "dense" or hook is not None)
+            else a.compaction_mode)
+
+    # H0：源段 / 目的端本地段的切分。**必须与评测路径同源**（同一个
+    # `_hf.prompt_split`）：计时侧若把整条 ctx_len 当源端、再另加 dest_len，
+    # 它压缩的源长就成了 ctx_len，而评测压缩的是 (1-f)·ctx_len —— 同一行里
+    # 两个不同的压缩设置，产物里的 `budget_tokens_resolved` 也就对不上质量
+    # 那一侧（实测：计时报 {"64": 32}，评测实际是 {"48": 24}）。
+    # 切分只有一处定义，`--dest-fraction 0` 时 dest 为 0，由 `_hf` 对压缩臂
+    # /钩子路径直接拒跑（原实现用 max(1, ...) 把 0 悄悄抬成 1）。
+    n_src, n_dst = _hf.prompt_split(ctx_len, a.dest_fraction)
+    dest_len = n_dst
 
     pre = _hf.measure_prefill(
-        lm, seq_len=ctx_len, batch_size=a.batch_size,
+        lm, seq_len=n_src, batch_size=a.batch_size,
         warmup=a.warmup, iters=a.iters,
         budget_ratio=budget_ratio, compaction_mode=mode,
-        dest_len=dest_len,
+        dest_len=dest_len, attn_hook=hook, seed=a.seed,
     )
     ps = R.summarize(pre["prefill_ms_samples"], "prefill", "ms", seed=a.seed)
+
+    # kernel-matched 的分子：**同一个算子核**下的 dense 臂。它只能在这里测 ——
+    # dense 行走的是 SDPA 融合核，与钩子的显式核不是同一个量，拿它的端到端数
+    # 顶替就等于把"实现差距"算进"机制收益"（见模块文档「两列各自的产处」）。
+    dense_kernel_dest_ms: Optional[float] = None
+    if hook is not None:
+        dense_hook = _A.HookConfig(
+            budget_ratio=1.0, mode="dense", dcc_world=1,
+            n_repr=int(a.M), projection_dim=int(a.d_p),
+            lambda_beta=resolve_lambda_beta(a), seed=a.seed,
+        )
+        pre_dense = _hf.measure_prefill(
+            lm, seq_len=n_src, batch_size=a.batch_size,
+            warmup=a.warmup, iters=a.iters,
+            dest_len=dest_len, attn_hook=dense_hook, seed=a.seed,
+        )
+        dense_kernel_dest_ms = pre_dense.get("dest_ms_median")
 
     acc: Optional[float] = None
     acc_by_task: Optional[Dict[str, float]] = None
     n_eval = 0
     if samples:
+        # `dest_fraction` 对**所有**方法都传：源段 / 目的端本地段的切分必须是
+        # 同一份，否则两边的"保留了多少精确 token"不同，质量差里混进了预算不
+        # 对齐（`_hf` 模块文档已把这条同口径写成契约，此前只有 prefill 那侧传了）。
         ev = _hf.evaluate(lm, samples, budget_ratio=budget_ratio,
                           compaction_mode=mode,
-                          max_prompt_tokens=a.max_prompt_tokens)
+                          max_prompt_tokens=a.max_prompt_tokens,
+                          attn_hook=hook,
+                          dest_fraction=a.dest_fraction)
         acc = ev["accuracy"]
         acc_by_task = ev["by_task"]
         n_eval = ev["n"]
@@ -297,7 +432,7 @@ def measure_point(
         # 只生成一行且 sync_async 记为 "n/a"，因此不会出现两行逐位相同的数。
         # 该标注由 gpu_required 推导而非写死 —— 写死会在 dcc_kv 的 GPU 实现
         # 就绪后仍把它的异步行标成"不适用"。
-        "sync_mode_applicable": sync_axis_applies(method),
+        "sync_mode_applicable": sync_axis_applies(method, a),
         "method": method,
         "method_measurable": spec["measurable"],
         "num_repr_queries": a.M,
@@ -309,6 +444,19 @@ def measure_point(
         "compaction_mode": mode,
         "dest_len": dest_len,
         "dest_fraction": a.dest_fraction,
+        # 钩子行的配置与运行态（含 n_builds / resolved_budget_by_source_len /
+        # conditionalization_marginal_available）。**必须与数值同行落盘**：
+        # 读表的人要能看出这一行是"几个源端段、每段多少预算、构造了几次"。
+        "attn_hook": pre.get("attn_hook"),
+        "dcc_world": (None if hook is None else int(hook.dcc_world)),
+        "dcc_budget_mode": (None if hook is None else hook.budget_mode),
+        "lambda_beta": (None if hook is None else float(hook.lambda_beta)),
+        "budget_tokens_resolved": pre.get("budget_tokens_resolved"),
+        # kernel-matched 那两列的原生量：目的端窗口的耗时（两端都在本行内测）。
+        "dest_ms_median": pre.get("dest_ms_median"),
+        "dest_ms_median_dense_kernel": dense_kernel_dest_ms,
+        "prefill_speedup_kernel_matched": _safe_ratio(
+            dense_kernel_dest_ms, pre.get("dest_ms_median")),
         "prefill_ms_median": ps.median,
         "prefill_ms_p5": ps.p5,
         "prefill_ms_p95": ps.p95,
@@ -334,7 +482,7 @@ def blocked_point(a: argparse.Namespace, model: str, ctx_len: int,
         "gpu_count_observed": 0,
         "gpu_count_required": spec["gpu_required"],
         "sync_async": sync_mode,
-        "sync_mode_applicable": sync_axis_applies(method),
+        "sync_mode_applicable": sync_axis_applies(method, a),
         "method": method,
         "method_measurable": False,
         "budget_ratio": a.budget_ratio,
@@ -349,13 +497,151 @@ def blocked_point(a: argparse.Namespace, model: str, ctx_len: int,
 # main
 # =============================================================================
 
+def _safe_ratio(num: Optional[float], den: Optional[float]) -> Optional[float]:
+    """只在两端都是**有限正数**时给比值；否则 None。
+
+    None 与 0.0 / 1.0 是三个不同的意思，混用会让"没测出来"看起来像"测出来是
+    没有收益"。分母非正时同样返回 None：那说明窗口里根本没发生那次前向。
+    """
+    if num is None or den is None:
+        return None
+    try:
+        n, d = float(num), float(den)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(n) and math.isfinite(d)) or d <= 0.0:
+        return None
+    return n / d
+
+
+def resolve_lambda_beta(a: argparse.Namespace) -> float:
+    """λ_β 的实际取值：命令行给了就用它，否则用仓库默认（与源码同源）。
+
+    落盘的是**解析后的绝对值**而不是"用了默认"这个事实 —— 默认值会随
+    `src.dcc_kv_ref.DEFAULT_LAMBDA_BETA` 变，而产物要能回答"当时是几"。
+    """
+    if getattr(a, "lambda_beta", None) is not None:
+        return float(a.lambda_beta)
+    return float(_A.DEFAULT_LAMBDA_BETA)
+
+
+def _kernel_matched_speedup(row: Dict[str, Any]) -> Optional[float]:
+    """dcc_kv 行的 kernel-matched 加速比（**H2 消费这一列**）。
+
+        分子 = 钩子 dense 臂的目的端耗时（`dest_ms_median_dense_kernel`）
+        分母 = 钩子 dcc 臂的目的端耗时   （`dest_ms_median`）
+
+    两臂走**同一个算子核**（`attention_kernel.dcc_kv_attention`）：dense 臂的
+    远端块是 `identity_compact` 出来的全长块（B = L_s），dcc 臂的远端块是条件化
+    构造出来的紧凑块（B = budget）。唯一变量是远端 KV 长度 —— 块数随 `dcc_world`
+    变，那是机制自身的属性（W 条边），不是量具的差异。
+
+    两端都在 dcc_kv 行内部测得，故本函数**不依赖别的行是否存在**。
+    返回 None 表示该行没测出这一对量（未接钩子 / 未跑 dcc 行），
+    **不得**回落到 native 那一列。
+    """
+    return _safe_ratio(row.get("dest_ms_median_dense_kernel"),
+                       row.get("dest_ms_median"))
+
+
+def _axis_free_rows(rows: List[Dict[str, Any]], method: str, model: str,
+                    ctx: int) -> List[Dict[str, Any]]:
+    """取该方法在该 (model, ctx) 上的全部行（**不**筛 sync/async）。"""
+    return [r for r in rows
+            if r.get("method") == method and r.get("model") == model
+            and r.get("context_length") == ctx]
+
+
+def _pick_axis_free(hits: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """从候选行里挑出"该轴不适用"的那一行；有歧义时返回 None（不猜）。
+
+    与 `h2_points_from_rows` 内 `find_axis_free` 同一套判据 —— 抽出来是为了让
+    `attach_prefill_speedups` 找 dense 行时走同一条路，免得两处判据漂开。
+    """
+    if not hits:
+        return None
+    marked = [r for r in hits if r.get("sync_async") == SYNC_MODE_NA]
+    if len(marked) == 1:
+        return marked[0]
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def attach_prefill_speedups(a: argparse.Namespace,
+                            rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """把两列 prefill 加速比补进每个 `dcc_kv` 行，并返回口径声明。
+
+    为什么是"补"而不是在 `measure_point` 里算全
+    -------------------------------------------
+    kernel-matched 的两端都在 dcc_kv 行内部（`measure_point` 已就地算好，
+    见 `_kernel_matched_speedup`）；native 的分子是 **dense 行**的端到端耗时，
+    是跨行的量，只有全部行收齐后才存在。故这里只补 native，并把 kernel-matched
+    再写一次到行上 —— 读者不必知道它是在哪一步算的。
+
+    **两列不得互相冒充**：native 含"实现差距"（SDPA 融合核 vs 显式核 + 构造
+    代价 + 源端缓存是否留在 past 里），只作端到端参考；H2 消费 kernel-matched。
+
+    必须在 `compute_h2` 之前调用 —— 它写入的正是 H2 要读的那一列。
+    """
+    n_km = 0
+    n_native = 0
+    native_missing: List[str] = []
+    for r in rows:
+        if r.get("method") != "dcc_kv":
+            continue
+        km = _kernel_matched_speedup(r)
+        r["prefill_speedup_kernel_matched"] = km
+        if km is not None:
+            n_km += 1
+        dense_row = _pick_axis_free(_axis_free_rows(
+            rows, "dense", r.get("model"), r.get("context_length")))
+        native = (None if dense_row is None else
+                  _safe_ratio(dense_row.get("prefill_ms_median"),
+                              r.get("prefill_ms_median")))
+        r["prefill_speedup_native"] = native
+        if native is None:
+            native_missing.append(
+                "%s@%s" % (r.get("model"), r.get("context_length")))
+        else:
+            n_native += 1
+    return {
+        "kernel_matched": ("钩子dense臂目的端耗时 / 钩子dcc臂目的端耗时"
+                           "（同一算子核；**H2 消费这一列**）"),
+        "native": ("dense 行端到端 prefill / dcc 行端到端 prefill"
+                   "（异核 + 含构造代价；端到端参考，不得当作机制收益）"),
+        "n_rows_with_kernel_matched": n_km,
+        "n_rows_with_native": n_native,
+        "native_unavailable_rows": native_missing,
+        "native_unavailable_reason": ("该 (model, ctx) 上没有唯一的 dense 行；"
+                                      "native 列记 None，不影响 kernel-matched "
+                                      "列与 H2 判定"),
+    }
+
+
+def dcc_row_modes(a: argparse.Namespace) -> List[str]:
+    """`dcc_kv` 行在表里**实际**会写出的 sync_async 值（与 main 的循环同判据）。
+
+    单元素列表有两种可能，必须区分开：
+
+        ["sync", "async"] —— 轴展开（本次真的起了多卡），每个长度两行；
+        [SYNC_MODE_NA]    —— 轴**被折叠**（`--ranks 1`），每个长度一行。
+
+    抽成函数而不是在读写两侧各写一遍：两边一旦不同源，就会出现"写行时折叠、
+    查行时按 sync 查"的静默不配对（正是 `bee3388` 与 2026-09-21 两次踩到的坑）。
+    """
+    if sync_axis_applies("dcc_kv", a):
+        return list(a.sync_modes)
+    return [SYNC_MODE_NA]
+
+
 def h2_points_from_rows(a: argparse.Namespace,
                         rows: List[Dict[str, Any]]) -> List[H.H2PerLength]:
     """从主表行数据里抽 H2 的三个原始量，构造逐长度的判据输入。
 
     配对结构：同一 (model, ctx_len, sync_mode) 下，`dcc_kv` 与
     `kv_budget_shared` 面对同一份提示、同一份评测集，因此两者的差是**配对量**；
-    `prefill_speedup` 的分子取 `dense`（精确注意力），理由见下。
+    `prefill_speedup` 取 **kernel-matched** 那一列（同核 dense 臂），理由见下。
 
     为什么 prefill 的分子是 dense 而不是 shared（2026-09-21 修正）
     ---------------------------------------------------------------
@@ -366,10 +652,19 @@ def h2_points_from_rows(a: argparse.Namespace,
     它不可能比 DCC-KV 慢 10%。原实现写的 `ms_shared / ms_dcc` 得到的是一个结构
     上恒 ≈1 的量：一个恒 ≈1 的比值配 1.10x 的阈值，只能说明它不是论文那句话
     在说的量。
+    再从 dense 的端到端数改成 kernel-matched（2026-09-21 同日）
+    -------------------------------------------------------
+    分子取 dense 解决了"比错对象"，但没解决"用错核"：dense 行走 SDPA 融合核、
+    dcc 行走 `attention_kernel` 的显式核，两者的实现差距会整个人进比值里。
+    故最终取 **kernel-matched**：分子是**钩子 dense 臂**的目的端耗时（同一个
+    显式核、同样带本地块），分母是**钩子 dcc 臂**的目的端耗时，两臂唯一差别
+    只剩远端 KV 长度。native 那一列仍会落盘（端到端参考），但**不得**用于 H2。
+
 
     三个原始量的来源：
         quality_gain_pp  = (acc_dcc - acc_shared) * 100
-        prefill_speedup  = prefill_dense / prefill_dcc
+        prefill_speedup  = dest_ms_median_dense_kernel / dest_ms_median
+                           （= kernel-matched 那一列，见 _kernel_matched_speedup）
         quality_comparable = 由 quality_comparable_non_inferior 判定；当非劣边界
             `delta_pp` 或噪声底线尚未由命令行给出时取 **None**（= 分辨率不足），
             而不是 False —— 「没测出容差」与「确实不相近」是两个结论。
@@ -397,7 +692,8 @@ def h2_points_from_rows(a: argparse.Namespace,
         也就是说：折叠 sync 轴的修复（`bee3388` 的纪律）把 H2 的配对一起折叠掉了，
         而当时**没有任何测试覆盖 h2_points_from_rows**（现已由
         `tests/test_selfcheck_2026_09_18.py` 的 `test_t6_*` 三条 +
-        `tests/test_adversarial_2026_09_20.py` 的 `test_a4_*` 覆盖）。
+        `tests/test_adversarial_2026_09_20.py` 的 `test_a4_*` 四条 + 本文件里
+        `test_e6_*` 的接线锚点覆盖）。
         ⚠️ 原文此处引用的 `test_e6_h2_pairing` **从未存在** —— 声称有覆盖
         而实际没有，比没写测试更坏；已改正，并由 I 组锚点防止再犯。
 
@@ -423,20 +719,26 @@ def h2_points_from_rows(a: argparse.Namespace,
     delta_bad = getattr(a, "h2_delta_bad_pp", None)
 
     points: List[H.H2PerLength] = []
+    # dcc_kv 自己那一侧的轴也可能被折叠（`--ranks 1` 时**两个方法都折**），
+    # 故它也要按"本次会不会写出该模式"来查，而不是写死 `sync_modes[0]`。
+    # 未折叠时 `modes[0] == a.sync_modes[0]`，与旧行为逐位一致。
+    modes = dcc_row_modes(a)
     for model in a.models:
         for ctx in a.context_lengths:
-            mode = a.sync_modes[0]
-            r_dcc = find("dcc_kv", model, ctx, mode)
-            # 基线是单卡方法，其 sync/async 轴在表里被折叠 ⇒ 不能按模式查
+            r_dcc = (find_axis_free("dcc_kv", model, ctx) if len(modes) == 1
+                     else find("dcc_kv", model, ctx, modes[0]))
+            # 基线是单卡方法，其 sync/async 轴同样被折叠 ⇒ 不能按模式查
             # （否则配对恒为空；见 find_axis_free 的说明）。
             r_shr = find_axis_free("kv_budget_shared", model, ctx)
-            # prefill 的分子是 dense（理由见函数 docstring）。
-            r_den = find_axis_free("dense", model, ctx)
-            if r_dcc is None or r_shr is None or r_den is None:
+            # ⚠️ dense 行**不再**是配对必需项（2026-09-21）：prefill 的分子改为
+            # kernel-matched 那一列，它的两端都在 dcc_kv 行内测得，与 dense 行
+            # 无关。此前写 `r_den is None: continue` 会让"dense 行缺席"把 H2 判成
+            # unresolved —— 那是拿一个无关的行去决定另一个量的可判性。
+            # dense 行只影响 native 那一列（由 attach_prefill_speedups 补）。
+            if r_dcc is None or r_shr is None:
                 continue
             acc_d, acc_s = r_dcc.get("accuracy"), r_shr.get("accuracy")
-            ms_d = r_dcc.get("prefill_ms_median")
-            ms_den = r_den.get("prefill_ms_median")
+            sp_km = _kernel_matched_speedup(r_dcc)
 
             comparable = None
             if delta is not None and floor is not None and acc_d is not None \
@@ -444,26 +746,28 @@ def h2_points_from_rows(a: argparse.Namespace,
                 # 非劣检验要的是 (Q_DCC − Q_dense) 的**配对 95% CI 下界**，
                 # 而本表每格只落一个聚合准确率、不落逐样本判对错，故无法算 CI。
                 # 这里**不猜**：保持 None ⇒ 记入 unresolved。
-                # 要让 H2 真正落判据，需要在 measure_point 里落逐样本得分，
-                # 那是 GPU 侧 E6 跑通后才能做的事（当前 dcc_kv 被阻断）。
+                # 要让 H2 真正落判据，需要在 measure_point 里落逐样本得分。
                 comparable = None
 
-            # 量具是否体现压缩收益：由 _hf 的契约决定，不在本文件里写死。
-            instrument_ok = bool(_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV)
-            if (acc_d is None or acc_s is None or not ms_d or not ms_den):
-                points.append(H.H2PerLength(
-                    length=ctx, quality_gain_pp=float("nan"),
-                    prefill_speedup=float("nan"), quality_comparable=None,
-                    prefill_instrument_valid=instrument_ok,
-                ))
-            else:
-                points.append(H.H2PerLength(
-                    length=ctx,
-                    quality_gain_pp=(acc_d - acc_s) * 100.0,
-                    prefill_speedup=ms_den / ms_d,
-                    quality_comparable=comparable,
-                    prefill_instrument_valid=instrument_ok,
-                ))
+            # 量具是否体现压缩收益：由 `_hf` 的契约决定，不在本文件里写死。
+            # **并且**这一格必须真的算出了 kernel-matched 那一列：契约声明灵敏、
+            # 表里却没有那一列（dcc_kv 行没接钩子 / 同核 dense 臂没跑），同样是
+            # 「量具给不出数」。若照旧记 nan 而置 True，`h2_pass` 会把
+            # `nan >= 1.10` 判成假 ⇒ **把「没测出来」报成「未达标」**。
+            instrument_ok = (bool(_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV)
+                             and sp_km is not None)
+            # 两个量**各自独立**记录：prefill 那一格没测出，不该把已经测到的
+            # 质量差一起抹成 nan（那会让 worst_quality_gain_pp 丢掉一个真实值）。
+            points.append(H.H2PerLength(
+                length=ctx,
+                quality_gain_pp=((acc_d - acc_s) * 100.0
+                                 if (acc_d is not None and acc_s is not None)
+                                 else float("nan")),
+                prefill_speedup=(float("nan") if sp_km is None
+                                 else float(sp_km)),
+                quality_comparable=comparable,
+                prefill_instrument_valid=instrument_ok,
+            ))
     return points
 
 
@@ -500,8 +804,18 @@ def compute_h2(a: argparse.Namespace,
         out["h2_note"] += (
             "；prefill 量具有效（H0 已接，2026-09-21）：压缩臂的计时窗口里含一次"
             "目的端前向，其 past cache 是裁剪后的 KV，故 prefill_speedup 能反映"
-            "压缩带来的 KV 长度收益。分子口径为 dense（精确注意力），"
-            "见 h2_points_from_rows 的说明。")
+            "压缩带来的 KV 长度收益。分子口径为 **kernel-matched**"
+            "（钩子 dense 臂 / 钩子 dcc 臂，同一算子核 "
+            "attention_kernel.dcc_kv_attention），"
+            "见 _kernel_matched_speedup 的说明。")
+    out["h2_prefill_instrument_note"] = (
+        "prefill_instrument_valid 取「契约灵敏 **且** 这一格真的算出了 "
+        "kernel-matched 那一列」的合取：契约声明灵敏、表里却没有那一列"
+        "（dcc_kv 行未接钩子 / 同核 dense 臂没跑）同样是「量具给不出数」。"
+        "两者都记 instrument，**不记 failed** —— 若照旧让 nan 参与比较，"
+        "「nan >= 1.10」为假，判定会变成「未达标」，即把没测出来报成没有收益。"
+        "哪一行的哪一列缺了，看 payload 的 prefill_speedups 声明。"
+    )
     out["h2_params_supplied"] = {
         "delta_pp": getattr(a, "h2_delta_pp", None),
         "noise_floor_pp": getattr(a, "h2_noise_floor_pp", None),
@@ -545,6 +859,26 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["identity", "topk_rms", "topk_norm", "stride", "random"])
     p.add_argument("--M", type=int, default=64)
     p.add_argument("--d-p", dest="d_p", type=int, default=32)
+    p.add_argument("--dcc-world", dest="dcc_world", type=int, default=None,
+                   help="dcc_kv 行的源端段数：**单卡模拟**「把源序列切成 W 段、"
+                        "每段各构造一份紧凑块」，即 W 个源端设备各发一条边。"
+                        "**无默认值** —— 它决定每边的预算（per_edge 口径下 "
+                        "B_total/world），给个默认值会把「本次模拟了几个源端设备」"
+                        "变成没人声明过的假设。单卡下它**不**体现逐边条件化的"
+                        "代价与收益（所有段看到同一批 query）。")
+    p.add_argument("--dcc-budget-mode", dest="dcc_budget_mode", type=str,
+                   default="per_edge", choices=["per_edge", "total"],
+                   help="dcc_kv 的每边预算口径：per_edge = B_total/world（主口径）；"
+                        "total = 每边都是 B_total（总预算随 world 放大，仅供敏感性"
+                        "对照，**不得**用于 H2 的质量主张）")
+    p.add_argument("--ranks", type=int, default=1,
+                   help="本次实际使用的 rank 数。=1 时**所有**跨设备轴（sync/async）"
+                        "都被折叠 —— 单卡下该轴不是自变量，两行必然逐位相同，"
+                        "而表里'两行一样'会被读成'异步没有收益'。")
+    p.add_argument("--lambda-beta", dest="lambda_beta", type=float, default=None,
+                   help="β 拟合的 ridge 正则 λ_β。不给时用 "
+                        "dcc_kv_ref.DEFAULT_LAMBDA_BETA（与 src/experiment_metadata.py "
+                        "同源），解析后的实际取值会落进每行产物")
     p.add_argument("--batch-size", dest="batch_size", type=int, default=1)
     p.add_argument("--precision", type=str, default="bfloat16",
                    choices=["bfloat16", "float16", "float32"])
@@ -579,6 +913,13 @@ def main() -> int:
         return print_plan(a)
     if a.print_env:
         return _env.print_env_only("E6 主表与可扩展性", min_gpus=1, need_nccl=False)
+    if "dcc_kv" in a.methods and a.dcc_world is None:
+        print("阻断：--methods 含 dcc_kv，但未给 --dcc-world（源端段数）。")
+        print("  --dcc-world 刻意没有默认值：它决定每边的预算（per_edge 口径下")
+        print("  B_total/world），给个默认值会把「本次模拟了几个源端设备」变成")
+        print("  没人声明过的假设。例：--dcc-world 4 = 源序列切成 4 段。")
+        return 2
+
 
     measurable = [m for m in a.methods if METHOD_SPECS[m]["measurable"]]
     if not measurable:
@@ -613,7 +954,8 @@ def main() -> int:
                 # 轴折叠：单卡方法（dense / kv_budget_shared）不生成 sync/async
                 # 两行 —— 它们没有跨设备通信，两行必然逐位相同，而表里"两行
                 # 一样"会被读成"异步没有收益"。详见 SYNC_MODE_NA 与 planned_points。
-                modes = a.sync_modes if sync_axis_applies(method) else [SYNC_MODE_NA]
+                modes = (a.sync_modes if sync_axis_applies(method, a)
+                         else [SYNC_MODE_NA])
                 for sync_mode in modes:
                     if not METHOD_SPECS[method]["measurable"]:
                         rows.append(blocked_point(a, model, ctx_len, sync_mode, method))
@@ -624,7 +966,7 @@ def main() -> int:
                         r = {
                             "model": model, "context_length": ctx_len,
                             "sync_async": sync_mode, "method": method,
-                            "sync_mode_applicable": sync_axis_applies(method),
+                            "sync_mode_applicable": sync_axis_applies(method, a),
                             "status": "error", "error_type": type(e).__name__,
                             "error": str(e),
                             "traceback": traceback.format_exc().splitlines()[-8:],
@@ -634,13 +976,16 @@ def main() -> int:
                     if r["status"] == "ok":
                         acc_str = ("n/a" if r["accuracy"] is None
                                    else f"{r['accuracy']:.4f}")
+                        sp_km = _kernel_matched_speedup(r)
+                        sp_str = ("km=n/a" if sp_km is None
+                                  else f"km={sp_km:.3f}x")
                         print(f"  {model.split('/')[-1]:<28} L={ctx_len:<6} "
                               f"{sync_mode:<5} {method:<17} "
                               f"prefill={r['prefill_ms_median']:9.2f}ms "
                               f"(p95={r['prefill_ms_p95']:9.2f})  "
                               f"{r['tokens_per_s_median']:10.1f} tok/s  "
                               f"peak={r['peak_memory_gb']:5.2f}GB  "
-                              f"acc={acc_str}")
+                              f"acc={acc_str}  {sp_str}")
                     else:
                         print(f"  {model.split('/')[-1]:<28} L={ctx_len:<6} "
                               f"{sync_mode:<5} {method:<17} [{r['status']}] "
@@ -649,6 +994,8 @@ def main() -> int:
         torch.cuda.empty_cache()
 
     # 达标性判定
+    # 两列加速比必须在 compute_h2 之前补上 —— H2 读的正是 kernel-matched 那列。
+    prefill_speedups = attach_prefill_speedups(a, rows)
     meta = _env.build_metadata(
         run_id="e6-main-table",
         model_name=",".join(a.models),
@@ -660,7 +1007,8 @@ def main() -> int:
         interconnect=a.interconnect,
         rope_extension_used=a.rope_extension_used,
         rope_extension_disclosed=a.rope_extension_disclosed,
-        notes=f"methods={a.methods}",
+        notes=(f"methods={a.methods} dcc_world={a.dcc_world} "
+               f"dcc_budget_mode={a.dcc_budget_mode} ranks={a.ranks}"),
     )
     admissible = _env.gate_guard_for_report(meta)
 
@@ -669,15 +1017,19 @@ def main() -> int:
         "rows": rows,
         "metadata": meta.to_dict(),
         "report_admissibility": admissible,
-        "grid": {
+        "grid": {            "dcc_world": a.dcc_world,
+            "dcc_budget_mode": a.dcc_budget_mode,
+            "ranks": a.ranks,
+
             "models": a.models, "context_lengths": a.context_lengths,
             "sync_modes": a.sync_modes, "methods": a.methods,
             "n_points_planned": planned_points(a),
             "n_points_planned_naive_product": (len(a.models) * len(a.context_lengths)
                                                * len(a.sync_modes) * len(a.methods)),
-            "sync_axis_expanded_methods": [m for m in a.methods if sync_axis_applies(m)],
+            "sync_axis_expanded_methods": [m for m in a.methods
+                                           if sync_axis_applies(m, a)],
             "sync_axis_collapsed_methods": [m for m in a.methods
-                                            if not sync_axis_applies(m)],
+                                            if not sync_axis_applies(m, a)],
             "n_points_measured": sum(1 for r in rows if r["status"] == "ok"),
             "n_points_blocked": sum(1 for r in rows if r["status"] == "blocked"),
             "paper_claim": "3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144",
@@ -696,14 +1048,28 @@ def main() -> int:
         "instrument": {
             "prefill_timing_consumes_compact_kv": _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV,
             "dest_fraction": a.dest_fraction,
-            "dest_len_by_context": {str(c): max(1, int(round(a.dest_fraction * c)))
+            # 与 measure_point 同源：同一份 prompt_split，不在两处各算一遍
+            "source_len_by_context": {str(c): _hf.prompt_split(c, a.dest_fraction)[0]
+                                      for c in a.context_lengths},
+            "dest_len_by_context": {str(c): _hf.prompt_split(c, a.dest_fraction)[1]
                                     for c in a.context_lengths},
-            "prefill_speedup_numerator": "dense（精确注意力）",
+            "prefill_speedup_columns": (
+                "两列，各自命名、不得互相冒充。"
+                "kernel_matched = 钩子dense臂目的端耗时 / 钩子dcc臂目的端耗时"
+                "（同一算子核 attention_kernel.dcc_kv_attention，唯一变量是"
+                "远端 KV 长度；**H2 消费这一列**）；"
+                "native = dense 行端到端 prefill / dcc 行端到端 prefill"
+                "（异核：SDPA 融合核 vs 显式核，且含构造代价差异；"
+                "只作端到端参考，不得当作机制收益）。"
+                "kernel_matched 的两端都在 dcc_kv 行内测得；"
+                "native 需要 dense 行，由 attach_prefill_speedups 在收齐行后补。"
+            ),
             "meaning": ("True ⇒ 压缩臂的计时窗口里含一次目的端前向，其 past cache "
                         "是裁剪后的 KV，prefill_speedup 可反映压缩收益；"
                         "False ⇒ prefill 一列对压缩方法只含开销、不含收益，"
                         "该长度记 unresolved。"),
         },
+        "prefill_speedups": prefill_speedups,
         "h2": compute_h2(a, rows),
         "caveat": (
             "gpu_count 在可测量方法（dense / kv_budget_shared）上不是自由轴："

@@ -7,7 +7,8 @@
          裁剪后的 KV 从未被使用 ⇒ 加速比结构上恒 <= 1」；**2026-09-21 接上 H0
          后改写**（目的端前向进入窗口，它看到的 KV 由 S 变 B）。同组锚点现锁：
          目的端看到的 KV 必须等于预算 B、两臂唯一差别就是那个长度、漏给
-         dest_len 必须抛错、加速比的分子必须是 dense。量具失效时判定程序
+         dest_len 必须抛错、加速比的分子必须是**同核** dense 臂、缺列时不得回落。
+         量具失效时判定程序
          必须**拒判**（unresolved / instrument）而不是报「未达标」。
   B1-B2 异步臂的 comm_ms 不是通信时间，却作为普通字段落盘
          ⇒ 会被读成「异步消掉了通信」。
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import pathlib
 import re
 import sys
@@ -211,17 +213,24 @@ def _e6_ns(**kw):
     return argparse.Namespace(**base)
 
 
-def _h2_rows(prefill_shared=130.0, prefill_dcc=100.0, prefill_dense=120.0):
+def _h2_rows(dest_dcc=10.0, dest_dense_kernel=12.0, prefill_shared=130.0,
+             prefill_dcc=100.0, prefill_dense=120.0):
     """H2 配对用的一批行。
 
-    `dense` 与 `shared` 的取值**刻意不同**（120 vs 130）：这样 A4 才能判别
-    加速比的分子到底取了谁 —— 若两者相同，取错分子也测不出来。
+    三个方法的端到端 prefill **刻意两两不同**（dcc 100 / shared 130 / dense
+    120），且 dcc 行的两个目的端量（10 / 12）与它们也都不同值：这样"分子到底
+    取了谁"才测得出差别 —— 若取值相同，取错分子也看不出来。
+
+    `dest_ms_median` / `dest_ms_median_dense_kernel` 是 H2 **真正**要用的那一
+    对量（同一算子核下两臂的目的端耗时），见 `_kernel_matched_speedup`。
     """
     from experiments.gpu import e6_main_table as E
     return [
         {"method": "dcc_kv", "model": "m", "context_length": 4096,
          "sync_async": "sync", "accuracy": 0.70,
-         "prefill_ms_median": prefill_dcc},
+         "prefill_ms_median": prefill_dcc,
+         "dest_ms_median": dest_dcc,
+         "dest_ms_median_dense_kernel": dest_dense_kernel},
         {"method": "kv_budget_shared", "model": "m", "context_length": 4096,
          "sync_async": E.SYNC_MODE_NA, "accuracy": 0.60,
          "prefill_ms_median": prefill_shared},
@@ -278,27 +287,86 @@ def test_a3_compressed_arm_refuses_to_run_without_a_destination_forward():
     assert lm2.model.calls, "精确臂应能照常跑"
 
 
-def test_a4_speedup_is_derived_dense_over_dcc_not_the_other_way():
-    """方向锚点：`prefill_speedup = prefill_dense / prefill_dcc`。
+def test_a4_speedup_is_kernel_matched_and_never_falls_back():
+    """H2 的 prefill 加速比取 **kernel-matched** 那一列，且**不得**回落。
 
-    **2026-09-21 修正**：本用例原先断言 `prefill_shared / prefill_dcc`，
-    与它自己的名字（dense_over_dcc）不符 —— 是上一轮留下的命名/口径错配。
-    论文 §7.5 把 H2 拆成三段（与精确注意力**不劣** / 相对共享压缩**更高** /
-    prefill **更快**），第三段的对照物是精确注意力；而 `shared` 同样压过 KV、
-    同样交付 B 长的 KV，拿它做分子得到的比值结构上恒 ≈1，配 1.10x 的阈值
-    不自洽。故改判据、并让本用例真正按名字去测。
+    三段沿革，每一段都由前一版的一个具体缺陷逼出来：
+
+      ① `prefill_shared / prefill_dcc` —— **比错对象**：shared 同样压过 KV、
+         同样交付 B 长的 KV，比值结构上恒 ≈1，配 1.10x 的阈值不自洽；
+      ② `prefill_dense / prefill_dcc` —— **用错核**：dense 走 SDPA 融合核、
+         dcc 走 `attention_kernel` 的显式核，实现差距整个人进比值；
+      ③ 现在：`dest_ms_median_dense_kernel / dest_ms_median` —— 同一个算子核，
+         两臂唯一差别是目的端消费的远端 KV 长度。
 
     反了的话，压缩越慢反而报出越高的加速比 —— 纯粹的符号错，不会报错。
-    `_h2_rows` 里 dense(120) 与 shared(130) 取值不同，因此若将来有人把分子
-    又换回 shared，这里会立刻红（1.3 != 1.2），而不是静静通过。
+    本用例里同核那一对（10/12）与端到端那一对（100/130/120）**刻意不同值**：
+    若有人把 native 顶替进来，这里立刻红（1.3 或 1.2 != 1.2）。
     """
     from experiments.gpu import e6_main_table as E
-    slow = E.h2_points_from_rows(
-        _e6_ns(), _h2_rows(prefill_dense=120.0, prefill_dcc=100.0))
-    fast = E.h2_points_from_rows(
-        _e6_ns(), _h2_rows(prefill_dense=100.0, prefill_dcc=120.0))
-    assert slow[0].prefill_speedup == pytest.approx(1.2)
-    assert fast[0].prefill_speedup == pytest.approx(100.0 / 120.0)
+    slow = E.h2_points_from_rows(_e6_ns(), _h2_rows(
+        dest_dcc=10.0, dest_dense_kernel=12.0))
+    fast = E.h2_points_from_rows(_e6_ns(), _h2_rows(
+        dest_dcc=12.0, dest_dense_kernel=10.0))
+    assert slow[0].prefill_speedup == pytest.approx(1.2)          # 12 / 10
+    assert fast[0].prefill_speedup == pytest.approx(10.0 / 12.0)  # 方向反了就报错
+
+    # 缺列 ⇒ 该长度记 unresolved，**绝不**用 native（dense 130 / dcc 100 = 1.3）
+    stripped = _h2_rows()
+    for r in stripped:
+        if r["method"] == "dcc_kv":
+            r.pop("dest_ms_median")
+            r.pop("dest_ms_median_dense_kernel")
+    pts = E.h2_points_from_rows(_e6_ns(), stripped)
+    assert len(pts) == 1, "质量那半边不该因缺 prefill 列而掉点"
+    assert pts[0].quality_gain_pp == pytest.approx(10.0)
+    assert math.isnan(pts[0].prefill_speedup), "缺列时回落到了 native"    # 缺列还必须记成 instrument（unresolved），**不能**让 nan 走到比较里去。
+    # `h2_pass_across_lengths` 不检查 nan，`nan >= 1.10` 为假 ⇒ 该长度会被算进
+    # n_failed，把「没测出来」报成「未达标」。本条锚的就是这个。
+    assert pts[0].prefill_instrument_valid is False, \
+        "缺列却仍声明量具有效 ⇒ nan 会被判成未达标"
+    agg = E.compute_h2(_e6_ns(), stripped)
+    assert agg["h2_unresolved_reasons"] == {"4096": "instrument"}
+    assert agg["h2_n_failed"] == 0, "把「没测出来」报成了「未达标」"
+
+
+def test_a4b_attach_fills_both_columns_and_they_are_not_the_same_number():
+    """两列都要落盘，且**互为不同的数** —— 否则"两列"只是装饰。
+
+    kernel-matched 与 native 回答的不是同一个问题（机制 vs 端到端含实现差距），
+    若两列恰好同值，说明其中一列只是另一列的复印。
+    """
+    from experiments.gpu import e6_main_table as E
+    rows = _h2_rows(dest_dcc=10.0, dest_dense_kernel=12.0,
+                    prefill_dcc=100.0, prefill_dense=140.0)
+    decl = E.attach_prefill_speedups(_e6_ns(), rows)
+    r = [x for x in rows if x["method"] == "dcc_kv"][0]
+    assert r["prefill_speedup_kernel_matched"] == pytest.approx(1.2)   # 12 / 10
+    assert r["prefill_speedup_native"] == pytest.approx(1.4)           # 140 / 100
+    assert decl["n_rows_with_kernel_matched"] == 1
+    assert decl["n_rows_with_native"] == 1
+    assert decl["native_unavailable_rows"] == []
+    assert "H2" in decl["kernel_matched"], "声明里必须写明哪一列给 H2 用"
+
+
+def test_a4c_missing_dense_row_only_costs_the_native_column():
+    """dense 行缺席：native 记 None，**不影响** kernel-matched 与 H2 判定。
+
+    这条防的是"拿一个无关的行去决定另一个量的可判性"：H2 的 prefill 量两端都在
+    dcc 行内测得，dense 行走的是另一个核，本来就不该是它的前提。
+    """
+    from experiments.gpu import e6_main_table as E
+    rows = [r for r in _h2_rows() if r["method"] != "dense"]
+    decl = E.attach_prefill_speedups(_e6_ns(), rows)
+    r = [x for x in rows if x["method"] == "dcc_kv"][0]
+    assert r["prefill_speedup_native"] is None
+    assert r["prefill_speedup_kernel_matched"] == pytest.approx(1.2)
+    assert decl["n_rows_with_native"] == 0
+    assert decl["n_rows_with_kernel_matched"] == 1
+    assert decl["native_unavailable_rows"] == ["m@4096"]
+
+    pts = E.h2_points_from_rows(_e6_ns(), rows)
+    assert len(pts) == 1 and not math.isnan(pts[0].prefill_speedup)
 
 
 # =============================================================================

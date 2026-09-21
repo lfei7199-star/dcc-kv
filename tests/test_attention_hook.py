@@ -5,17 +5,21 @@
 钩子是 `device-agnostic` 的，而 transformers 可以用一个**本地构造的 tiny Llama**
 （`LlamaConfig` + 随机权重，不下载任何东西）在 CPU 上跑完整前向。于是本机能问出
 一件 GPU 机上要花很久才问得清的事：**接线到底对不对**（形状、转置、GQA 分组、
-位置、因果、还原）。
+位置、因果、还原、本地块契约）。
 
-最强的一条是 `test_h1_...`：dense 参照臂（`identity_compact`，β ≡ 0、B = L_s）
-必须复现原生 HF 的前向。它一条就同时覆盖了上面所有维度 —— 因为它们中任何一个
-错了，输出都不可能与原生长时间保持在 1e-6 以内。
+最强的是两条端到端数值断言：
+
+- `test_h1_...`：dense 参照臂（`identity_compact`，β ≡ 0、B = L_s）必须复现原生
+  HF 的前向。它一条就同时覆盖了形状/转置/GQA/位置/因果/还原。
+- `test_h11_...`：目的端**带本地上下文**（分三次前向：源段 → 本地段 → continuation）
+  仍必须复现"把三段拼起来一次前向"的原生结果。它覆盖的是 2026-09-21 新增的
+  **本地块契约**（本地块 = 传入 cache 全体），旧契约（取尾部 Lq）会把它算错。
 
 容差为什么不是"逐位"
 --------------------
 钩子走 `attention_kernel` 的**显式**路径（matmul + logsumexp + matmul），而原生
 HF 走 SDPA 的**融合核**。两条路径的浮点求和顺序不同 ⇒ 只能 ULP 级一致。
-实测（float32，S=24 / dest=6）：最大绝对差 9.7e-08（相对 2.5e-07，约 1.6 ULP）。
+实测（float32，S=24 / dest=6）：最大绝对差 1.5e-07（约 2 ULP）。
 若哪天真变成逐位相同，那说明有一侧的核被换掉了，值得回头看一眼。
 """
 from __future__ import annotations
@@ -39,7 +43,7 @@ VOCAB = TINY["vocab_size"]
 SRC_LEN, DST_LEN = 24, 6
 BUDGET = 12
 
-# 实测值（float32）：dense 臂与原生前向的路径差。留一倍余量放进断言，
+# 实测值（float32）：dense 臂与原生前向的路径差 1.5e-07。留一倍余量放进断言，
 # 但**不放到 1e-4** —— 那会把"某个 head 走错了"这种量级的错放过去。
 NATIVE_PATH_ATOL = 1e-6
 
@@ -51,9 +55,9 @@ def tiny():
     return LlamaForCausalLM(LlamaConfig(**TINY)).eval()
 
 
-def _ids(seed: int) -> torch.Tensor:
+def _ids(seed: int, n: int = SRC_LEN + DST_LEN) -> torch.Tensor:
     g = torch.Generator().manual_seed(seed)
-    return torch.randint(0, VOCAB, (1, SRC_LEN + DST_LEN), generator=g)
+    return torch.randint(0, VOCAB, (1, n), generator=g)
 
 
 def native_logits(model, ids):
@@ -61,19 +65,24 @@ def native_logits(model, ids):
         return model(ids).logits
 
 
-def run_two_phase(model, ids, *, mode, budget, dcc_world=1, budget_mode="per_edge"):
-    """按钩子的两段式跑一遍，返回 (dst 段 logits, state)。"""
+def run_two_phase(model, ids, *, mode, budget=None, budget_ratio=None,
+                  dcc_world=1, budget_mode="per_edge"):
+    """按钩子的两段式跑一遍，返回 (dst 段 logits, state)。
+
+    ⚠️ 目的端前向**不传 past**（`past_key_values=None`）：本模块的契约是
+    「传入的 cache 只含目的端本地 KV」，源端一律由 state 携带。传 `past=None`
+    既是最小化的写法，也正好覆盖这条契约。
+    """
     src, dst = ids[:, :SRC_LEN], ids[:, SRC_LEN:]
     pos = torch.arange(SRC_LEN, SRC_LEN + DST_LEN).unsqueeze(0)
-    cfg = A.HookConfig(budget=budget, mode=mode, dcc_world=dcc_world,
-                       budget_mode=budget_mode)
+    cfg = A.HookConfig(budget=budget, budget_ratio=budget_ratio, mode=mode,
+                       dcc_world=dcc_world, budget_mode=budget_mode)
     with torch.no_grad():
         with A.dcc_attention(model, cfg) as st:
             st.source_phase()
-            first = model(src, use_cache=True)
-            st.destination_phase()
-            second = model(dst, past_key_values=first.past_key_values,
-                           use_cache=True, position_ids=pos)
+            model(src, use_cache=True)
+            st.destination_phase(compacts="build")
+            second = model(dst, use_cache=True, position_ids=pos)
     return second.logits, st
 
 
@@ -97,17 +106,14 @@ def test_h1_dense_reference_arm_reproduces_native_forward(tiny):
 
     assert logits.shape == base[:, SRC_LEN:, :].shape, \
         "形状必须与 HF 期望的 [B, Lq, H_q * D_v] 一致"
-    # 目的端的 logits 由**前一个位置**的预测决定，这里比较的是同一批位置，
-    # 故可直接逐元素比（两边都是 dst 段的 logits）。
     dev = (logits - base[:, SRC_LEN:, :]).abs().max().item()
     assert dev < NATIVE_PATH_ATOL, (
         f"dense 参照臂与原生前向差 {dev:.3e}，超过 {NATIVE_PATH_ATOL:.0e}。"
-        "两者只应差一条算子路径的 ULP（实测 9.7e-08）——超出说明接线错了："
+        "两者只应差一条算子路径的 ULP（实测 1.5e-07）——超出说明接线错了："
         "优先查 GQA 分组（必须按 repeat_interleave 连续切）、"
         "返回值转置（必须是 [B, Lq, H*D]）、以及源端的因果掩码有没有施加。"
     )
-    # 每层每 kv head 一次：2 层 × 2 个 kv head
-    assert st.summary()["n_compacts_built"] == 4
+    assert st.summary()["n_compacts_built"] == 4      # 2 层 × 2 kv head
     assert st.summary()["n_local_blocks"] == 4
 
 
@@ -116,7 +122,7 @@ def test_h2_compaction_actually_changes_the_output(tiny):
 
     这条防的是"钩子空转"：若某天 compact 块被静默跳过（或 budget 被当成
     L_s），`dcc_kv` 行会退化成 dense 行，而所有形状类断言照样全绿。
-    量级判据取 1e-4（实测偏离 2.9e-03），比路径差 9.7e-08 高四个数量级 ——
+    量级判据取 1e-4（实测偏离 5.8e-03），比路径差 1.5e-07 高四个数量级 ——
     两个量不在同一档，不会互相冒充。
     """
     ids = _ids(2)
@@ -131,11 +137,14 @@ def test_h2_compaction_actually_changes_the_output(tiny):
     assert st.summary()["n_compacts_built"] == 4
 
 
-def test_h3_phases_must_be_declared_explicitly():
-    """阶段是显式声明的，猜错要响亮失败。
+def test_h3_phases_and_compacts_source_must_be_declared_explicitly():
+    """阶段是显式声明的；目的端的"块从哪来"也必须显式。
 
     不能靠"`past_key_values` 是不是 None"去猜：把目的端当源端时，钩子会把
     紧凑块又存一份进 state，产物看着完全正常（模块文档第 2 条）。
+    也不能给 `compacts` 一个默认值：评测路径上"用本次 query 条件化"可能是
+    泄漏（本次 query 就是被打分的 token），"复用"可能是陈旧块 ——
+    两个方向的猜错都不报错（模块文档第 3 条）。
     """
     class _Mod:
         layer_idx = 0
@@ -150,12 +159,21 @@ def test_h3_phases_must_be_declared_explicitly():
         hook(_Mod(), q, k, v, scaling=0.25)
 
     with pytest.raises(ValueError, match="源端"):
+        st.destination_phase(compacts="build")
+
+    # compacts 必须显式给（没有默认值）
+    with pytest.raises(TypeError):
         st.destination_phase()
 
-    # 跑了源端之后才能进目的端
+    with pytest.raises(ValueError, match="compacts 必须"):
+        st.destination_phase(compacts="shared")
+
+    # 跑了源端之后才能进目的端；选了 reuse 但没 build 过也要拦
     st.source_phase()
     hook(_Mod(), q, k, v, scaling=0.25)
-    st.destination_phase()
+    with pytest.raises(ValueError, match="reuse"):
+        st.destination_phase(compacts="reuse")
+    st.destination_phase(compacts="build")
     assert st.n_destination_calls == 0
 
 
@@ -253,24 +271,46 @@ def test_h7_source_partition_is_even_and_covers_everything():
         A.source_partition(3, 4)
 
 
-def test_h8_budget_mode_and_the_identity_short_circuit():
-    """预算口径：`per_edge` 为主线，`total` 只作敏感性对照。
+def test_h8_budget_modes_ratio_and_the_identity_short_circuit():
+    """预算口径：绝对/相对两种给法、`per_edge` 为主线、`total` 只作敏感性对照。
 
     `total` 会让总预算随 world 放大 —— 那是"花更多 KV 换质量"，不是机制收益。
     summary 里必须把这条限制写进产物，而不是只写在文档里。
     """
     per = A.HookConfig(budget=64, dcc_world=4, budget_mode="per_edge")
-    assert [per.edge_budget(n) for n in (100, 16, 15, 1)] == [16, 16, 15, 1]
+    assert [per.edge_budget(n, 100) for n in (100, 16, 15, 1)] == [16, 16, 15, 1]
 
     tot = A.HookConfig(budget=64, dcc_world=4, budget_mode="total")
-    assert [tot.edge_budget(n) for n in (100, 16)] == [64, 16]
+    assert [tot.edge_budget(n, 100) for n in (100, 16)] == [64, 16]
+
+    # 相对口径：每次按当时的源长解析（评测路径的源长逐样本变化）
+    rel = A.HookConfig(budget_ratio=0.05, dcc_world=2)
+    assert rel.resolve_budget(1000) == 50
+    assert rel.resolve_budget(100) == 5
+    assert rel.edge_budget(500, 1000) == 25
+    # 源太短时解析出来的总预算会 < world ⇒ 必须**报错**而不是把每边夹到 1
+    # （夹上去会让实际总预算超出声明值，"每边 B_total/world" 这个口径就不再成立）
+    with pytest.raises(ValueError, match="per_edge"):
+        rel.resolve_budget(10)                  # round(0.5) = 0 ⇒ 夹到 1 < 2
+
+    # 互斥：两个都给 / 都不给都要拦
+    with pytest.raises(ValueError, match="恰好给一个"):
+        A.HookConfig(budget=8, budget_ratio=0.5)
+    with pytest.raises(ValueError, match="恰好给一个"):
+        A.HookConfig()
+    with pytest.raises(ValueError, match="budget_ratio"):
+        A.HookConfig(budget_ratio=1.5)
 
     assert "主口径" in A.DccAttentionState(per).summary()["budget_claim_scope"]
     assert "不得" in A.DccAttentionState(tot).summary()["budget_claim_scope"]
 
-    # 每边至少 1 个 key ⇒ budget 必须 ≥ world，否则总预算名不副实
+    # 每边至少 1 个 key ⇒ 总预算必须 ≥ world（绝对口径在构造时就能查）
     with pytest.raises(ValueError, match="per_edge"):
         A.HookConfig(budget=2, dcc_world=4, budget_mode="per_edge")
+    # 相对口径只能在拿到源长时才查得出来 —— 所以它必须在 resolve_budget 里也查
+    with pytest.raises(ValueError, match="per_edge"):
+        A.HookConfig(budget_ratio=0.01, dcc_world=4, budget_mode="per_edge") \
+            .resolve_budget(100)                 # round(1.0) = 1 < 4
 
     # 预算跨过段长时走 identity：保证"无压缩"这一档**不带**构造链的 ridge 残差
     tiny_cfg = A.HookConfig(budget=8, dcc_world=1, mode="dcc_kv")
@@ -292,13 +332,147 @@ def test_h9_dcc_world_multiplies_the_edges_but_not_the_claim(tiny):
     assert st.summary()["n_compacts_built"] == 12
     assert st.summary()["conditionalization_marginal_available"] is False
     assert "单卡" in st.summary()["conditionalization_marginal_reason"]
-
-    # 一次前向里段数与 summary 对得上；但**不得**据此声称"条件化有效"
     assert st.summary()["dcc_world"] == 3
+    assert st.summary()["resolved_budget_by_source_len"] == {str(SRC_LEN): BUDGET}
 
 
 # =============================================================================
-# C. measure_prefill 目的端的位置口径
+# C. 本地块契约（2026-09-21 新增）
+# =============================================================================
+
+def test_h11_local_context_is_attended_to_not_dropped(tiny):
+    """目的端**自己的本地上下文**必须被精确算进去，而不是丢掉。
+
+    旧契约把本地块取成"传入 cache 的尾部 Lq 个"，隐含假设"cache 里除了本次
+    token 就只有源端"。prefill 计时恰好满足，**评测路径不满足**：目的端有自己
+    的本地段（提示词尾段），按旧规则它既不在 state 里、又被尾部规则排除 ⇒
+    整段本地上下文静默消失（形状全对、数值偏、量级也正常）。
+
+    判据：分三次前向（源段 → 本地段 → continuation）的 dense 臂结果，必须等于
+    "把三段拼起来一次前向"的原生结果。dense 臂下源段是精确的（identity），所以
+    两者本应等价 —— 差别只能来自本地块契约。
+    """
+    n_src, n_loc, n_cont = 20, 5, 4
+    ids = _ids(11, n_src + n_loc + n_cont)
+    full = native_logits(tiny, ids)[:, -n_cont:, :]
+
+    ids_src, ids_loc, ids_cont = ids[:, :n_src], ids[:, n_src:n_src + n_loc], ids[:, -n_cont:]
+    cfg = A.HookConfig(budget=n_src, mode="dense")
+    with torch.no_grad():
+        with A.dcc_attention(tiny, cfg) as st:
+            st.source_phase()
+            tiny(ids_src, use_cache=True)
+            # 目的端探针：本地段。块在这里建，用的是本地段的 query
+            st.destination_phase(compacts="build")
+            loc = tiny(ids_loc, use_cache=True, position_ids=torch.arange(
+                n_src, n_src + n_loc).unsqueeze(0))
+            # continuation 复用同一批块，并把**本地段**作为 past 传进去
+            # （本地 KV 只含本地段：探针那次没传 past）
+            st.destination_phase(compacts="reuse")
+            cont = tiny(ids_cont, past_key_values=loc.past_key_values,
+                        use_cache=True,
+                        position_ids=torch.arange(n_src + n_loc, n_src + n_loc + n_cont)
+                        .unsqueeze(0))
+
+    dev = (cont.logits - full).abs().max().item()
+    assert dev < NATIVE_PATH_ATOL, (
+        f"带本地上下文的三段式与原生一次前向差 {dev:.3e}（只应差 ULP 量级）。"
+        "若量级在 1e-3 附近，最可能的原因是本地块被取成了'尾部 Lq 个'——"
+        "于是本地段（5 个 token）整段没进注意力。"
+    )
+    # 本地段的 5 个 token + 本次 4 个 query ⇒ 两次目的端调用各算一次本地块
+    assert st.summary()["n_local_blocks"] == 2 * 2 * 2
+    assert st.summary()["n_builds"] == 2 * 2 * 1, "探针那次建块，continuation 那次复用"
+
+
+def test_h12_reuse_is_bitwise_identical_and_refuses_a_changed_source(tiny):
+    """`reuse` 必须逐位一致、且**不**新增构造；源长变了必须拒绝复用。
+
+    复用是"块只建一次"的机制。两条都容易静默失效：
+    ① 若 reuse 其实又建了一次，构造耗时留在计时窗口里，而产物看上去一样；
+    ② 换了样本（源长不同）却复用旧块 ⇒ budget / 选键 / β 全对不上，
+       形状与量级正常，只有数值偏。
+    """
+    ids = _ids(12)
+    src, dst = ids[:, :SRC_LEN], ids[:, SRC_LEN:]
+    pos = torch.arange(SRC_LEN, SRC_LEN + DST_LEN).unsqueeze(0)
+    cfg = A.HookConfig(budget=BUDGET, mode="dcc_kv")
+
+    with torch.no_grad():
+        with A.dcc_attention(tiny, cfg) as st:
+            st.source_phase()
+            tiny(src, use_cache=True)
+            st.destination_phase(compacts="build")
+            o1 = tiny(dst, use_cache=True, position_ids=pos).logits
+            builds_after_first = st.summary()["n_builds"]
+            st.destination_phase(compacts="reuse")
+            o2 = tiny(dst, use_cache=True, position_ids=pos).logits
+            assert torch.equal(o1, o2), "reuse 与 build 的输出必须逐位相同"
+            assert st.summary()["n_builds"] == builds_after_first, \
+                "reuse 不得再触发构造（构造代价会因此留在计时窗口里）"
+
+            # 源长变了：必须拒绝，而不是拿旧块算
+            other = _ids(13, SRC_LEN + 3 + DST_LEN)
+            st.source_phase()
+            tiny(other[:, :SRC_LEN + 3], use_cache=True)
+            st.destination_phase(compacts="reuse")
+            with pytest.raises(ValueError, match="源长"):
+                tiny(dst, use_cache=True, position_ids=pos)
+
+
+def test_h13_the_source_must_not_be_left_in_the_passed_cache(tiny):
+    """指纹守卫：把源端连同本地块一起传进来必须抛错。
+
+    混进去的后果是**静默**的：源端会同时以紧凑块与本地精确块两种形式进入
+    softmax（源端质量被算两遍），而形状、dtype、量级全都正常，只有数值略偏。
+    守卫是 4 行采样的**启发式**，不是证明 —— 但它要抓的成因只有一个
+    （调用方把同一张源端张量又传了进来）。
+    """
+    ids = _ids(14)
+    src, dst = ids[:, :SRC_LEN], ids[:, SRC_LEN:]
+    pos = torch.arange(SRC_LEN, SRC_LEN + DST_LEN).unsqueeze(0)
+    cfg = A.HookConfig(budget=BUDGET, mode="dcc_kv")
+
+    with torch.no_grad():
+        # 正确用法：目的端只带自己的 token（past=None）⇒ 不抛
+        with A.dcc_attention(tiny, cfg) as st:
+            st.source_phase()
+            tiny(src, use_cache=True)
+            st.destination_phase(compacts="build")
+            tiny(dst, use_cache=True, position_ids=pos)
+
+        # 错误用法：把源端 cache 也传进去 ⇒ 必须抛
+        with A.dcc_attention(tiny, cfg) as st:
+            st.source_phase()
+            c = tiny(src, use_cache=True)
+            st.destination_phase(compacts="build")
+            with pytest.raises(ValueError, match="源端"):
+                tiny(dst, past_key_values=c.past_key_values, use_cache=True,
+                     position_ids=pos)
+
+    # 守卫只在该契约可能被破坏时才可能开火：源长 > 传入 cache ⇒ 直接跳过
+    st2 = A.DccAttentionState(cfg)
+    st2.record_source(0, torch.randn(1, 2, 32, 8), torch.randn(1, 2, 32, 8))
+    A._assert_local_cache_excludes_source(st2, 0, torch.randn(1, 2, 4, 8))
+
+
+def test_h14_summary_carries_the_declarations_that_must_travel_with_numbers(tiny):
+    """落盘必须带三条与数字同行的声明 —— 否则下游会把"接线"读成"结论"。"""
+    _, st = run_two_phase(tiny, _ids(15), mode="dcc_kv", budget=BUDGET, dcc_world=2)
+    s = st.summary()
+    for key in ("local_block_contract", "conditionalization_marginal_available",
+                "conditionalization_marginal_reason", "budget_claim_scope",
+                "resolved_budget_by_source_len", "ignores_attention_mask",
+                "build_in_timing_window", "lambda_beta", "n_repr", "projection_dim"):
+        assert key in s, f"summary 缺 {key}"
+    assert s["ignores_attention_mask"] is True
+    assert "只含目的端本地 KV" in s["local_block_contract"]
+    assert "含 T_build" in s["build_in_timing_window"], \
+        "构造在计时窗口内这件事必须自己申报（它是与 dense 臂的一个额外差异）"
+
+
+# =============================================================================
+# D. measure_prefill 目的端的位置口径
 # =============================================================================
 
 class _Out:
@@ -350,10 +524,10 @@ def test_h10_destination_positions_are_absolute_and_arm_independent():
     `DynamicCache.get_seq_length()` 读的是**实际张量长度** —— 裁剪后返回 B
     而不是 S。`LlamaModel.forward` 在 position_ids 缺省时用
     `arange(L) + past_seen_tokens`，于是压缩臂的 dst 从 B 起算（实测数值差
-    4.9e-3，是 dense 参照臂路径差 9.7e-08 的 5 个数量级）；而 dense 臂的 cache
+    4.9e-3，是 dense 参照臂路径差 1.5e-07 的 5 个数量级）；而 dense 臂的 cache
     没被裁剪、位置本就是 S..。
 
-    危害不是"少了一点精度"：它让 A1b 断言的「两臂唯一差别是 KV 长度」
+    危害不是"少了一点精度"：它让"两臂唯一差别是 KV 长度"这条断言
     在真实模型下**不成立**，而跑在桩模型上的测试看不出来（桩不看 position_ids）。
     """
     seq_len, dest_len, ratio = 512, 64, 0.05

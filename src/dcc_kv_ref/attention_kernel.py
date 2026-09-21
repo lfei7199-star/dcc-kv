@@ -400,6 +400,8 @@ def dcc_kv_attention(
     query_positions: Optional[torch.Tensor] = None,   # [Lq] 全局位置（因果用）
     remote_offsets: Optional[Sequence[int]] = None,   # 各远端块的全局起始位置
     local_offset: int = 0,
+    local_causal: Optional[bool] = None,              # 本地块是否因果；None = 由 query_positions 推导
+    remote_causal: Optional[bool] = None,             # 远端块是否因果；None = 由 query_positions 推导
     scale: Optional[float] = None,
     query_chunk: Optional[int] = None,
 ) -> torch.Tensor:
@@ -407,12 +409,25 @@ def dcc_kv_attention(
 
     这是 A3 / E6 的 `dcc_kv` 行、以及注意力替换钩子共用的入口。
 
-    因果语义（**两条分支，别混说**）
-    -------------------------------
-    - `query_positions is None` ⇒ **全可见**：不施加任何因果掩码，
-      适用于 prefill 中源块整体位于目的端 query 之前的情形。
-    - `query_positions` 给定 ⇒ 按"key 全局位置 ≤ query 全局位置"掩码，
-      此时**各远端块的全局起始位置必须由 `remote_offsets` 给出**。
+    因果语义（**两条独立策略，2026-09-21 解耦**）
+    ------------------------------------------------
+    本地块（目的端自己的 token）与远端块（源端）的可见性**本来就是两件事**：
+    远端源块整体位于目的端 query 之前 ⇒ 对它全可见；本地块则是同一段序列内部
+    ⇒ 因果。旧实现把两者绑在一个开关上（`query_positions` 给不给），于是
+    **表达不出**这个组合，调用方只能二选一，两条都会算错：
+
+    - `query_positions is None`  ⇒ 本地也全可见 ⇒ 目的端能看见自己的未来 token；
+    - `query_positions` 给定     ⇒ 远端也做因果 ⇒ 被 `selected_indices`（RMS 序）
+      当成位置前缀切掉一部分源 key，且**形状与量级都正常**。
+
+    因此改为两个独立的可选开关，语义与旧行为兼容：
+
+    - `local_causal` / `remote_causal` 为 `None` 时，各自按
+      `query_positions is not None` 推导 ⇒ **旧调用点的行为逐位不变**；
+    - `remote_causal=True` 时**各远端块的全局起始位置必须由 `remote_offsets`
+      给出**（见下）；
+    - 注意力替换钩子用 `local_causal=True, remote_causal=False`
+      （`src/distributed/attention_hook.py`），这是本函数存在的第二个调用方。
 
     ⚠️ 自查修正（2026-09-18）：本函数的文档原先写「`remote_offsets` 缺省视为
     全可见」，而实现是「缺省把偏移当 0，**并施加因果掩码**」—— 两者不是一回事，
@@ -429,14 +444,30 @@ def dcc_kv_attention(
             f"{len(compact_blocks)}；长度不足会 IndexError，长度多余会被静默忽略 ——"
             "两种都是在没有共同约定时错配因果掩码（块与偏移必须一一对应）"
         )
-    if (query_positions is not None and remote_offsets is None
-            and len(compact_blocks) > 1):
+    # 解析两个开关。缺省推导规则必须与旧行为一致（见文档「因果语义」）：
+    # 旧行为 = 「给 query_positions ⇒ 两边都因果；不给 ⇒ 两边都全可见」。
+    qp_given = query_positions is not None
+    if local_causal is None:
+        local_causal = qp_given
+    if remote_causal is None:
+        remote_causal = qp_given
+    if bool(local_causal) and not qp_given:
         raise ValueError(
-            f"给了 query_positions 但未给 remote_offsets，且有 "
+            "local_causal=True 必须给出 query_positions：本地块的因果掩码要逐 query "
+            "的位置。缺位置只会退化成全可见（不报错、静默算错）。"
+        )
+    if bool(remote_causal) and not qp_given:
+        raise ValueError(
+            "remote_causal=True 必须给出 query_positions：远端块的因果掩码按"
+            "「key 全局位置 ≤ query 全局位置」算，缺位置无从构造。"
+        )
+    if bool(remote_causal) and remote_offsets is None and len(compact_blocks) > 1:
+        raise ValueError(
+            f"远端块需要因果掩码但未给 remote_offsets，且有 "
             f"{len(compact_blocks)} 个远端块：此时无法确定各块的全局起始位置。"
             "缺省按 0 处理会把所有块都当成起始于位置 0，得到形状与量级都正常、"
             "但数值错误的结果（实测与正确解差 1.03）。请显式传入各块的全局偏移；"
-            "若确实想要全可见，请改为不传 query_positions。"
+            "若确实想要全可见，请传 remote_causal=False。"
         )
 
     partials: List[PartialAttention] = []
@@ -444,7 +475,7 @@ def dcc_kv_attention(
     if local_keys is not None:
         if local_values is None:
             raise ValueError("给出 local_keys 就必须同时给出 local_values")
-        if query_positions is not None:
+        if local_causal:
             part = dense_attention(
                 query, local_keys, local_values,
                 query_positions=query_positions, block_offset=local_offset,
@@ -458,7 +489,7 @@ def dcc_kv_attention(
     Lq = int(query.shape[-2])
     for i, ck in enumerate(compact_blocks):
         vis = None
-        if query_positions is not None:
+        if remote_causal:
             off = int(remote_offsets[i]) if remote_offsets is not None else 0
             vis = causal_visibility(ck.selected_indices, query_positions, off)
             if not bool(vis.any()):
