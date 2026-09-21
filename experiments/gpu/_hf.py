@@ -510,6 +510,25 @@ def _score_continuations(lm, choices, cache, base_logit, S, device) -> List[floa
     return scores
 
 
+def pairing_key(row: Dict[str, Any]) -> str:
+    """一个评测样本的**身份键**，供跨方法核对「配对是否同源同序」。
+
+    配对检验的前提是 `a[i]` 与 `b[i]` 来自同一个实验条件。表里的逐样本数组
+    天然按 `samples` 的顺序排列，但「天然」是**假设**：一旦某方法在评测中途
+    跳过/重排了样本，两列数组仍等长、CI 仍算得出、数值仍好看，而它配的是
+    两个不同的样本。这里给出可比对的键，把那个假设变成**可检验的断言**。
+
+    为什么不用「prompt 文本」当键：那是全量比对，落盘体积随提示词长度涨；
+    键只要**足以暴露错位**即可。取 (task, answer, 选项数, 提示词 token 数)：
+    它不保证全局唯一（同一 task 下可能有等长样本），但任何重排都会让序列
+    在**某一位**上对不上 —— 这已足够，且本函数的返回会被逐位比对。
+
+    ⚠️ 不要把它当唯一 ID 用（例如去重、做字典键）。它只用于**顺序比对**。
+    """
+    return "%s|%s|%d|%d" % (row["task"], row["answer"], row["n_choices"],
+                            row["prompt_tokens"])
+
+
 def evaluate(
     lm: LoadedModel,
     samples: Sequence[EvalSample],
@@ -543,6 +562,11 @@ def evaluate(
         "by_task": {k: sum(v) / len(v) for k, v in by_task.items()},
         "by_length": {k: sum(v) / len(v) for k, v in by_len.items()},
         "rows": rows,
+        # 配对比较所需的两样。它们**从同一个 rows 导出**，而不是另跑一遍 ——
+        # 若聚合准确率与逐样本数组来自两次不同的评测，H2 的质量差与它自己的
+        # 置信区间就建在两组样本上，而两者看起来都正常。
+        "per_sample": [int(r["correct"]) for r in rows],
+        "keys": [pairing_key(r) for r in rows],
     }
 
 

@@ -63,6 +63,26 @@ H0 接上后，`dcc_kv` 行的目的端前向走钩子（源端由 state 携带�
 **一列缺失时不得用另一列顶替**：kernel-matched 算不出时 H2 的那一格记
 unresolved，绝不回落到 native 列 —— 那正是"两列互冒充"。
 
+H2 的「质量相近」前提：数据来源与方向口径（2026-09-21）
+------------------------------------------------------
+该前提是**单侧非劣检验**，参照物是 **dense**（`hypotheses.QUALITY_COMPARABLE_
+REFERENCE`），检验量是 `Q_DCC − Q_dense` 的**配对 95% CI 下界**。它此前恒为
+`None`（记 unresolved），根因不是"通路没独立"，而是**逐样本判对错没落盘** ——
+每格只有一个聚合准确率，配对 CI 在信息量上算不出来。
+
+现在 `measure_point` 落两样（与聚合量**同行**）：
+
+    accuracy_per_sample —— 逐样本是否答对（顺序同 `samples`）
+    eval_sample_keys    —— 每样本的身份键，供**跨行**逐位比对
+
+配对时**先验键再算数**：`dcc_kv` 与 `dense` 两行的键序列若有一位不同，就
+拒绝配对并记下原因。少了这一步，样本错位只会产出一个"数值正常、实际无意义"
+的 CI —— 它不会报错，只会悄悄地把结论带偏。
+
+⚠️ CI 的**方向**容易写反，且写反后符号、量级都正常（`report.paired_bootstrap`
+在 `higher_is_better=True` 时把配对差翻了符号）：`ci_low = −ci_95_upper`。
+实测钉住的样例见 `_paired_quality_ci` 的 docstring，另有锚点测试守着。
+
 用法
 ----
     # 任何机器上都能跑：打印完整网格与每个方法的前置条件
@@ -401,6 +421,10 @@ def measure_point(
     acc: Optional[float] = None
     acc_by_task: Optional[Dict[str, float]] = None
     n_eval = 0
+    # 逐样本判对错 + 身份键。H2 的「质量相近」前提要做**配对**非劣检验，
+    # 光有聚合准确率算不出配对 CI（见模块文档）。两者与 acc 同源同批。
+    acc_per_sample: Optional[List[int]] = None
+    eval_sample_keys: Optional[List[str]] = None
     if samples:
         # `dest_fraction` 对**所有**方法都传：源段 / 目的端本地段的切分必须是
         # 同一份，否则两边的"保留了多少精确 token"不同，质量差里混进了预算不
@@ -413,6 +437,8 @@ def measure_point(
         acc = ev["accuracy"]
         acc_by_task = ev["by_task"]
         n_eval = ev["n"]
+        acc_per_sample = list(ev["per_sample"])
+        eval_sample_keys = list(ev["keys"])
 
     kv_ratio = 1.0 if method == "dense" else (
         budget_ratio if budget_ratio is not None else 1.0)
@@ -469,6 +495,12 @@ def measure_point(
         "accuracy": acc,
         "accuracy_by_task": acc_by_task,
         "n_eval": n_eval,
+        # 逐样本数据**与本行的聚合量同行落盘**（不另立一份）。理由和 attn_hook
+        # 那边一样：读表的人要能就地看出这一行的 CI 是哪批样本配出来的。
+        # CSV 里这两个 list 会被 str() 化（save_csv 不做特殊处理）—— 可读性差，
+        # 但不丢信息；要看整齐的逐样本数据看 JSON。
+        "accuracy_per_sample": acc_per_sample,
+        "eval_sample_keys": eval_sample_keys,
         "status": "ok",
     }
 
@@ -635,8 +667,93 @@ def dcc_row_modes(a: argparse.Namespace) -> List[str]:
     return [SYNC_MODE_NA]
 
 
+def _pp_percent(x: float) -> float:
+    """比值 → 百分点，并把 `-0.0` 归一成 `0.0`。
+
+    `-0.0` 在浮点里与 `0.0` 相等，但它会原样写进 JSON/CSV（`-0.0`），读的人
+    得停下来判断"是符号搞反了还是本来就为零"。归一化在这里是**报告口径**，
+    不是数值修正 —— 判定逻辑不受影响。
+    """
+    v = float(x) * 100.0
+    return 0.0 if v == 0 else v
+
+
+def _paired_quality_ci(r_dcc: Dict[str, Any], r_ref: Dict[str, Any],
+                        a: argparse.Namespace) -> Dict[str, Any]:
+    """(Q_DCC − Q_ref) 的配对 95% CI，单位**百分点**。有诊断，不算哑值。
+
+    返回 dict：available / ci_95_low_pp / ci_95_high_pp / mean_diff_pp /
+    n_pairs / pairing_keys_match / reason。`available=False` 时
+    `reason` 说明**为什么**配不出来 —— 三种原因必须分开写进产物：
+
+        · 两行中有一行没落逐样本数据（老产物 / 该方法是 blocked 行）；
+        · 键序列**不等** ⇒ 不是同一批样本或顺序错位（**拒绝配对**）；
+        · 两行样本数不等（与上一条独立，单独报，免得被当成同一个原因）。
+
+    ⚠️ 方向口径（实测钉住，别照直觉改）
+    ----------------------------------
+    `report.paired_bootstrap` 在 `higher_is_better=True` 时把配对差翻了符号
+    统一成"越小越好"，于是它返回的 `ci_95_lower/upper` 是
+    `−(Q_DCC − Q_ref)` 的区间，**不是**我们要的那个。实测：
+
+        A 比 B 好 20pp ⇒ mean_diff=+0.20、ci=[−0.28, −0.12]（统一方向）
+                      ⇒ Q_A−Q_B 的下界 = −ci_upper = **+0.12** = +12pp
+
+    写成 `ci_95_lower` 会把「更好」读成「更差」，而数值符号与量级都毫无异常
+    —— 这类错误不会被任何"看起来对不对"的检查抓到，只能靠定向测试。
+    """
+    out: Dict[str, Any] = {
+        "available": False, "ci_95_low_pp": None, "ci_95_high_pp": None,
+        "mean_diff_pp": None, "n_pairs": None, "pairing_keys_match": None,
+        "ref_method": H.QUALITY_COMPARABLE_REFERENCE, "reason": "",
+    }
+    sa = r_dcc.get("accuracy_per_sample")
+    sb = r_ref.get("accuracy_per_sample")
+    if sa is None or sb is None:
+        missing = [n for n, v in (("dcc_kv", sa), (H.QUALITY_COMPARABLE_REFERENCE, sb))
+                   if v is None]
+        out["reason"] = ("缺逐样本数据（%s）：该行没落 accuracy_per_sample"
+                         "（旧产物，或该行被阻断/报错而未评测）" % "、".join(missing))
+        return out
+    if len(sa) != len(sb):
+        out["reason"] = ("两行样本数不等（dcc_kv=%d，%s=%d）⇒ 不是同一批样本"
+                         % (len(sa), H.QUALITY_COMPARABLE_REFERENCE, len(sb)))
+        return out
+    ka = r_dcc.get("eval_sample_keys")
+    kb = r_ref.get("eval_sample_keys")
+    if ka is None or kb is None:
+        out["reason"] = ("缺配对身份键（eval_sample_keys）：无法验证两行评的是"
+                         "同一批样本、同一顺序 ⇒ 拒绝配对")
+        return out
+    # **先验键再算数**：键不等就直接拒绝，不进入数值计算。
+    if list(ka) != list(kb):
+        bad = next((i for i, (x, y) in enumerate(zip(ka, kb)) if x != y), None)
+        out["pairing_keys_match"] = False
+        out["reason"] = ("配对键序列不一致（第 %s 位起：%r vs %r）⇒ 两行不是同源"
+                         "同序的样本，配出来的 CI 无意义"
+                         % (bad, ka[bad] if bad is not None else None,
+                            kb[bad] if bad is not None else None))
+        return out
+    out["pairing_keys_match"] = True
+    res = R.paired_bootstrap(
+        sa, sb, metric_name="accuracy", unit="pp",
+        higher_is_better=True, seed=a.seed,
+    )
+    out.update(
+        available=True,
+        ci_95_low_pp=_pp_percent(-res.ci_95_upper),   # ← 见 docstring 的方向口径
+        ci_95_high_pp=_pp_percent(-res.ci_95_lower),
+        mean_diff_pp=_pp_percent(res.mean_diff),      # 原始方向：Q_DCC − Q_ref
+        n_pairs=int(res.n_pairs),
+        reason="",
+    )
+    return out
+
+
 def h2_points_from_rows(a: argparse.Namespace,
-                        rows: List[Dict[str, Any]]) -> List[H.H2PerLength]:
+                        rows: List[Dict[str, Any]],
+                        diagnostics: Optional[Dict[str, Any]] = None,
+                        ) -> List[H.H2PerLength]:
     """从主表行数据里抽 H2 的三个原始量，构造逐长度的判据输入。
 
     配对结构：同一 (model, ctx_len, sync_mode) 下，`dcc_kv` 与
@@ -730,24 +847,64 @@ def h2_points_from_rows(a: argparse.Namespace,
             # 基线是单卡方法，其 sync/async 轴同样被折叠 ⇒ 不能按模式查
             # （否则配对恒为空；见 find_axis_free 的说明）。
             r_shr = find_axis_free("kv_budget_shared", model, ctx)
-            # ⚠️ dense 行**不再**是配对必需项（2026-09-21）：prefill 的分子改为
-            # kernel-matched 那一列，它的两端都在 dcc_kv 行内测得，与 dense 行
-            # 无关。此前写 `r_den is None: continue` 会让"dense 行缺席"把 H2 判成
-            # unresolved —— 那是拿一个无关的行去决定另一个量的可判性。
-            # dense 行只影响 native 那一列（由 attach_prefill_speedups 补）。
+            # ⚠️ dense 行对两个量是**两种身份**，别混（2026-09-21 两度改判）：
+            #   · prefill 的分子改成 kernel-matched 后，**不再**需要 dense 行 ——
+            #     它的两端都在 dcc_kv 行内测得（原写法 `r_den is None: continue`
+            #     会让"dense 行缺席"把 H2 判成 unresolved，是拿无关的行决定另一个
+            #     量的可判性）。dense 行只影响 native 那一列。
+            #   · 但 quality_comparable 的参照物**就是** dense
+            #     （QUALITY_COMPARABLE_REFERENCE），所以它**重新**成为必需项。
+            # 两者分开处理：dense 缺席只让前提记 unresolved，不影响 prefill 那一格。
+            # dense 是单卡方法（轴恒折叠），但判据仍现算，不写死 ——
+            # 若哪天它的 gpu_required 变成 >1，这里会自动跟上。
             if r_dcc is None or r_shr is None:
                 continue
             acc_d, acc_s = r_dcc.get("accuracy"), r_shr.get("accuracy")
             sp_km = _kernel_matched_speedup(r_dcc)
+            r_den = (find_axis_free(H.QUALITY_COMPARABLE_REFERENCE, model, ctx)
+                     if not sync_axis_applies(H.QUALITY_COMPARABLE_REFERENCE, a)
+                     else find(H.QUALITY_COMPARABLE_REFERENCE, model, ctx, modes[0]))
+            if r_den is None:
+                ci: Dict[str, Any] = {
+                    "available": False, "ci_95_low_pp": None,
+                    "ci_95_high_pp": None, "mean_diff_pp": None, "n_pairs": None,
+                    "pairing_keys_match": None,
+                    "ref_method": H.QUALITY_COMPARABLE_REFERENCE,
+                    "reason": ("参照物行缺席（%s）：「质量相近」前提的参照物就是它，"
+                               "无此行则该前提无从判定"
+                               % H.QUALITY_COMPARABLE_REFERENCE),
+                }
+            else:
+                ci = _paired_quality_ci(r_dcc, r_den, a)
 
+            # 「质量相近」前提：单侧非劣检验，参照物是 **dense**（不是 shared）——
+            # 理由见 hypotheses.QUALITY_COMPARABLE_REFERENCE。它要的是
+            # (Q_DCC − Q_dense) 的配对 95% CI 下界，逐样本数据落盘后才算得出。
             comparable = None
-            if delta is not None and floor is not None and acc_d is not None \
-                    and acc_s is not None:
-                # 非劣检验要的是 (Q_DCC − Q_dense) 的**配对 95% CI 下界**，
-                # 而本表每格只落一个聚合准确率、不落逐样本判对错，故无法算 CI。
-                # 这里**不猜**：保持 None ⇒ 记入 unresolved。
-                # 要让 H2 真正落判据，需要在 measure_point 里落逐样本得分。
-                comparable = None
+            if diagnostics is not None:
+                diagnostics.setdefault("lengths", {})[str(ctx)] = dict(
+                    ci, model=model,
+                    quality_gain_reference="kv_budget_shared",
+                )
+            if delta is None or floor is None:
+                why = ("未声明非劣边界 / 噪声底线（--h2-delta-pp / "
+                       "--h2-noise-floor-pp）⇒ 该前提无从判定")
+            elif not ci["available"]:
+                why = ci["reason"]
+            else:
+                try:
+                    comparable = H.quality_comparable_non_inferior(
+                        ci["ci_95_low_pp"], delta_pp=delta,
+                        noise_floor_pp=floor, delta_bad_pp=delta_bad)
+                    why = ""
+                except ValueError as exc:
+                    # 参数越出可行区间 ⇒ 本次实验**不具备判定该前提的分辨率**。
+                    # 记 unresolved 并**保留原文**，不把它读成「质量确实不相近」
+                    # —— 那是两个不同的结论（hypotheses 的 docstring 写死了这条）。
+                    comparable = None
+                    why = "参数越界（分辨率不足）：%s" % exc
+            if comparable is None and diagnostics is not None:
+                diagnostics["lengths"][str(ctx)]["unresolved_reason"] = why
 
             # 量具是否体现压缩收益：由 `_hf` 的契约决定，不在本文件里写死。
             # **并且**这一格必须真的算出了 kernel-matched 那一列：契约声明灵敏、
@@ -778,7 +935,8 @@ def compute_h2(a: argparse.Namespace,
     设计上刻意让它在 E6 被阻断时也能跑完并如实产出 `h2_passed=False`：
     判定链路先接线、后取数，这样 E6 一跑通就能自动判定，不必再改代码。
     """
-    points = h2_points_from_rows(a, rows)
+    diagnostics: Dict[str, Any] = {}
+    points = h2_points_from_rows(a, rows, diagnostics)
     if not points:
         return {
             "h2_passed": None,
@@ -789,8 +947,21 @@ def compute_h2(a: argparse.Namespace,
     out = agg.to_dict()
     out["h2_note"] = (
         "quality_comparable 为 None 表示该长度上「质量相近」前提无法判定"
-        "（delta 与噪声底线尚未测量），记入 h2_unresolved_lengths，"
-        "**不计入** h2_n_failed —— 分辨率不足不等于未达标。"
+        "（缺逐样本数据 / 两边键不同源 / 未声明非劣边界与噪声底线 / 参数越界），"
+        "记入 h2_unresolved_lengths，**不计入** h2_n_failed —— "
+        "分辨率不足不等于未达标。"
+        "逐长度的具体原因见 h2_comparable_diagnostics.lengths[<ctx>]"
+        ".unresolved_reason；判定量是该长度的 ci_95_low_pp。"
+    )
+    out["h2_comparable_diagnostics"] = diagnostics
+    out["h2_comparable_note"] = (
+        "前提的参照物是 dense（hypotheses.QUALITY_COMPARABLE_REFERENCE）："
+        "检验量 = Q_DCC − Q_dense 的配对 95% CI 下界（ci_95_low_pp，单位百分点）。"
+        "它与 h2_worst_quality_gain_pp 的参照物**不同**"
+        "（后者相对 kv_budget_shared，回答的是 H2 前半句的「提升 ≥1.5pp」），"
+        "两个数不可互相代入。配对前先逐位比对 eval_sample_keys；"
+        "键不一致时拒绝配对（记 unresolved），不产出一个"
+        "「数值正常但配错样本」的 CI。"
     )
     out["h2_prefill_instrument_valid"] = bool(
         _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV)

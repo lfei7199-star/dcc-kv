@@ -53,9 +53,14 @@ H2 的口径与它的未决点
 ``no-judge`` **不等于**「结论未定」—— 它表示**判据未接**。
 
 H2 的跨长度聚合规则已于 2026-09-16 定下（见 :data:`H2_LENGTH_AGGREGATION`
-与 :func:`h2_pass_across_lengths`），因此 H2 的缺口再降一级：从「按什么聚合
-未定」降为「**参数待测**」（非劣边界 ``delta`` 与噪声底线依赖 E6 的重复 run）。
-判定仍为 ``no-judge`` —— 规则接好了，但 E6 还没产出可供它消费的数字。
+与 :func:`h2_pass_across_lengths`）。判定链路已于 2026-09-21 **完整闭合**：
+E6 把逐样本判对错与该样本的配对身份键随聚合准确率**同行落盘**，配对 95% CI
+因此算得出来，:func:`quality_comparable_non_inferior` 有了可消费的输入。
+
+判定仍为 ``no-judge``，但**唯一剩下的原因是参数取值**：非劣边界 ``delta``
+与噪声底线按设计**无默认值**（有默认值等于假称前提永远成立），必须由实验者
+显式声明。**这不是「结论未定」** —— 链路、口径、阈值都已就位，缺的是一次
+带参数的运行，以及一次真实的重复 run 来把噪声底线测出来。
 
 **规则为什么是「每个长度分别判定、全通过才算成立」而不是把 4 个长度池化**
 
@@ -502,8 +507,16 @@ HYPOTHESES: Dict[str, HypothesisSpec] = {
             "judge 指聚合入口；单长度原语仍是 h2_pass。"
             "「质量相近」的判定程序已给出（quality_comparable_non_inferior，"
             "论证见论文 §7、摘要见 reproducibility.md §6）。"
-            "仍为 no-judge 的唯一原因：非劣边界 delta 与噪声底线依赖 E6 的重复 run，"
-            "**参数待测** —— 缺口已由「定义缺失」→「聚合未定」→ 此。"
+            "2026-09-21：**判定链路已完整闭合** —— 该检验要的 (Q_DCC − Q_dense) "
+            "配对 95% CI 由 report.paired_bootstrap 计算，其输入（逐样本判对错 + "
+            "配对身份键 eval_sample_keys）已由 E6 的 measure_point 与该行的聚合"
+            "准确率**同行落盘**；配对前**先逐位比对键**，不同源即拒绝配对"
+            "（记 unresolved），不产出一个「数值正常、实际无意义」的 CI。"
+            "仍为 no-judge 的唯一原因只剩**参数取值**：--h2-delta-pp 与 "
+            "--h2-noise-floor-pp 按设计**无默认值**，未声明时该长度记 unresolved，"
+            "并在 payload 的 h2_comparable_diagnostics 里写明缺的是哪一个。"
+            "缺口沿革：「定义缺失」→「聚合未定」→「参数待测」→「质量侧通路未独立」"
+            "→「判定所需的逐样本数据未落盘」→ 此。"
         ),
     ),
     "H3": HypothesisSpec(

@@ -25,6 +25,13 @@
          读者会据此认为覆盖已经有了。**2026-09-21 增 I4**：`docs/*.md` 里不得有
          **未闭合的表格行** —— `FILE_MAP.md` 曾有 4 行以 ``| `x.py` | 483 | **G1``
          这种半截形态存在，而那份文档的职责就是逐项说明每个受控文件。
+   J     H2 的「质量相近」前提此前**判不出来**：每格只落一个聚合准确率，配对
+         95% CI 无从计算 ⇒ `quality_comparable` 恒 None。**2026-09-21 接通**：
+         逐样本判对错与配对身份键随该行一同落盘，CI 交给
+         `report.paired_bootstrap`。同组锚点锁：CI 的**方向**（写反了符号与
+         量级全都正常）、**先验键再算数**（键不同源必须拒绝配对，而不是产出一个
+         "数值正常、实际无意义"的 CI）、三种拒绝原因分别报、前提的参照物是
+         **dense** 而不是 shared、参照物行缺席只影响前提而**不连坐** prefill。
 """
 from __future__ import annotations
 
@@ -210,7 +217,13 @@ def _e6_ns(**kw):
     import argparse
     base = dict(models=["m"], context_lengths=[4096],
                 sync_modes=["sync", "async"], h2_delta_pp=None,
-                h2_noise_floor_pp=None, h2_delta_bad_pp=None)
+                h2_noise_floor_pp=None, h2_delta_bad_pp=None,
+                # bootstrap 的种子在真实 CLI 里恒有（`--seed`，默认 42）。桩里
+                # 缺它时 `_paired_quality_ci` 会在取 `a.seed` 时 AttributeError
+                # —— 那是**桩不完整**，不该靠实现里塞 `getattr(a, "seed", 42)`
+                # 掩盖：那样"谁忘了传种子"就退化成"每次都用同一个别人指定的数"，
+                # 而产物里看不出这一点。
+                seed=42)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -726,4 +739,251 @@ def test_i4_docs_have_no_unterminated_table_rows():
                     (lineno, line[:60]))
     assert not offenders, ('docs 里有未闭合的表格行（半截记录会被读成"已写好了"）：'
                            + repr(offenders))
+
+
+# =============================================================================
+# J. H2「质量相近」前提的逐样本配对（2026-09-21 接通）
+# =============================================================================
+
+def _paired_rows(n=8, dcc_k=4, den_k=4, shared_k=0, ctx=4096):
+    """H2 配对用的三行（dcc / shared / dense），自带逐样本数据与配对键。
+
+    逐样本数组由「答对几条」生成（`dcc_k` / `den_k` / `shared_k`），因此
+    `(Q_DCC − Q_dense)` 的实际值是**调用方指定**的 —— 方向断言才能写死。
+
+    `n=8` 而不是 1：配对 bootstrap 在 n=1 上区间宽度恒为 0，方向对不对看不出来。
+    """
+    from experiments.gpu import e6_main_table as E
+    keys = ["m|%d|2|%d" % (i % 3, 64 + i) for i in range(n)]
+
+    def ps(k):
+        return [1] * k + [0] * (n - k)
+
+    return [
+        {"method": "dcc_kv", "model": "m", "context_length": ctx,
+         "sync_async": "sync", "accuracy": dcc_k / n,
+         "accuracy_per_sample": ps(dcc_k), "eval_sample_keys": list(keys),
+         "prefill_ms_median": 100.0,
+         "dest_ms_median": 10.0, "dest_ms_median_dense_kernel": 12.0},
+        {"method": "kv_budget_shared", "model": "m", "context_length": ctx,
+         "sync_async": E.SYNC_MODE_NA, "accuracy": shared_k / n,
+         "accuracy_per_sample": ps(shared_k), "eval_sample_keys": list(keys),
+         "prefill_ms_median": 130.0},
+        {"method": "dense", "model": "m", "context_length": ctx,
+         "sync_async": E.SYNC_MODE_NA, "accuracy": den_k / n,
+         "accuracy_per_sample": ps(den_k), "eval_sample_keys": list(keys),
+         "prefill_ms_median": 120.0},
+    ]
+
+
+def _row(rows, method):
+    return next(r for r in rows if r["method"] == method)
+
+
+def test_j1_per_sample_data_comes_from_the_same_rows_as_the_accuracy():
+    """逐样本数组必须**由聚合准确率那批 rows 导出**，不是另跑一遍评测。
+
+    若两者来自两次不同的评测，H2 的质量差与它自己的置信区间就建在两组样本上，
+    而两个数看起来都正常（同样的 n、同样的量纲）。
+    """
+    hf = _read("experiments/gpu/_hf.py")
+    assert '"per_sample": [int(r["correct"]) for r in rows]' in hf, \
+        "_hf.evaluate 的逐样本数组不是从 rows 导出的"
+    assert '"keys": [pairing_key(r) for r in rows]' in hf, \
+        "配对身份键不是从同一批 rows 导出的"
+    assert 'def pairing_key(row: Dict[str, Any]) -> str:' in hf
+    # 它只是**顺序比对**用的键，不得被当成唯一 ID（例如去重）
+    assert "只用于**顺序比对**" in hf
+
+    e6 = _read("experiments/gpu/e6_main_table.py")
+    assert 'acc_per_sample = list(ev["per_sample"])' in e6
+    assert 'eval_sample_keys = list(ev["keys"])' in e6
+    # 必须与聚合量**同行**落盘 —— 否则读表的人看不出这一行的 CI 是哪批样本配的
+    assert '"accuracy_per_sample": acc_per_sample,' in e6
+    assert '"eval_sample_keys": eval_sample_keys,' in e6
+
+
+def test_j2_paired_ci_direction_is_pinned_by_construction():
+    """CI 的**符号方向**：dcc 全对、参照物全错 ⇒ 下界必须是 **+100pp**。
+
+    这条是 J 组里最要紧的：`report.paired_bootstrap` 在 `higher_is_better=True`
+    时把配对差翻了符号统一成"越小越好"，于是它返回的 `ci_95_lower/upper` 是
+    `−(Q_DCC − Q_dense)` 的区间。直接取 `ci_95_lower` 会把"明显更好"读成
+    "明显更差"，而**符号、量级、区间宽度全都正常** —— 没有任何"看起来不对劲"
+    的地方会暴露它。只能靠这条定向断言。
+    """
+    from experiments.gpu import e6_main_table as E
+    ns = _e6_ns(h2_delta_pp=1.0, h2_noise_floor_pp=0.0)
+
+    rows = _paired_rows(n=8, dcc_k=8, den_k=0)
+    ci = E._paired_quality_ci(_row(rows, "dcc_kv"), _row(rows, "dense"), ns)
+    assert ci["available"] is True, ci["reason"]
+    assert ci["n_pairs"] == 8
+    assert ci["ci_95_low_pp"] > 99.0, "方向写反了：(Q_DCC − Q_dense) 的下界应为正"
+    assert ci["mean_diff_pp"] > 99.0, "mean_diff 必须是原始方向 Q_DCC − Q_dense"
+
+    rows = _paired_rows(n=8, dcc_k=0, den_k=8)
+    ci = E._paired_quality_ci(_row(rows, "dcc_kv"), _row(rows, "dense"), ns)
+    assert ci["ci_95_low_pp"] < -99.0, "方向写反了：(Q_DCC − Q_dense) 的下界应为负"
+
+    # 源码级加固：取的是上界取负，且不得出现"直接用下界"的写法
+    e6 = _read("experiments/gpu/e6_main_table.py")
+    assert "ci_95_low_pp=_pp_percent(-res.ci_95_upper)" in e6
+    assert "ci_95_high_pp=_pp_percent(-res.ci_95_lower)" in e6
+    for wrong in ("ci_95_low_pp=res.ci_95_lower", "ci_95_low_pp = res.ci_95_lower",
+                  "ci_95_low_pp=res.ci_95_low",
+                  "ci_95_low_pp=_pp_percent(res.ci_95_lower)"):
+        assert wrong not in e6, "方向被改回了未翻转的那一侧"
+    # 负零必须归一：数值上等价，但它会被原样写进 JSON/CSV
+    assert "def _pp_percent(x: float) -> float:" in e6
+    assert "return 0.0 if v == 0 else v" in e6
+
+
+def test_j3_pairing_keys_are_checked_before_any_number_is_produced():
+    """键不同源 ⇒ **拒绝配对**，且不得产出任何数值（不是"产出了但标个警告"）。
+
+    少了这一步，样本错位只会产出一个"数值正常、实际无意义"的 CI：它不会报错，
+    只会悄悄把结论带偏。故断言的是 `ci_95_low_pp is None`（**没有数**），
+    而不是"有个数但附带说明"。
+    """
+    from experiments.gpu import e6_main_table as E
+    ns = _e6_ns(h2_delta_pp=1.0, h2_noise_floor_pp=0.0)
+
+    rows = _paired_rows()
+    den = _row(rows, "dense")
+    den["eval_sample_keys"] = ["X"] + den["eval_sample_keys"][1:]
+    ci = E._paired_quality_ci(_row(rows, "dcc_kv"), den, ns)
+    assert ci["available"] is False
+    assert ci["pairing_keys_match"] is False
+    assert ci["ci_95_low_pp"] is None and ci["ci_95_high_pp"] is None
+    assert ci["n_pairs"] is None and ci["mean_diff_pp"] is None
+    assert "键序列不一致" in ci["reason"]
+    assert "第 0 位" in ci["reason"], "没指出从哪一位开始对不上"
+
+    # 只交换两个键 ⇒ 仍必须被拒（顺序错位是最阴的一种）
+    den2 = _row(rows, "dense")
+    k = list(den2["eval_sample_keys"])
+    k[3], k[4] = k[4], k[3]
+    den2["eval_sample_keys"] = k
+    ci2 = E._paired_quality_ci(_row(rows, "dcc_kv"), den2, ns)
+    assert ci2["available"] is False and "键序列不一致" in ci2["reason"]
+
+
+def test_j4_three_refusal_reasons_stay_distinguishable():
+    """缺数据 / 键不同源 / 样本数不等，三种原因必须**分别**报出来。
+
+    合并成一句"配对失败"就没人知道该去修什么：前者的处置是重跑该行、后者的
+    处置是查评测集顺序 —— 完全不同的两件事。断言三者互不相同。
+    """
+    from experiments.gpu import e6_main_table as E
+    ns = _e6_ns(h2_delta_pp=1.0, h2_noise_floor_pp=0.0)
+    rows = _paired_rows()
+
+    def reason_of(mutate):
+        den = dict(_row(rows, "dense"))
+        mutate(den)
+        return E._paired_quality_ci(_row(rows, "dcc_kv"), den, ns)["reason"]
+
+    r_missing = reason_of(lambda d: d.update(accuracy_per_sample=None))
+    r_keys = reason_of(lambda d: d.update(eval_sample_keys=None))
+    r_short = reason_of(lambda d: d.update(accuracy_per_sample=[1] * 7))
+    for tag, r in (("缺逐样本", r_missing), ("缺键", r_keys), ("样本数不等", r_short)):
+        assert r, "%s 没给出原因" % tag
+    assert len({r_missing, r_keys, r_short}) == 3, \
+        "三种拒绝原因被合并了：%r" % [r_missing, r_keys, r_short]
+    assert "缺逐样本数据" in r_missing
+    assert "eval_sample_keys" in r_keys
+    assert "样本数不等" in r_short
+
+
+def test_j5_the_premise_reference_is_dense_not_shared():
+    """前提的参照物是 **dense**，不是共享压缩基线。
+
+    构造一个能分辨两者的例子：dcc 与 dense 的逐样本**完全一致**、与 shared 差
+    75pp。参照物若是 dense ⇒ 下界 = 0；若被写成 shared ⇒ 下界 ≈ +75pp。
+    两者差得远，配错对象一眼可辨 —— 而如果随便挑个数（例如 50%），两种参照物
+    会给出同样"漂亮"的结果，测试就成了摆设。
+    """
+    from experiments.common import hypotheses as H
+    from experiments.gpu import e6_main_table as E
+    ns = _e6_ns(h2_delta_pp=1.0, h2_noise_floor_pp=0.0)
+    assert H.QUALITY_COMPARABLE_REFERENCE == "dense"
+
+    rows = _paired_rows(n=8, dcc_k=6, den_k=6, shared_k=0)
+    ci = E._paired_quality_ci(_row(rows, "dcc_kv"), _row(rows, "dense"), ns)
+    assert ci["ref_method"] == "dense"
+    assert abs(ci["ci_95_low_pp"]) < 1e-9, \
+        "与 dense 完全一致时下界应为 0，得到 %r ⇒ 参照物不是 dense" % ci["ci_95_low_pp"]
+    # 完全一致 ⇒ 差恒为 0；此处顺带钉住"负零已归一"（否则产物里会出现 -0.0）
+    assert str(ci["ci_95_low_pp"]) == "0.0", "负零没归一：%r" % ci["ci_95_low_pp"]
+    assert str(ci["mean_diff_pp"]) == "0.0", "负零没归一：%r" % ci["mean_diff_pp"]
+
+    out = E.compute_h2(ns, rows)
+    diag = out["h2_comparable_diagnostics"]["lengths"]["4096"]
+    assert diag["ref_method"] == "dense"
+    # 前提比的是 dense，H2 前半句的"提升"比的是 shared —— 两个数不可互代，
+    # 产物里必须写明这一点（否则读表的人会把 75pp 当成"质量提升"）
+    assert diag["quality_gain_reference"] == "kv_budget_shared"
+    assert "不可互相代入" in out["h2_comparable_note"]
+
+
+def test_j6_missing_reference_row_hits_only_the_premise():
+    """参照物行缺席 ⇒ 前提记 unresolved，但 prefill 那一格**不受连坐**。
+
+    两个量的可判性各自独立：prefill 的两端都在 dcc_kv 行内测得（它不需要
+    dense 行），若把它们一起抹成 nan，`h2_worst_prefill_speedup` 会丢掉一个
+    真实测到的值。
+    """
+    from experiments.gpu import e6_main_table as E
+    ns = _e6_ns(h2_delta_pp=1.0, h2_noise_floor_pp=0.0)
+
+    rows = [r for r in _paired_rows() if r["method"] != "dense"]
+    pts = E.h2_points_from_rows(ns, rows, {})
+    assert len(pts) == 1
+    assert pts[0].quality_comparable is None, "没有参照物行却给出了前提判定"
+    assert pts[0].prefill_speedup == pts[0].prefill_speedup, \
+        "prefill 那一格被连坐抹成 nan 了"
+    assert pts[0].prefill_instrument_valid is True
+
+    out = E.compute_h2(ns, rows)
+    diag = out["h2_comparable_diagnostics"]["lengths"]["4096"]
+    assert diag["available"] is False
+    assert "参照物行缺席" in diag["unresolved_reason"]
+    assert out["h2_n_failed"] == 0, "前提未定不等于未达标"
+
+
+def test_j7_diagnostics_land_in_the_payload_with_a_reason():
+    """诊断必须落进产物：**为什么**这一格判不出来要能就地读到。
+
+    只有 `h2_unresolved_reasons`（resolution / instrument 两档）时，读表的人
+    知道"没测出来"，但不知道"差什么才能测" —— 那正是上一轮 H2 挂着不动的原因。
+    """
+    from experiments.gpu import e6_main_table as E
+
+    ns = _e6_ns(h2_delta_pp=1.0, h2_noise_floor_pp=0.0)
+    out = E.compute_h2(ns, _paired_rows(n=8, dcc_k=8, den_k=4))
+    diag = out["h2_comparable_diagnostics"]["lengths"]["4096"]
+    assert diag["available"] is True
+    assert diag["n_pairs"] == 8
+    assert diag["pairing_keys_match"] is True
+    assert "unresolved_reason" not in diag, "前提已判定，不该留 unresolved 原因"
+    assert "h2_comparable_note" in out and "参照物" in out["h2_comparable_note"]
+
+    # 未给 delta/floor ⇒ 原因必须指到**缺的那个参数**，而不是笼统的"未测量"
+    ns2 = _e6_ns()
+    out2 = E.compute_h2(ns2, _paired_rows())
+    diag2 = out2["h2_comparable_diagnostics"]["lengths"]["4096"]
+    assert diag2["available"] is True, "数据齐了，算得出 CI"
+    assert "--h2-delta-pp" in diag2["unresolved_reason"]
+    assert "--h2-noise-floor-pp" in diag2["unresolved_reason"]
+
+    # 参数越界（delta < noise_floor）⇒ 记 unresolved 并**保留原报错**，
+    # 而不是把它读成"质量确实不相近"
+    ns3 = _e6_ns(h2_delta_pp=0.1, h2_noise_floor_pp=5.0)
+    out3 = E.compute_h2(ns3, _paired_rows())
+    diag3 = out3["h2_comparable_diagnostics"]["lengths"]["4096"]
+    assert diag3["available"] is True
+    assert "参数越界" in diag3["unresolved_reason"]
+    assert "分辨率不足" in diag3["unresolved_reason"]
+    assert out3["h2_n_failed"] == 0, "参数越界是分辨率问题，不是未达标"
 
