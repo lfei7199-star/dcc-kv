@@ -394,33 +394,45 @@ def evaluate(
 # prefill 计时
 # =============================================================================
 
-PREFILL_TIMING_CONSUMES_COMPACT_KV = False
+PREFILL_TIMING_CONSUMES_COMPACT_KV = True
 """`measure_prefill` 的计时窗口里，裁剪后的 KV 是否真的被前向使用过。
 
-**当前为 False**，而且这是一个需要被验证的**声明**，不是一个注释：
-`tests/test_adversarial_2026_09_20.py` 会用桩模型观察「有没有任何一次前向
-拿到了 past cache」，并把观察结果与这个常量对照。因此改这个值必须同时改
-实现，否则测试会红。
+**2026-09-21 起为 True**（H0 已接上）。它仍是一个需要被验证的**声明**而不是
+注释：`tests/test_adversarial_2026_09_20.py` 的 `test_a1_*` / `test_a3_*` 会用
+桩模型观察「有没有任何一次前向拿到了 past cache」以及与它同一轮的 dest 前向，
+并把这个常量与观察结果对照。改这个值必须同时改实现，否则测试会红。
+（原文此处引用的 `test_h0_prefill_hook` 从未存在 —— 见该测试文件的 I 组。）
 
-为什么它重要（2026-09-20 对抗性审查的结论）
+接上之前是什么样（2026-09-20 对抗性审查的结论）
 ------------------------------------------------
-`_one()` 只做两件事：全长前向 -> `apply_kv_budget` 截断缓存。截断结果**没有
-再被任何前向使用**。所以：
+`_one()` 原先只做两件事：全长前向 -> `apply_kv_budget` 截断缓存。截断结果
+**没有再被任何前向使用**。于是
 
     T_prefill(压缩方法) = 全长注意力耗时 + 压缩开销
                         >= T_prefill(精确方法)
 
-即 `prefill_speedup = T_prefill(参考)/T_prefill(压缩) <= 1 < 1.10x`，
-**结构上**不可能满足 H2 的第二个合取项。此时把 E6 的 `dcc_kv` 直接翻成
-可测量，H2 会给出一个确定性的假阴性（「压缩不加速 prefill」），而根源是
-度量口径，不是方法本身。
+即 `prefill_speedup <= 1 < 1.10x`，**结构上**不可能满足 H2 的第二个合取项。
+以那个状态把 E6 的 `dcc_kv` 直接翻成可测量，H2 会给出一个确定性的假阴性
+（「压缩不加速 prefill」），而根源是度量口径，不是方法本身。
 
-对照：准确率那条路是对的 —— `score_choices` 在截断后用 `deepcopy` 出来的
-缓存做 continuation 前向，压缩的收益（更短的上下文）确实进入了打分。
-两条路的语义必须一致，这正是 G2->E6 注意力钩子（算子核 + 注意力钩子）要解的
-问题：让 prefill 也走「只对紧凑 KV 做注意力」。
+H0 接上后的结构（现行为）
+------------------------------------------------
+`_one()` 做三件事，缺一不可：
 
-钩子接好之前，E6 按本常量为假来**拒绝判定** prefill 加速，而不是据它下结论。
+    ① 源端构造：对 seq_len 个 token 全长前向 -> KV 进入 cache（两臂共有）
+    ② 压缩（仅压缩臂）：把 cache 裁到预算 B
+    ③ 目的端：用 cache 里的 KV **再跑一次前向**（dest_len 个 token）
+
+③ 是收益的载体：它看到的 KV 长度在 dense 臂是 S、在压缩臂是 B，其余相同。
+`measure_prefill` 把压缩臂的 `dest_len <= 0` 当作**错误**抛出，堵住「忘了开 ③」
+这条静默失效通路 —— 那正是本常量此前为 False 的原因。
+
+对照：准确率那条路一直是通的 —— `score_choices` 在截断后用 `deepcopy` 出来的
+缓存做 continuation 前向，压缩的收益（更短的上下文）确实进入了打分。现在两条
+路的语义一致：都走「只对紧凑 KV 做注意力」。
+
+边界不变：本常量只声明**量具是否灵敏**，不声明任何结论；README 层面「不得主张
+通信性能 / 多卡可扩展性 / 任务质量」的约束不受影响。
 """
 
 
@@ -434,22 +446,65 @@ def measure_prefill(
     budget_ratio: Optional[float] = None,
     compaction_mode: str = "identity",
     max_prompt_tokens: Optional[int] = None,
+    dest_len: int = 0,
 ) -> Dict[str, Any]:
     """测量 prefill 延迟分布、吞吐与峰值显存。
 
     延迟用 `_env.benchmark_ms` 逐次采样，返回的是**分布**而非单值，
     直接喂给 `experiments.common.report.summarize` 即可得到
     median / p5 / p95 / bootstrap CI。
+
+    三段结构（H0，2026-09-21）
+    -------------------------
+    输入是 `seq_len + dest_len` 个 token 的**一段连续序列**，按语义切两半：
+    前 `seq_len` 个属于源端（构造 KV），后 `dest_len` 个是目的端自己的 query。
+    切成一段而不是造两份随机串，是为了让两臂面对完全相同的 token 序列。
+
+    `_one()`：
+        ① `lm.model(src_ids, use_cache=True)`          —— 源端构造，两臂共有
+        ② `apply_kv_budget(cache, B)`                  —— 仅压缩臂
+        ③ `lm.model(dst_ids, past_key_values=cache)`   —— 目的端前向
+
+    ③ 让 ① 与 ② 的产物真正进入计时窗口：两臂在这一步的唯一差别是 cache 的
+    KV 长度（dense = S，压缩 = B）。① 不可被压缩降低，故它是比值里的公共项
+    —— 这正是论文承认的「实测加速比会被不可重叠的部分稀释」。
+
+    ③ 会就地扩展传入的 cache（HF 的正常行为）。因为 ① 每轮都新建 cache，该
+    扩展不会跨迭代累积，故各次采样相互独立。
+
+    Args:
+        dest_len: 目的端 query 长度。**压缩臂（budget_ratio 非 None）必须 > 0**。
+
+    Raises:
+        ValueError: `budget_ratio` 非 None 而 `dest_len <= 0`。此时**拒绝执行**，
+            而不是返回一个结构上恒 <= 1 的加速比 —— 静默返回会把量具缺陷读成
+            方法缺陷，这正是 H0 未接时的失效模式。
     """
+    if budget_ratio is not None and int(dest_len) <= 0:
+        raise ValueError(
+            "压缩臂必须给出 dest_len > 0：否则 _one() 的 ③ 不会发生，"
+            "计时窗口里没有任何一次前向使用裁剪后的 KV，"
+            "prefill_speedup 结构上恒 <= 1（H0 未接时的失效模式）。"
+        )
+
     device = lm.device
-    ids = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+    total_len = int(seq_len) + max(0, int(dest_len))
+    ids = torch.randint(0, 1000, (batch_size, total_len), device=device)
+    src_ids = ids[:, : int(seq_len)]
+    dst_ids = ids[:, int(seq_len):] if int(dest_len) > 0 else None
 
     def _one() -> None:
-        out = lm.model(input_ids=ids, use_cache=True)
+        # ① 源端构造（两臂共有）
+        out = lm.model(input_ids=src_ids, use_cache=True)
+        cache = out.past_key_values
+        # ② 压缩（仅压缩臂）。其产出必须被 ③ 消费，否则不该静默通过。
         if budget_ratio is not None:
-            apply_kv_budget(out.past_key_values,
+            apply_kv_budget(cache,
                             budget=max(1, int(round(budget_ratio * seq_len))),
                             mode=compaction_mode)
+        # ③ 目的端：只对 cache 中的 KV 做注意力（H0 的收益载体）
+        if dst_ids is not None:
+            lm.model(input_ids=dst_ids, past_key_values=cache, use_cache=True)
         del out
 
     if torch.cuda.is_available():
@@ -464,6 +519,7 @@ def measure_prefill(
     tokens = batch_size * seq_len
     return {
         "seq_len": seq_len,
+        "dest_len": int(dest_len),
         "batch_size": batch_size,
         "prefill_ms_samples": samples,
         "prefill_ms_median": med,

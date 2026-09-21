@@ -3,9 +3,12 @@
 与 `test_selfcheck_2026_09_18.py` 同一体例：每条对应一个**已修**的缺陷，
 且每条都先证明「它本可以不被发现」。逐条：
 
-  A1-A3 prefill 量具：E6 的计时窗口里只有全长前向，裁剪后的 KV 从未被使用
-         ⇒ prefill 加速比结构上恒 <= 1 < 1.10x。判定程序必须据此**拒判**
-         （unresolved / instrument），而不是报「未达标」。
+  A1-A4 prefill 量具与口径。**2026-09-20 版**锁的是「计时窗口里只有全长前向、
+         裁剪后的 KV 从未被使用 ⇒ 加速比结构上恒 <= 1」；**2026-09-21 接上 H0
+         后改写**（目的端前向进入窗口，它看到的 KV 由 S 变 B）。同组锚点现锁：
+         目的端看到的 KV 必须等于预算 B、两臂唯一差别就是那个长度、漏给
+         dest_len 必须抛错、加速比的分子必须是 dense。量具失效时判定程序
+         必须**拒判**（unresolved / instrument）而不是报「未达标」。
   B1-B2 异步臂的 comm_ms 不是通信时间，却作为普通字段落盘
          ⇒ 会被读成「异步消掉了通信」。
   C1-C3 重复次数（warmup/iters）不进产物，论文 §6.4 的「每点 >=10 次 run」
@@ -16,12 +19,16 @@
          抹平的回归恰好落在余量里。
   F     E8 产物完全没有运行元数据（E5/E6/E7 都有）。
   G     save_json 写出裸 `NaN`，不是合法 JSON。
+  I     写进源码/文档的测试路径必须真实存在 —— 本仓库**两次**指向从未存在
+         的测试文件（`_hf.py` 的 H0 说明、`e6_main_table.py` 的 H2 配对说明），
+         读者会据此认为覆盖已经有了。
 """
 from __future__ import annotations
 
 import ast
 import json
 import pathlib
+import re
 import sys
 
 import pytest
@@ -111,11 +118,14 @@ _REAL_APPLY_KV_BUDGET = _hf.apply_kv_budget
 """
 
 
-def _run_prefill(monkeypatch, budget_ratio, seq_len=512):
+def _run_prefill(monkeypatch, budget_ratio, seq_len=512, dest_len=64):
     """跑一次 measure_prefill，返回 (桩模型, 压缩被调用的次数)。
 
     计数用包裹真实实现的 spy（而不是 stub 成 no-op）：这样「压缩到底做没做」
     有真实副作用可查，不会因为桩把行为抹掉而变成永真断言。
+
+    `dest_len` 从 2026-09-21 起是必给的：压缩臂不给会被 `measure_prefill`
+    直接拒跑（见 A3）。
     """
     lm = _StubLM()
     calls = {"n": 0}
@@ -126,44 +136,70 @@ def _run_prefill(monkeypatch, budget_ratio, seq_len=512):
 
     monkeypatch.setattr(_hf, "apply_kv_budget", counting)
     _hf.measure_prefill(lm, seq_len=seq_len, batch_size=1, warmup=1, iters=3,
-                        budget_ratio=budget_ratio, compaction_mode="topk_rms")
+                        budget_ratio=budget_ratio, compaction_mode="topk_rms",
+                        dest_len=dest_len)
     return lm, calls
 
 
-def test_a1_prefill_timing_never_uses_the_compacted_cache(monkeypatch):
-    """计时窗口内只有全长前向，且没有任何一次前向拿到过 past cache。
+def test_a1_prefill_timing_consumes_the_compacted_cache(monkeypatch):
+    """计时窗口里必须出现「目的端前向」，且它看到的 KV 是**裁剪后**的。
 
-    这条是 D1 的事实基础：如果它变了（钩子接好了），下面 A2 的
-    `PREFILL_TIMING_CONSUMES_COMPACT_KV` 契约也必须一起改，否则 A3 会红。
+    本条由 2026-09-20 版 `test_a1_prefill_timing_never_uses_the_compacted_cache`
+    **改写**而来（H0 接上后原断言被推翻）。它防的东西没有变 —— 仍是「量具失敏」，
+    只是判据从「有没有前向拿到 past」升级为「拿到 past 的那次，past 有多长」：
+    必须等于预算 B，而不是全长 S。只查 past 是否为 None 已经不够了。
+
+    事实基础见 `_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV` 的说明。
     """
-    seq_len = 512
-    lm, calls = _run_prefill(monkeypatch, budget_ratio=0.05, seq_len=seq_len)
+    seq_len, dest_len = 512, 64
+    B = max(1, int(round(0.05 * seq_len)))
+    lm, calls = _run_prefill(monkeypatch, budget_ratio=0.05,
+                             seq_len=seq_len, dest_len=dest_len)
 
-    assert len(lm.model.calls) == 4, "warmup(1) + iters(3)"
-    assert {lin for lin, _ in lm.model.calls} == {seq_len}, \
-        "前向输入长度必须恒为全长；出现别的长度说明压缩进了前向"
-    assert all(past is None for _, past in lm.model.calls), \
-        "有前向拿到了 past cache ⇒ 压缩收益已进入计时，本契约需重估"
-    assert calls["n"] >= 1, "压缩确实被施加了（只是施加完就被丢掉）"
+    src = [(lin, past) for lin, past in lm.model.calls if lin == seq_len]
+    dst = [(lin, past) for lin, past in lm.model.calls if lin == dest_len]
+    assert len(src) == 4, "源端构造：warmup(1) + iters(3)"
+    assert len(dst) == 4, "目的端前向：每轮一次（H0 的载体）"
+    assert all(past is None for _, past in src), \
+        "源端构造不该带 past —— 它是第一段，没有更早的 KV"
+    assert {past for _, past in dst} == {B}, (
+        f"目的端看到的 KV 长度必须等于预算 B={B}，实测 "
+        f"{sorted({p for _, p in dst})}；若等于全长 S={seq_len}，"
+        "说明裁剪结果又没进计时窗口（H0 回退）"
+    )
+    assert calls["n"] >= 1, "压缩确实被施加了"
 
     # 契约常量必须与观察到的行为一致（防「改常量不改实现」）
-    assert _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is False
+    assert _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is True
 
 
-def test_a1b_compressed_path_does_strictly_more_work_than_dense(monkeypatch):
-    """同一前向次数下，压缩路径是精确路径的**严格超集** ⇒ 不可能更快。
+def test_a1b_compaction_shortens_what_the_destination_attends_to(monkeypatch):
+    """两臂的**唯一**差别必须是目的端看到的 KV 长度：S vs B。
 
-    这就是「prefill_speedup 结构上恒 <= 1」的机器可读形式。
+    这是「prefill_speedup > 1 从哪来」的机器可读形式：源端构造在两臂上
+    长度相同、次数相同，故在比值里是公共项；收益只可能来自目的端那一步。
+    本条由 2026-09-20 版的「压缩路径是精确路径的严格超集」改写而来 ——
+    那个论断在 H0 接上后已不成立（压缩臂的 attention 现在**更短**）。
     """
-    lm_d, calls_d = _run_prefill(monkeypatch, budget_ratio=None, seq_len=512)
-    lm_c, calls_c = _run_prefill(monkeypatch, budget_ratio=0.05, seq_len=512)
+    seq_len, dest_len = 512, 64
+    B = max(1, int(round(0.05 * seq_len)))
+    lm_d, calls_d = _run_prefill(monkeypatch, budget_ratio=None,
+                                 seq_len=seq_len, dest_len=dest_len)
+    lm_c, calls_c = _run_prefill(monkeypatch, budget_ratio=0.05,
+                                 seq_len=seq_len, dest_len=dest_len)
 
-    assert len(lm_d.model.calls) == len(lm_c.model.calls)
-    assert lm_d.model.calls == lm_c.model.calls, "两条路的注意力代价必须相同"
+    # 源端构造：两臂逐位一致（公共项）
+    assert ([c for c in lm_d.model.calls if c[0] == seq_len]
+            == [c for c in lm_c.model.calls if c[0] == seq_len])
+    # 目的端：输入长度相同，可见的 KV 长度不同
+    assert ([c[0] for c in lm_d.model.calls if c[0] == dest_len]
+            == [c[0] for c in lm_c.model.calls if c[0] == dest_len])
+    assert {c[1] for c in lm_d.model.calls if c[0] == dest_len} == {seq_len}
+    assert {c[1] for c in lm_c.model.calls if c[0] == dest_len} == {B}
+    assert B < seq_len, "预算必须真的小于全长，否则这条锚点没有判别力"
+    # 压缩只发生在压缩臂
     assert calls_d["n"] == 0, "精确路径不该做压缩"
     assert calls_c["n"] >= 1, "压缩路径多做了压缩这一步"
-    # 同样的注意力 + 额外的压缩 ⇒ T_prefill(压缩) >= T_prefill(精确)
-    assert calls_c["n"] > calls_d["n"]
 
 
 def _e6_ns(**kw):
@@ -175,7 +211,12 @@ def _e6_ns(**kw):
     return argparse.Namespace(**base)
 
 
-def _h2_rows(prefill_shared=120.0, prefill_dcc=100.0):
+def _h2_rows(prefill_shared=130.0, prefill_dcc=100.0, prefill_dense=120.0):
+    """H2 配对用的一批行。
+
+    `dense` 与 `shared` 的取值**刻意不同**（120 vs 130）：这样 A4 才能判别
+    加速比的分子到底取了谁 —— 若两者相同，取错分子也测不出来。
+    """
     from experiments.gpu import e6_main_table as E
     return [
         {"method": "dcc_kv", "model": "m", "context_length": 4096,
@@ -184,58 +225,78 @@ def _h2_rows(prefill_shared=120.0, prefill_dcc=100.0):
         {"method": "kv_budget_shared", "model": "m", "context_length": 4096,
          "sync_async": E.SYNC_MODE_NA, "accuracy": 0.60,
          "prefill_ms_median": prefill_shared},
+        {"method": "dense", "model": "m", "context_length": 4096,
+         "sync_async": E.SYNC_MODE_NA, "accuracy": 0.80,
+         "prefill_ms_median": prefill_dense},
     ]
 
 
-def test_a2_h2_refuses_to_judge_while_the_prefill_instrument_is_blind():
-    """量具无效时该长度记 unresolved（原因 instrument），**不记未达标**。
+def test_a2_h2_separates_instrument_trouble_from_resolution(monkeypatch):
+    """量具有效 ⇒ 未定原因是 `resolution`；量具失效 ⇒ `instrument`。
 
-    这是最关键的一条：没有它，把 E6 的 `dcc_kv` 直接翻成 measurable 会得到
-    「压缩不加速 prefill」这种由量具造成的假阴性，而且它长得像一个结论。
+    两个原因必须能区分：它们的处置完全不同（前者去测噪声底线，后者去修量具），
+    而且 `instrument` 绝不能落成「未达标」。H0 接上后默认走前者；后者由本用例
+    显式把契约翻回假来验证 —— 这样「钩子接好没接好」在产物里始终看得出来。
     """
     from experiments.gpu import e6_main_table as E
-    assert _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is False
+    assert _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is True
 
     pts = E.h2_points_from_rows(_e6_ns(), _h2_rows())
     assert len(pts) == 1
-    assert pts[0].prefill_instrument_valid is False
-
-    out = E.compute_h2(_e6_ns(), _h2_rows())
-    assert out["h2_unresolved_reasons"] == {"4096": "instrument"}
-    assert out["h2_n_failed"] == 0, "量具无效不等于未达标"
-    assert out["h2_prefill_instrument_valid"] is False
-    assert "量具无效" in out["h2_note"]
-
-
-def test_a3_the_flag_actually_drives_the_verdict(monkeypatch):
-    """把量具契约翻成 True，同一批行就必须改判（否则该字段是装饰品）。
-
-    注意：翻 True 后本用例并不宣称 H2 通过 —— 它只会从
-    'instrument'（量具问题）变成 'resolution'（非劣边界未定），
-    因为这批行没有逐样本得分、算不出非劣 CI 下界。
-    两个原因必须能区分，否则「钩子接好没接好」在产物里看不出来。
-    """
-    from experiments.gpu import e6_main_table as E
-    monkeypatch.setattr(_hf, "PREFILL_TIMING_CONSUMES_COMPACT_KV", True)
-
-    pts = E.h2_points_from_rows(_e6_ns(), _h2_rows())
     assert pts[0].prefill_instrument_valid is True
 
     out = E.compute_h2(_e6_ns(), _h2_rows())
     assert out["h2_unresolved_reasons"] == {"4096": "resolution"}
-    assert out["h2_n_failed"] == 0
+    assert out["h2_n_failed"] == 0, "前提未定不等于未达标"
+    assert out["h2_prefill_instrument_valid"] is True
+
+    # 反向：量具契约被翻回假时，同一批行必须改判为 instrument
+    monkeypatch.setattr(_hf, "PREFILL_TIMING_CONSUMES_COMPACT_KV", False)
+    out2 = E.compute_h2(_e6_ns(), _h2_rows())
+    assert out2["h2_unresolved_reasons"] == {"4096": "instrument"}
+    assert out2["h2_n_failed"] == 0, "量具无效不等于未达标"
+    assert out2["h2_prefill_instrument_valid"] is False
+
+
+def test_a3_compressed_arm_refuses_to_run_without_a_destination_forward():
+    """压缩臂漏给 `dest_len` 时必须**抛错**，不能静默产出一个恒 <=1 的加速比。
+
+    这条是 **H0 的回退守卫**。若有人把目的端前向去掉（或忘了传 dest_len），
+    量具会悄悄重新失敏，而产物看起来一切正常 —— 这正是 D1 当初的形态。
+    把「失效」变成「响亮失败」是唯一的防法。
+
+    精确臂（budget_ratio=None）不受此限：它本来就不压缩，没有收益可丢。
+    """
+    lm = _StubLM()
+    with pytest.raises(ValueError, match="dest_len"):
+        _hf.measure_prefill(lm, seq_len=512, batch_size=1, warmup=0, iters=1,
+                            budget_ratio=0.05, compaction_mode="topk_rms")
+
+    lm2 = _StubLM()
+    _hf.measure_prefill(lm2, seq_len=512, batch_size=1, warmup=0, iters=1,
+                        budget_ratio=None)
+    assert lm2.model.calls, "精确臂应能照常跑"
 
 
 def test_a4_speedup_is_derived_dense_over_dcc_not_the_other_way():
-    """方向锚点：`prefill_speedup = prefill_shared / prefill_dcc`。
+    """方向锚点：`prefill_speedup = prefill_dense / prefill_dcc`。
 
-    反了的话，压缩越慢反而报出越高的加速比 —— 这是纯粹的符号错，不会报错。
+    **2026-09-21 修正**：本用例原先断言 `prefill_shared / prefill_dcc`，
+    与它自己的名字（dense_over_dcc）不符 —— 是上一轮留下的命名/口径错配。
+    论文 §7.5 把 H2 拆成三段（与精确注意力**不劣** / 相对共享压缩**更高** /
+    prefill **更快**），第三段的对照物是精确注意力；而 `shared` 同样压过 KV、
+    同样交付 B 长的 KV，拿它做分子得到的比值结构上恒 ≈1，配 1.10x 的阈值
+    不自洽。故改判据、并让本用例真正按名字去测。
+
+    反了的话，压缩越慢反而报出越高的加速比 —— 纯粹的符号错，不会报错。
+    `_h2_rows` 里 dense(120) 与 shared(130) 取值不同，因此若将来有人把分子
+    又换回 shared，这里会立刻红（1.3 != 1.2），而不是静静通过。
     """
     from experiments.gpu import e6_main_table as E
-    slow = E.h2_points_from_rows(_e6_ns(), _h2_rows(prefill_shared=120.0,
-                                                    prefill_dcc=100.0))
-    fast = E.h2_points_from_rows(_e6_ns(), _h2_rows(prefill_shared=100.0,
-                                                    prefill_dcc=120.0))
+    slow = E.h2_points_from_rows(
+        _e6_ns(), _h2_rows(prefill_dense=120.0, prefill_dcc=100.0))
+    fast = E.h2_points_from_rows(
+        _e6_ns(), _h2_rows(prefill_dense=100.0, prefill_dcc=120.0))
     assert slow[0].prefill_speedup == pytest.approx(1.2)
     assert fast[0].prefill_speedup == pytest.approx(100.0 / 120.0)
 
@@ -514,3 +575,49 @@ def test_g2_json_safe_does_not_touch_finite_values():
     assert R.json_safe("s") == "s"
     assert R.json_safe(7) == 7
     assert R.json_safe(None) is None
+
+
+# =============================================================================
+# I. 引用完整性：写进源码/文档的测试路径必须真实存在
+# =============================================================================
+
+# 只认带 tests/ 前缀的路径。刻意不认裸文件名 —— 同目录互指是允许的，
+# 本文件开头就那样引用了 test_selfcheck_2026_09_18.py。
+# 用 [.] 而不是反斜杠转义，少一层转义就少一个静默出错的机会。
+_REF_TEST_PATH = re.compile(r'tests/(?:gpu/|profiling/)?test_[A-Za-z0-9_]+[.]py')
+
+# 扫描面 = 源码 + docs。**不含 .github/** —— 那里的 PR 模板拿一个虚构的
+# 测试文件名当占位符示例，它是示例不是引用，收进来会造成永久误报。
+_REF_SCAN_GLOBS = ('experiments/**/*.py', 'src/**/*.py', 'tests/**/*.py',
+                   'docs/*.md')
+
+
+def test_i1_every_referenced_test_file_exists():
+    """源码/文档里写下的测试路径必须真实存在。
+
+    实证依据：本仓库**两次**出现「引用了从未存在的测试文件」——
+    `experiments/gpu/_hf.py` 的 H0 契约说明指向一个不存在的 H0 锚点文件，
+    `experiments/gpu/e6_main_table.py` 的 H2 配对说明指向一个不存在的配对锚点
+    文件（两者都见第 31 条；本 docstring 刻意不写全路径，否则这条守卫会绊住
+    自己 —— 这正是它要防的那类错）。
+
+    危害不是笔误那么轻：读者据此会认为覆盖已经有了，于是不去补。
+    **「声称有测试」比「没写测试」更坏** —— 与 D11（守卫被静默排除、全量照样
+    全绿）同源：都是「缺失不报错」。
+    """
+    referenced = {}
+    for pattern in _REF_SCAN_GLOBS:
+        for path in sorted(REPO.glob(pattern)):
+            text = path.read_text(encoding='utf-8', errors='replace')
+            for m in _REF_TEST_PATH.finditer(text):
+                referenced.setdefault(m.group(0), []).append(
+                    path.relative_to(REPO).as_posix())
+
+    assert referenced, '扫描面没命中任何引用 —— 正则或 glob 写错了'
+
+    missing = {rel: sorted(set(where))
+               for rel, where in referenced.items()
+               if not (REPO / rel).exists()}
+    assert not missing, (
+        '引用了不存在的测试文件（会被读成「已有覆盖」）：' + repr(missing))
+

@@ -201,6 +201,12 @@ def test_t6_h2_pairs_with_collapsed_baseline_row():
     """基线是单卡方法 ⇒ 它的行 sync_async == "n/a"；配对必须能找到它。
 
     修复前 h2_points_from_rows 用 sync_modes[0] 去查，配对点恒为 0。
+
+    2026-09-21 补：prefill 的分子改为 **dense**（论文 §7.5 把 H2 拆成互不
+    重叠的三段：与精确注意力不劣 / 相对共享压缩更高 / prefill 更快），所以
+    dense 行也成了配对必需项。三个方法的 prefill 取值**刻意两两不同**
+    （dcc 100 / shared 120 / dense 110）：若分子取回 shared 会得 1.2、
+    取 dcc 自己得 1.0，只有 dense 给出 1.1 —— 分子取错谁，这里立刻看得出来。
     """
     from experiments.gpu import e6_main_table as E
     rows = [
@@ -208,11 +214,13 @@ def test_t6_h2_pairs_with_collapsed_baseline_row():
          "sync_async": "sync", "accuracy": 0.70, "prefill_ms_median": 100.0},
         {"method": "kv_budget_shared", "model": "m", "context_length": 4096,
          "sync_async": E.SYNC_MODE_NA, "accuracy": 0.60, "prefill_ms_median": 120.0},
+        {"method": "dense", "model": "m", "context_length": 4096,
+         "sync_async": E.SYNC_MODE_NA, "accuracy": 0.80, "prefill_ms_median": 110.0},
     ]
     pts = E.h2_points_from_rows(_e6_ns(), rows)
     assert len(pts) == 1, "H2 配对又断了"
     assert pts[0].quality_gain_pp == pytest.approx(10.0)
-    assert pts[0].prefill_speedup == pytest.approx(1.2)
+    assert pts[0].prefill_speedup == pytest.approx(1.1)  # dense/dcc = 110/100
     assert pts[0].quality_comparable is None   # 未测出容差 ⇒ 记 unresolved，不是 False
 
     out = E.compute_h2(_e6_ns(), rows)

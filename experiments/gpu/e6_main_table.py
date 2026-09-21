@@ -90,8 +90,11 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "blockers": [
             "（原 blocker「无 GPU kernel」已关闭：G3 的 src/baselines/operators.py "
             "给出 device-agnostic 的 fastkv_attention，复用 G1 的紧凑 KV 核。）",
-            "仍需：E6 的注意力钩子（算子核 + 注意力钩子）把该算子接进 measure_point；"
-            "在此之前主表里的 prefill 一列对它没有意义。",
+            "（原 blocker「E6 的注意力钩子未接」已关闭：2026-09-21 的 H0 已接 —— "
+            "measure_prefill 的压缩臂新增目的端前向（dest_len），裁剪后的 KV "
+            "现在真的进入计时窗口。）",
+            "仍需：把该算子接进 measure_point 的**方法行**。当前 dcc_kv / "
+            "fastkv_official / apb 三行都还没走各自的真实链路。",
         ],
     },
     "dcc_kv": {
@@ -103,11 +106,13 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
             "src/dcc_kv_ref/attention_kernel.py 提供 compact_kv_attention。"
             "原 blocker「异步流水无 GPU 入口」亦已关闭："
             "experiments/gpu/_forward.py 的 pipelined_attention。）",
-            "**仍未接**：E6 的注意力钩子。这一条不能靠把 measurable 翻成 True 绕过 ——"
-            "当前 measure_point 走 _hf.measure_prefill，其计时窗口里只有全长前向、"
-            "裁剪后的 KV 从未被使用（见 _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV），"
-            "于是 prefill_speedup 结构上恒 <= 1，H2 的第二个合取项永远不可能满足，"
-            "跑出来的会是「压缩不加速 prefill」这种由量具造成的假阴性。",
+            "（原 blocker「E6 注意力钩子未接」亦已关闭：2026-09-21 H0 —— "
+            "measure_prefill 的压缩臂含目的端前向，裁剪后的 KV 真的进计时窗口。）",
+            "**仍未接：方法实现本身。** measure_point 对 dcc_kv 与 "
+            "kv_budget_shared 走的是**同一条** apply_kv_budget（共享裁剪）路径 —— "
+            "没有目的端条件化构造，也没有 G2 的 pipelined_attention。二者质量差"
+            "会恒为 0，H2 的 quality_gain 无从谈起。翻 measurable 之前必须让 "
+            "dcc_kv 行改走 build_compact_kv + _forward.pipelined_attention 的真实链路。",
             "构造链路的 CUDA 可用性待 GPU 机实测（G6 未做；静态审计不能替代实测）。",
         ],
     },
@@ -129,7 +134,8 @@ METHOD_SPECS: Dict[str, Dict[str, Any]] = {
         "blockers": [
             "（原 blocker「无 GPU kernel」已关闭：operators.apb_attention 已"
             "device-agnostic 化。）",
-            "仍需：E6 的注意力钩子接线（同 dcc_kv）。",
+            "仍需：把 apb_attention 接进 measure_point 的方法行（同 dcc_kv）—— "
+            "H0 只解决了量具，没有解决方法实现。",
             "（原 blocker「APB 编号 2502.12085 待二次确认」已关闭：编号有效。）",
         ],
     },
@@ -247,10 +253,15 @@ def measure_point(
     budget_ratio = None if method == "dense" else a.budget_ratio
     mode = "identity" if method == "dense" else a.compaction_mode
 
+    # H0：目的端 query 长度。两臂必须取同一个值 —— 加速比的分子与分母要来自
+    # 同一组 run（论文 §7.5 的「配对性」），否则比的不是同一件事。
+    dest_len = max(1, int(round(a.dest_fraction * ctx_len)))
+
     pre = _hf.measure_prefill(
         lm, seq_len=ctx_len, batch_size=a.batch_size,
         warmup=a.warmup, iters=a.iters,
         budget_ratio=budget_ratio, compaction_mode=mode,
+        dest_len=dest_len,
     )
     ps = R.summarize(pre["prefill_ms_samples"], "prefill", "ms", seed=a.seed)
 
@@ -293,6 +304,8 @@ def measure_point(
         "prefill_timing_consumes_compact_kv": _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV,
         "budget_ratio": budget_ratio,
         "compaction_mode": mode,
+        "dest_len": dest_len,
+        "dest_fraction": a.dest_fraction,
         "prefill_ms_median": ps.median,
         "prefill_ms_p5": ps.p5,
         "prefill_ms_p95": ps.p95,
@@ -338,11 +351,22 @@ def h2_points_from_rows(a: argparse.Namespace,
     """从主表行数据里抽 H2 的三个原始量，构造逐长度的判据输入。
 
     配对结构：同一 (model, ctx_len, sync_mode) 下，`dcc_kv` 与
-    `kv_budget_shared` 面对同一份提示、同一份评测集，因此两者的差是**配对量**。
+    `kv_budget_shared` 面对同一份提示、同一份评测集，因此两者的差是**配对量**；
+    `prefill_speedup` 的分子取 `dense`（精确注意力），理由见下。
+
+    为什么 prefill 的分子是 dense 而不是 shared（2026-09-21 修正）
+    ---------------------------------------------------------------
+    论文 §7.5 把 H2 拆成**互不重叠的三段**：「压缩后的 DCC-KV 与精确注意力
+    **不劣**」「DCC-KV 相对共享压缩**更高**」「且 prefill **更快**」。第一段比
+    的是 dense，第二段比的是 shared，第三段的「更快」讲的是**系统设计的收益**。
+    在 prefill 这一格上，`kv_budget_shared` 同样压过 KV、同样交付 B 长的 KV，
+    它不可能比 DCC-KV 慢 10%。原实现写的 `ms_shared / ms_dcc` 得到的是一个结构
+    上恒 ≈1 的量：一个恒 ≈1 的比值配 1.10x 的阈值，只能说明它不是论文那句话
+    在说的量。
 
     三个原始量的来源：
         quality_gain_pp  = (acc_dcc - acc_shared) * 100
-        prefill_speedup  = prefill_shared / prefill_dcc
+        prefill_speedup  = prefill_dense / prefill_dcc
         quality_comparable = 由 quality_comparable_non_inferior 判定；当非劣边界
             `delta_pp` 或噪声底线尚未由命令行给出时取 **None**（= 分辨率不足），
             而不是 False —— 「没测出容差」与「确实不相近」是两个结论。
@@ -368,8 +392,11 @@ def h2_points_from_rows(a: argparse.Namespace,
         ⇒ H2 的配对点恒为 0，`compute_h2` 每次都返回
         「无可配对的数据点（dcc_kv / kv_budget_shared 未同时产出）」。
         也就是说：折叠 sync 轴的修复（`bee3388` 的纪律）把 H2 的配对一起折叠掉了，
-        而当时**没有任何测试覆盖 h2_points_from_rows**（现已补
-        `tests/test_e6_h2_pairing.py`）。
+        而当时**没有任何测试覆盖 h2_points_from_rows**（现已由
+        `tests/test_selfcheck_2026_09_18.py` 的 `test_t6_*` 三条 +
+        `tests/test_adversarial_2026_09_20.py` 的 `test_a4_*` 覆盖）。
+        ⚠️ 原文此处引用的 `test_e6_h2_pairing` **从未存在** —— 声称有覆盖
+        而实际没有，比没写测试更坏；已改正，并由 I 组锚点防止再犯。
 
         语义：该轴对该方法不适用 ⇒ 它的行与模式无关，应按 (method, model, ctx) 查。
         并**拒绝歧义** —— 若同一 (model, ctx) 上有多个候选且没有一个是
@@ -400,10 +427,13 @@ def h2_points_from_rows(a: argparse.Namespace,
             # 基线是单卡方法，其 sync/async 轴在表里被折叠 ⇒ 不能按模式查
             # （否则配对恒为空；见 find_axis_free 的说明）。
             r_shr = find_axis_free("kv_budget_shared", model, ctx)
-            if r_dcc is None or r_shr is None:
+            # prefill 的分子是 dense（理由见函数 docstring）。
+            r_den = find_axis_free("dense", model, ctx)
+            if r_dcc is None or r_shr is None or r_den is None:
                 continue
             acc_d, acc_s = r_dcc.get("accuracy"), r_shr.get("accuracy")
-            ms_d, ms_s = r_dcc.get("prefill_ms_median"), r_shr.get("prefill_ms_median")
+            ms_d = r_dcc.get("prefill_ms_median")
+            ms_den = r_den.get("prefill_ms_median")
 
             comparable = None
             if delta is not None and floor is not None and acc_d is not None \
@@ -417,7 +447,7 @@ def h2_points_from_rows(a: argparse.Namespace,
 
             # 量具是否体现压缩收益：由 _hf 的契约决定，不在本文件里写死。
             instrument_ok = bool(_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV)
-            if acc_d is None or acc_s is None or not ms_d or not ms_s:
+            if (acc_d is None or acc_s is None or not ms_d or not ms_den):
                 points.append(H.H2PerLength(
                     length=ctx, quality_gain_pp=float("nan"),
                     prefill_speedup=float("nan"), quality_comparable=None,
@@ -427,7 +457,7 @@ def h2_points_from_rows(a: argparse.Namespace,
                 points.append(H.H2PerLength(
                     length=ctx,
                     quality_gain_pp=(acc_d - acc_s) * 100.0,
-                    prefill_speedup=ms_s / ms_d,
+                    prefill_speedup=ms_den / ms_d,
                     quality_comparable=comparable,
                     prefill_instrument_valid=instrument_ok,
                 ))
@@ -463,6 +493,12 @@ def compute_h2(a: argparse.Namespace,
             "裁剪后的 KV 未被使用（_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV=False），"
             "prefill_speedup 结构上恒 <= 1，故本长度记 unresolved 而不是未达标。"
             "要让 H2 的第二个合取项可判，须先接 E6 的注意力钩子。")
+    else:
+        out["h2_note"] += (
+            "；prefill 量具有效（H0 已接，2026-09-21）：压缩臂的计时窗口里含一次"
+            "目的端前向，其 past cache 是裁剪后的 KV，故 prefill_speedup 能反映"
+            "压缩带来的 KV 长度收益。分子口径为 dense（精确注意力），"
+            "见 h2_points_from_rows 的说明。")
     out["h2_params_supplied"] = {
         "delta_pp": getattr(a, "h2_delta_pp", None),
         "noise_floor_pp": getattr(a, "h2_noise_floor_pp", None),
@@ -496,6 +532,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-limit", dest="eval_limit", type=int, default=None)
     p.add_argument("--max-prompt-tokens", dest="max_prompt_tokens", type=int, default=None)
     p.add_argument("--budget-ratio", dest="budget_ratio", type=float, default=0.05)
+    p.add_argument("--dest-fraction", dest="dest_fraction", type=float, default=0.25,
+                   help="目的端 query 长度占上下文长度的比例（H0）。prefill 计时窗口里"
+                        "目的端前向看到的 KV 长度才是压缩收益的载体；取 0 会让压缩臂"
+                        "直接报错（_hf.measure_prefill 拒绝静默失效），而不是产出一个"
+                        "结构上恒 <=1 的加速比")
     p.add_argument("--compaction-mode", dest="compaction_mode", type=str,
                    default="topk_rms",
                    choices=["identity", "topk_rms", "topk_norm", "stride", "random"])
@@ -651,8 +692,14 @@ def main() -> int:
         },
         "instrument": {
             "prefill_timing_consumes_compact_kv": _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV,
-            "meaning": ("False ⇒ prefill 一列对压缩方法只含开销、不含收益，"
-                        "prefill_speedup 不可用于 H2 判定（该长度记 unresolved）。"),
+            "dest_fraction": a.dest_fraction,
+            "dest_len_by_context": {str(c): max(1, int(round(a.dest_fraction * c)))
+                                    for c in a.context_lengths},
+            "prefill_speedup_numerator": "dense（精确注意力）",
+            "meaning": ("True ⇒ 压缩臂的计时窗口里含一次目的端前向，其 past cache "
+                        "是裁剪后的 KV，prefill_speedup 可反映压缩收益；"
+                        "False ⇒ prefill 一列对压缩方法只含开销、不含收益，"
+                        "该长度记 unresolved。"),
         },
         "h2": compute_h2(a, rows),
         "caveat": (
