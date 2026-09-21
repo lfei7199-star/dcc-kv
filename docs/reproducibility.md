@@ -98,6 +98,22 @@ bash experiments/run_gpu.sh e6 --plan
 详见 `experiments/gpu/README.md`。在缺口补齐前，主表只会产出
 `dense` 与 `kv_budget_shared` 两行。70B/72B 档**无对应脚本**。
 
+> ⚠️ **2026-09-21 更新（`b44a7b3`）**：上段**已过期** —— 现为 **3 个**被阻断
+> （`fastkv_official` / `ring` / `apb`），`dcc_kv` 的方法行已接线。
+> 跑它必须显式给出源端段数：
+>
+> ```bash
+> bash experiments/run_gpu.sh e6 --model <模型> --eval-file <评测集.jsonl> \
+>     --methods dense kv_budget_shared dcc_kv --dcc-world 4
+> ```
+>
+> `--dcc-world` **没有默认值**（它决定每边预算 `B_total/world`，给个默认值会把
+> "本次模拟了几个源端设备"变成没人声明过的假设；不给而选了 `dcc_kv` 时脚本以
+> 退出码 2 拒绝执行）。另外两条必须与数字一起读的口径：`--ranks` 默认 1，
+> 此时 `dcc_kv` 的 sync/async 轴**被折叠**（行里 `sync_async` 记 `n/a`）；
+> prefill 加速比落两列，H2 消费 `prefill_speedup_kernel_matched`（同核），
+> **缺这一列时该长度记 unresolved 而不是未达标**。
+
 ### 5.3 跑消融（E5）
 
 ```bash
@@ -198,10 +214,24 @@ CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一
 > `prefill_dense / prefill_dcc`，方向由
 > `tests/test_adversarial_2026_09_20.py::test_a4_*` 锁住。
 >
+> **2026-09-21 再改判为 kernel-matched**（同日，`b44a7b3`）。上段解决了"比错对象"，没解决
+> "用错核"：dense 行走 SDPA 融合核、dcc 行走 `attention_kernel` 的显式核，两者的
+> 实现差距会整个人进比值。现取 **kernel-matched** —— 分子是**钩子 dense 臂**的目的端
+> 耗时、分母是**钩子 dcc 臂**的目的端耗时，两臂走同一个算子核，唯一差别只剩目的端消费
+> 的远端 KV 长度。H2 消费这一列；`prefill_speedup_native`（dense 行端到端 / dcc 行
+> 端到端）仍会落盘，但**只作端到端参考，不得当作机制收益**。
+>
 > **仍未闭合的部分**：量具虽已灵敏（H0，2026-09-21），但 `dcc_kv` 在
 > `measure_point` 里与 `kv_budget_shared` 走**同一条共享裁剪路径** ⇒ 两者质量差
 > 恒为 0，**质量臂为空**。故 H2 维持 `no-judge`：现在不是「参数待测」，
 > 而是**质量侧的通路尚未独立**。详见 `docs/commit_log.md` 第 31 条。
+>
+> ⚠️ **2026-09-21 第三次更新（`b44a7b3`）**：上面这段**已被修** —— `dcc_kv` 现在走
+> `attention_hook`（源端由 state 携带、紧凑块目的端条件化构造），质量臂不再为空。
+> H2 仍维持 `no-judge`，但**原因又换了一次**：现在是
+> `quality_comparable` 恒为 `None` —— 本表每格只落一个聚合准确率、不落逐样本判对错，
+> 算不出"非劣"所需的**配对 95% CI 下界**。缺口已由「通路未独立」降为
+> **「判定所需的逐样本数据未落盘」**，是一个能在 `measure_point` 里补的落盘项。
 
 ## 7. 随机性控制
 

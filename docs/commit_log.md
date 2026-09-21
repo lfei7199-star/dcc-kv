@@ -3,11 +3,13 @@
 > 本文件按提交顺序倒序记录 `dcc-kv` 仓库的每一次提交：动机、改动清单、验证证据、遗留项。
 > 与 `docs/git_strategy.md`（规范）互补 —— 那份说「应该怎么提交」，这份说「实际提交了什么、验没验证过」。
 >
-> 生成时间：2026-09-21 15:30 (GMT+8)
-> 当前 HEAD：`e58e0ec`（分支 `paper/sections-5-8`；本文件本次补记为其后紧随的 docs 提交 ——
-> 自 `main`（`8a1d275`）分叉以来的第 49 次提交）
-> 本轮新增一条：`e58e0ec`（第 48 次，第 32 条，写出 H0 的**方法侧**注意力钩子，
-> 并修两个被它撞出来的实现缺陷）。
+> 生成时间：2026-09-21 21:53 (GMT+8)
+> 当前 HEAD：`b44a7b3`（分支 `paper/sections-5-8`；本文件本次补记为其后紧随的 docs 提交 ——
+> 自 `main`（`8a1d275`）分叉以来的第 51 次提交）
+> 本轮新增一条：`b44a7b3`（第 50 次，第 33 条，把 H0 的**方法侧**钩子**接进** E6 的
+> `dcc_kv` 行，并修三个接线才看得见的口径缺陷）。
+> 上一轮：`e58e0ec`（第 48 次，第 32 条，写出 H0 的方法侧注意力钩子）、
+> `e2f8345`（第 49 次，本文件的日志提交自身，不单独立条 —— 即上一版本文件）。
 > 本轮另有两条不单独立条：`873cc69`（第 46 次，第 31 条之后的日志提交自身）、
 > `93ddd16`（第 47 次，把「一次性补丁脚本不入库」从人肉约定升级为 `.gitignore` 结构约束）。
 > 上一轮：`c9ca6b0`（第 43 次，第 30 条，补齐 G1/G2/G3/G5 与 A4，
@@ -41,6 +43,7 @@
 | # | 短哈希 | 日期 | 作者 | 类型 | 文件数 | +行 | −行 |
 |---|---|---|---|---|---|---|---|
 | 32 | `e58e0ec` | 2026-09-21 15:22 | Saluneo | feat(h0)+fix | 10 | 1124 | 28 |
+| 33 | `b44a7b3` | 2026-09-21 21:26 | Saluneo | feat(h0)+fix | 9 | 1782 | 338 |
 | 31 | `5af59e8` | 2026-09-21 10:40 | Saluneo | feat(gpu)+fix(h2) | 4 | 318 | 100 |
 | 30 | `c9ca6b0` | 2026-09-20 12:41 | Saluneo | feat(gpu)+fix(audit) | 32 | 5865 | 182 |
 | 29 | `3d76629` | 2026-09-16 22:20 | Saluneo | docs(reports) | 4 | 631 | 28 |
@@ -72,12 +75,23 @@
 | 3 | `8a1d275` | 2026-09-08 09:15 | Mavis | fix(requirements) | 1 | 6 | 6 |
 | 2 | `fcd9718` | 2026-09-08 07:40 | Mavis | docs | 5 | 463 | 0 |
 | 1 | `7ebff65` | 2026-09-08 06:36 | Mavis | feat | 43 | 5382 | 0 |
-| | | | | **合计** | **343 次文件变更** | **252591** | **3325** |
+| | | | | **合计** | **357 次文件变更** | **254744** | **3689** |
+
+> ⚠️ **2026-09-21 更正（本表首次与逐行加总对齐）**：上一版合计写
+> `343 次 / 252591 / 3325`，而**逐行加总**（33 行）实为 `357 / 254744 / 3689`（第 33 行
+> 未并入前的 32 行加总则是 `348 / 252962 / 3351`）—— 即原文合计比逐行加总**少 5 文件 /
+> 371 行 / 26 行**。差额来源未考据（历史某次增量叠加时的抄录误差，逐行加总与任何单行
+> 都不对应），**本轮不擅自归因**，只把合计改为逐行加总并在同一处保留原文差额。
 
 仓库当前规模：**180** 个受版本控制文件，其中 77 个 `.py`、10 个 `.tex`、19 个 `.md`、
 30 个 `.csv`、25 个 `.json`、6 个 `.log`（后三者**全部**来自 `results/`，共 61 个，见第 24 条）。
-第 31 条**未新增文件**（只改既有 4 个）；**本轮（第 32 条）新增 2 个 `.py`**：
-`src/distributed/attention_hook.py` 与其锚点 `tests/test_attention_hook.py`。
+第 31 条**未新增文件**（只改既有 4 个）；第 32 条新增 2 个 `.py`
+（`src/distributed/attention_hook.py` 与其锚点 `tests/test_attention_hook.py`）；
+**本轮（第 33 条）未新增任何文件**，只改既有 9 个（`attention_kernel.py` /
+`attention_hook.py` / `_hf.py` / `e6_main_table.py` / `test_gpu_pipeline.py` /
+`test_attention_kernel.py` / `test_attention_hook.py` /
+`test_selfcheck_2026_09_18.py` / `test_adversarial_2026_09_20.py`），
+故 `git ls-tree -r HEAD` 的受控文件数仍为 **180**。
 
 分支与推送状态：
 
@@ -89,6 +103,10 @@
                                                         远端 = 本地 = `09d4416`（2026-09-21 经 **SSH + 仓库级
                                                         deploy key** 推送成功，`274a440..09d4416`；HTTPS 通道当时不通）；
                                                         本轮提交 `5af59e8` 与本日志提交待推送
+                                                        ⚠️ **已被 `b44a7b3` 修正**（原文保留）：该行写于第 31 条时。
+                                                        截至本次日志，推送前实测 `ls-remote`
+                                                        远端 = `e2f8345`；待推送为 `b44a7b3`
+                                                        （第 50 次）与本次日志提交（第 51 次）
 > ⚠️ 更正：上一版此处记「`139b1b8`/`e80b4b1`/`89075bf` 待推送 —— 代理无监听」，
 > 那是**代理未启动时**的中间状态；代理启动后一次推送即成功，4 个提交全部上去。
 > 阻塞点确实只在代理进程，**与提交内容、凭据均无关**。保留原文不抹除。
@@ -96,6 +114,119 @@
 > 29），加上 `ebb8cce..90934a6` 的 5 个才是 34。此前抄录有误，一并更正。
   main                 →  origin/main                  （未动）
 ```
+
+---
+
+## 33. `b44a7b3` — 把 H0 的方法侧钩子接进 E6 的 `dcc_kv` 行，并修三个接线才看得见的口径缺陷
+
+**日期**：2026-09-21 21:26 | **类型**：feat(h0)+fix | **规模**：9 文件，+1782/−338
+
+### 动机
+
+第 32 条「五、遗留」的头两条就是本条的题目：钩子**尚未接进 `measure_point`**
+（`dcc_kv` 与 `kv_budget_shared` 共用 `apply_kv_budget`，质量差恒为 0）、
+**E6 还没有 `--dcc-world` 入口**。这两条不解决，第 32 条写出的 844 行钩子就只是
+一段**没有被任何实验调用**的代码 —— 而它自己的模块文档还写着「挂进真实 forward」。
+
+### 一、接线：`measure_point` 的 `dcc_kv` 分支
+
+`experiments/gpu/e6_main_table.py`（816 → 1108 行）：
+
+* `dcc_kv` 行不再走共享裁剪，改为构造
+  `HookConfig(budget_ratio, dcc_world, budget_mode, n_repr=M, projection_dim=d_p,
+  lambda_beta, seed)`，与**同核 dense 臂**（`HookConfig(budget_ratio=1.0,
+  mode="dense", dcc_world=1)`）**一并**调用 `_hf.measure_prefill(..., attn_hook=...)`，
+  取目的端耗时 `dest_ms_median` / `dest_ms_median_dense_kernel`。
+* 产物新增：`attn_hook` / `dcc_world` / `dcc_budget_mode` / `lambda_beta` /
+  `budget_tokens_resolved` / 上述两个耗时列 / `prefill_speedup_kernel_matched`。
+* 新增模块函数：`_safe_ratio` / `resolve_lambda_beta` / `_kernel_matched_speedup` /
+  `_axis_free_rows` / `_pick_axis_free` / `attach_prefill_speedups`
+  （后者在 `compute_h2` 之前调用，补 `prefill_speedup_native` 并带口径声明）。
+* CLI：`--dcc-world`（**无默认值**；选了 `dcc_kv` 却不给即 `return 2`）、
+  `--dcc-budget-mode`、`--ranks`（默认 1）、`--lambda-beta`。
+
+`measurable` 由此翻为 `True`。**但这不是「预登记条件已满足」**，见第五节。
+
+### 二、三个**只有接线才看得见**的口径缺陷
+
+三条都不是静态审计能发现的：它们只在「钩子真的被调用」之后才显形，且症状都是
+**数字看着正常**。
+
+1. **计时与评测用了两份不同的切分。** 计时侧把整条 `ctx_len` 当源端、再另加
+   `dest_len`；评测侧按 `(1-f)·ctx_len` 切。同一行里因此存在**两个压缩设置**：
+   产物里 `budget_tokens_resolved` 报 `{"64": 32}`，而质量那一侧实际按 `{"48": 24}`
+   跑。修法是两边都走 **`_hf.prompt_split(ctx_len, dest_fraction)`** —— 它成为源段 /
+   目的端本地段的**唯一出处**。锚点 `test_e6_timing_and_quality_share_the_same_split`。
+
+2. **H2 的配对在 `dcc_kv` 行折叠后恒为空。** 折叠判据推广后（见第 3 条），
+   `dcc_kv` 行自己也是 `sync_async = "n/a"`，而 `h2_points_from_rows` 仍按
+   `a.sync_modes[0]` 去查 `dcc_kv` 行 ⇒ 找不到、配对为空、H2 永远算不出来。
+   这正是 `bee3388` 给**基线**修过的同一个坑，在 `dcc_kv` 身上**第二次**重演
+   （给基线修了、没给方法行修）。新增 `dcc_row_modes(a)` 与写行处**同一判据**；
+   锚点 `test_t6_h2_pairs_when_the_dcc_axis_is_folded_too` 钉住。
+
+3. **`sync_axis_applies` 的判据本身不够。** 旧形只问「这个方法是不是单卡方法」；
+   推广为**合取**：`(gpu_required > 1) AND (--ranks > 1)`。理由：`--dcc-world` 是把
+   源序列切成 W 段**模拟** W 个源端设备，`gpu_count_observed` 仍是 1 ⇒ sync 与 async
+   两行会**逐位相同**，而"两行一样"会被读成"异步没有收益"。判据错了不会报错，只会
+   在表里多出一行看起来正常的假对照。
+
+### 三、prefill 加速比落两列
+
+| 列 | 分子 / 分母 | 用途 |
+|---|---|---|
+| `prefill_speedup_kernel_matched` | 钩子 **dense 臂**目的端 / 钩子 **dcc 臂**目的端（**同一算子核**） | **H2 消费这一列** |
+| `prefill_speedup_native` | dense **行端到端** / dcc **行端到端**（异核 + 含构造代价） | 仅端到端参考 |
+
+缺同核列时该长度记 **`unresolved`（reason=instrument）**，**既不回落 native，也不计
+`failed`** —— "没测出来"和"未达标"是两件事。锚点
+`test_e6_kernel_matched_speedup_refuses_none_instead_of_guessing`。
+
+### 四、验证证据
+
+* **全量 `pytest`：460 passed / 2 xfailed / 0 failed**（上一轮 447，本轮 +13 条）。
+* **九组变异（M1–M9）全部被捕获**，每组都是「把修复改回错误形态 → 跑锚点 → 变红 →
+  逐字节还原」（文件级复制还原，全程不经 `git stash`）。其中 M2 一度**漏网**：
+  断言原只查关键字**名字**（`dest_fraction=` 在不在），把取值改成 `0.0` 仍过 ——
+  改为 **AST 查关键字取值**（`ast.Attribute.attr == "dest_fraction"`）后才抓住。
+  这条本身值得记：**断言建在"有没有这个词"上，等于没建。**
+* **CPU 接线冒烟**（tiny Llama，`_smoke_e6_wired.py`）：`dcc_kv` 行 `status=ok`、
+  `budget_tokens_resolved = {"48": 24}`、两列加速比互为异数、缺列记 `instrument`、
+  缺 `--dcc-world` 时退出码 **2**。
+* 顺带修 `_hf._token_bound`：从**真实词表**取随机 token 上界（原先直取
+  `lm.tokenizer.vocab_size`，对无 `tokenizer` 的桩模型直接 `AttributeError`；
+  虽是小缺陷，但会让整批测试在收集后死在无关位置）。
+
+### 五、遗留
+
+* **预登记的字面条件未满足（口径修正，不是条件达成）**：预登记写
+  「走 G2 的 `pipelined_attention`」，实际接的是 `attention_hook` —— 它调用
+  **与 G2 `_comp` 闭包同一段计算**（`dcc_kv_attention`），但**没有**走 All-to-Allv
+  流水。单卡下 `chunks_effective = 1`、本就没有可重叠窗口，故本表折叠 sync 轴、
+  把"异步的代价与收益"留给 A5/E5。**修正的是表述，不是条件本身 —— 必须与数字同报。**
+* **单卡模拟不体现逐边条件化**：`conditionalization_marginal_available = False`
+  （所有源段看到同一批目的端 query ⇒ 与共享压缩在数值上不可区分）。
+* **H2 仍 `no-judge`，但原因换了一次**：不再是"质量臂为空"，而是
+  `quality_comparable` 恒为 `None` —— 每格只落**聚合**准确率、不落逐样本判对错，
+  算不出"非劣"所需的配对 95% CI 下界。已由「通路未独立」降为
+  **「判定所需的逐样本数据未落盘」**，是一个能在 `measure_point` 里补的落盘项。
+* **G6 依旧是唯一「只能上机才知道」的一项。**
+
+### 六、随本次日志一并落库的文档修复
+
+* **修掉 `docs/FILE_MAP.md` 自身 4 行半截表格**：`attention_kernel.py` /
+  `operators.py` / `_forward.py` / `build_eval_set.py` 四行只写到
+  ``| `x.py` | NNN | **Gx`` 就断掉（自 `c9ca6b0` 引入起一直如此）。这份文档的职责恰是
+  **逐项说明每个受控文件** —— **一行什么都不说明的记录比没有更坏**，读者会以为写过了。
+  已补齐并加守卫 **I4**（`test_i4_docs_have_no_unterminated_table_rows`：
+  `docs/*.md` 不得有未闭合表格行）。
+* **同步三份 docs 的行数**（`attention_kernel` 483→514、`attention_hook` 597→844、
+  `_hf` 564→873、`e6_main_table` 739→1108、四个测试文件、以及三份 md 自身）。
+  顺带发现 `FILE_MAP` 里的行数字段**普遍陈旧**（例：`commit_log.md` 记 2848、实为 2967；
+  `gpu_execution_plan.md` 记 366、实为 390）。**本轮只刷新被改动的那些，其余登记备查。**
+* ⚠️ **总览表合计行与本表逐行加总不一致**（343 vs 348，差 5 文件 / 371 行 / 26 行；
+  不是本轮引入）。已把合计改为逐行加总并在同处保留原文差额，**但差额来源未考据、
+  未擅自归因**，登记备查。
 
 ---
 

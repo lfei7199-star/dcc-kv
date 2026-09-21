@@ -22,7 +22,9 @@
   G     save_json 写出裸 `NaN`，不是合法 JSON。
   I     写进源码/文档的测试路径必须真实存在 —— 本仓库**两次**指向从未存在
          的测试文件（`_hf.py` 的 H0 说明、`e6_main_table.py` 的 H2 配对说明），
-         读者会据此认为覆盖已经有了。
+         读者会据此认为覆盖已经有了。**2026-09-21 增 I4**：`docs/*.md` 里不得有
+         **未闭合的表格行** —— `FILE_MAP.md` 曾有 4 行以 ``| `x.py` | 483 | **G1``
+         这种半截形态存在，而那份文档的职责就是逐项说明每个受控文件。
 """
 from __future__ import annotations
 
@@ -699,4 +701,29 @@ def test_i1_every_referenced_test_file_exists():
     assert not missing, (
         '引用了不存在的仓库内 .py 路径（会被读成「已有实现/已有覆盖」）：'
         + repr(missing))
+
+def test_i4_docs_have_no_unterminated_table_rows():
+    """`docs/*.md` 里的表格行必须以 `|` 收尾 —— 半截行等于一条空记录。
+
+    实证依据（2026-09-21 发现）：`docs/FILE_MAP.md` 有 **4 行**只写到
+
+        | `attention_kernel.py` | 483 | **G1
+
+    就断掉（`operators.py` / `_forward.py` / `build_eval_set.py` 同样），
+    自 `c9ca6b0` 引入起一直如此。而那份文档的职责恰恰是**逐项说明每个受控文件**：
+    **一行什么都不说明的记录，比没有这一行更坏** —— 读者会以为已经写过了。
+    与 I1 同源：都是「缺失不报错」。
+
+    判据刻意只查两件事：行首是 `|`、行尾也是 `|`。不查列数、不查内容 —— 前者
+    会把合法的单列表格判错，后者是文风问题而不是完整性问题。
+    """
+    offenders = {}
+    for path in sorted(REPO.glob('docs/*.md')):
+        text = path.read_text(encoding='utf-8', errors='replace')
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if line.startswith('|') and not line.rstrip().endswith('|'):
+                offenders.setdefault(path.relative_to(REPO).as_posix(), []).append(
+                    (lineno, line[:60]))
+    assert not offenders, ('docs 里有未闭合的表格行（半截记录会被读成"已写好了"）：'
+                           + repr(offenders))
 

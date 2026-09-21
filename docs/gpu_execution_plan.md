@@ -24,6 +24,32 @@
 > 因果掩码在前导维下的静默错误，以及 `measure_prefill` 目的端缺 position_ids 导致
 > 两臂位置不一致。详见 `commit_log.md` 第 32 条。
 
+> ⚠️ **2026-09-21 第三次更新（同日收尾，`b44a7b3`）**：**接线已完成，`measurable` 已翻。**
+> `measure_point` 的 `dcc_kv` 分支改走 `attention_hook` —— 源端由钩子 state 携带，
+> 紧凑块经 `build_compact_kv` **目的端条件化**构造，注意力走 `dcc_kv_attention`
+> （与 G2 的 `_comp` 闭包**同一段计算**）。E6 新增 `--dcc-world`（**无默认值**）、
+> `--dcc-budget-mode`、`--ranks`（默认 1）、`--lambda-beta`。三条必须与结论同报的口径：
+>
+> ① **sync/async 轴对 `dcc_kv` 也折叠**。折叠判据从「单卡方法」推广为「**本次运行
+>    真的没有多卡**」：`--dcc-world` 只是把源序列切成 W 段来模拟 W 个源端设备，
+>    `gpu_count_observed` 仍是 1 ⇒ 生成的两行会**逐位相同**，而"两行一样"会被读成
+>    "异步没有收益"。产物里该行 `sync_async` 记 `n/a`。
+> ② **prefill 加速比落两列**：`prefill_speedup_kernel_matched`（钩子 dense 臂 /
+>    钩子 dcc 臂，**同一算子核**，唯一变量是远端 KV 长度 —— **H2 消费这一列**）与
+>    `prefill_speedup_native`（dense 行端到端 / dcc 行端到端，异核 + 含构造代价，
+>    只作端到端参考）。H2 的分子因此从"dense 的端到端数"再收紧为同核数。
+> ③ **计时与评测共用同一份切分**：改走 `_hf.prompt_split`。此前计时侧把整条 ctx 当
+>    源端、再另加 dest_len，评测侧按 (1-f)·ctx 切 ⇒ 同一行里两个压缩设置，产物里的
+>    `budget_tokens_resolved` 对不上质量那一侧（实测报 `{"64": 32}`、实际 `{"48": 24}`）。
+>
+> **仍未满足预登记条件的字面部分**：预登记写「走 G2 的 `pipelined_attention`」，
+> 而实际接的是 `attention_hook` —— 同一段计算，但**没有**走 All-to-Allv 流水。
+> 这是**口径修正**而不是条件已满足（理由与原文一并留在 `commit_log.md` 第 33 条）。
+> 单卡下 `conditionalization_marginal_available=False`：所有源段看到同一批目的端
+> query ⇒ 与共享压缩在数值上不可区分。翻正 `measurable` 之后的**新**阻断是这条
+> 单卡模拟不体现逐边条件化的代价与收益，以及 **G6** 依旧是唯一「只能上机才知道」的一项。
+
+
 ---
 
 ## 0. 结论（只读这段也够）
@@ -43,6 +69,13 @@ python experiments/gpu/e6_main_table.py --plan
 
 也就是说：**以今天的代码租 8 卡跑一天，产出的主表里本文方法一栏是 `blocked`，
 三个基线里两个是 `blocked`。这张表填不进论文的任何一栏。**
+
+> ⚠️ **2026-09-21 第三次更新（`b44a7b3`）**：上段「4 个被阻断」**已过期** —— 现为 **3 个**
+> （`fastkv_official` / `ring` / `apb`），`dcc_kv` 的方法行已接线、`measurable` 已翻。
+> 于是"本文方法一栏是 `blocked`"变成了"本文方法一栏**能出数了**"。
+> **但这不等于可以租卡开跑**：`dcc_kv` 的数只在单卡模拟下拿得到，而单卡模拟不体现
+> 逐边条件化的代价与收益；且 **G6** 未做。结论口径见本节末与 §5。
+
 
 > ⚠️ **2026-09-20 第十轮复查**：§2 S0 的五项 CPU 侧缺口（M1/M2/M3/M5/M9）
 > 与 **G1/G2/G3/G4/G5 五项代码缺口**均已关闭（代码在工作区，尚未提交）；
@@ -100,6 +133,21 @@ mode = "identity" if method == "dense" else a.compaction_mode
 `pipelined_attention`，而不是与 `kv_budget_shared` 同一分支。
 
 **2026-09-21 稍后**：这个条件的前半**已经有工具了** ——
+
+> ⚠️ **2026-09-21 第三次更新（`b44a7b3`）**：上段的三句断言**全部已过期** ——
+> ① "钩子接上后 `dcc_kv` 走的仍是共享裁剪路径" ❌ 现在走 `attention_hook`；
+> ② "翻正 `measurable` 会得到假阳性" ❌ 那说的是**接线之前**；接线之后这条通路就是
+>    本文方法（源端由 state 携带、紧凑块目的端条件化构造、注意力走 `dcc_kv_attention`），
+>    两者的质量差不再是 0；
+> ③ "能翻 `measurable` 的充要条件是走 G2 的 `pipelined_attention`" ⚠️ **口径修正**：
+>    实际接的是 `attention_hook`，它调用与 G2 `_comp` 闭包**同一段计算**
+>    （`dcc_kv_attention`），但**没有**走 All-to-Allv 流水。单卡下走不走流水都没有
+>    可重叠窗口（`chunks_effective=1`），故本表折叠 sync 轴、把"异步的代价与收益"
+>    留给 A5/E5。**修正的是表述，不是条件本身** —— 这一点必须与数字同报。
+>
+> 同段「接线（挂进 `measure_point` 的 `dcc_kv` 分支、连同 E6 的 `--dcc-world` 入口）
+> 仍未做」一并过期：**已做**（见本节首条更新）。
+
 `src/distributed/attention_hook.py` 提供 `dcc_attention(model, HookConfig(...))`
 上下文管理器，两段式（`source_phase` / `destination_phase`）跑真实前向，并在本机
 CPU 上用 tiny Llama 验证到 ULP 级。**接线**（挂进 `measure_point` 的 `dcc_kv` 分支、
@@ -115,7 +163,7 @@ CPU 上用 tiny Llama 验证到 ULP 级。**接线**（挂进 `measure_point` �
 | **G4** | A4 的代码 | ✅ 已提交（`c9ca6b0`） | `e5_gpu_ablation.py` 的 `a4_interaction_grid` |
 | **G5** | 评测集 JSONL 转换器 | ✅ 已提交（`c9ca6b0`） | `experiments/gpu/build_eval_set.py` |
 | **G6** | CUDA 构造可用性实测 | ❌ **未做** | `_env.probe_gpu_construction()`；只能上机 |
-| **H0** | E6 的注意力钩子（算子核 + 注意力钩子） | ✅ 量具侧已接；⚠️ **方法侧工具就绪、接线未做**（2026-09-21） | 量具侧：`_hf.measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV=True`。方法侧：`src/distributed/attention_hook.py`（本机 tiny Llama 验证到 ULP 级）。**仍未接进 `measure_point`** ⇒ `dcc_kv` 与 `kv_budget_shared` 仍共用 `apply_kv_budget`，质量差恒为 0 |
+| **H0** | E6 的注意力钩子（算子核 + 注意力钩子） | ✅ **已完成**（`b44a7b3`，2026-09-21） | 量具侧：`_hf.measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV=True`。方法侧：`src/distributed/attention_hook.py`（本机 tiny Llama 验证到 ULP 级）。**并已接进 `measure_point` 的 `dcc_kv` 行**（`b44a7b3`），E6 加 `--dcc-world` / `--dcc-budget-mode` / `--ranks`。⚠️ **已被 `b44a7b3` 修正**（原文保留）：「方法侧工具就绪、接线未做」「**仍未接进 `measure_point`** ⇒ `dcc_kv` 与 `kv_budget_shared` 仍共用 `apply_kv_budget`，质量差恒为 0」 |
 
 其中 **G6 是唯一「只能上机才知道」的一项**。**H0 已于 2026-09-21 接上，但它恰好
 演示了为什么那句 `measurable: True` 不等于完成**：钩子接上后量具灵敏了，可
@@ -124,7 +172,12 @@ CPU 上用 tiny Llama 验证到 ULP 级。**接线**（挂进 `measure_point` �
 **能翻 `measurable` 的充要条件**：`dcc_kv` 在 `measure_point` 里走 G2 的
 `pipelined_attention`，而不是与 `kv_budget_shared` 同一分支。
 
-> 「代码已写」不等于「结论成立」。G1–G5 的实现全部只在 CPU 上做过等价性验证
+> 「代码已写」不等于「结论成立」。
+
+> ⚠️ **2026-09-21 第三次更新（`b44a7b3`）**：上面这段（第二条重复论述）同样**已过期**，
+> 更正同本节首条 —— `dcc_kv` 已接 `attention_hook`、`measurable` 已翻；且当时那句
+> "钩子接上后走的仍是共享裁剪路径" 描述的是**接线之前**的状态。原文保留不抹除。
+G1–G5 的实现全部只在 CPU 上做过等价性验证
 > （`tests/test_attention_kernel.py`、`tests/test_baseline_operators.py`、
 > `tests/test_forward_pipeline.py`）。GPU 侧一次都没跑过：本机无 CUDA。
 
@@ -299,12 +352,12 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
 - [x] **H0 方法侧**写完（2026-09-21）：`src/distributed/attention_hook.py` +
       `tests/test_attention_hook.py`（本机 tiny Llama 端到端；dense 参照臂与原生
       前向差 9.7e-08）
-- [ ] **把钩子接进 `measure_point` 的 `dcc_kv` 分支**（连同 E6 的 `--dcc-world` 入口）——
-      这才是 H0 真正完成的判据。量具已灵敏、工具已就绪，**但未翻 `measurable`**
+- [x] **把钩子接进 `measure_point` 的 `dcc_kv` 分支**（`b44a7b3`，2026-09-21）：
+      连同 E6 的 `--dcc-world` / `--dcc-budget-mode` / `--ranks`；`measurable` 已翻
 - [ ] G6 CUDA 构造可用性实测（上机后第一件事）
 - [x] 上面五项已写的代码**提交**（`c9ca6b0`，2026-09-20；H0 于 2026-09-21 提交）
-- [ ] **把 `dcc_kv` 的构造路径独立出来**（G2 的 `pipelined_attention` 接进
-      `measure_point`）—— 这是翻 `measurable` 的充要条件，也是 H2 质量臂的前置
+- [x] **把 `dcc_kv` 的构造路径独立出来**（`b44a7b3`，2026-09-21）：走 `attention_hook`
+      （**同一段计算、但未走 All-to-Allv 流水** —— 这是口径修正，见 §0）
 - [ ] `requirements.lock` 生成并与目标机 CUDA 版本核对（torch 版本声明目前三处不一致）
 - [ ] 目标机的 `NCCL` 版本确认（E5 需要）
 - [x] S0 的 CPU 侧缺口（M1/M2/M3/M5/M9）**全部完成**（`139b1b8`，2026-09-16）
@@ -388,3 +441,9 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
 >
 > **2026-09-21 再补**：让 `dcc_kv` 通路独立所需的**工具**（H0 方法侧钩子）已就绪，
 > 但**接线**仍未做；**G6 依旧是唯一「只能上机才知道」的一项**。
+
+> ⚠️ **2026-09-21 第三次更新（`b44a7b3`）**：接线**已做**（`measure_point` 的 `dcc_kv` 分行
+> 走 `attention_hook`，`measurable` 翻正）。第 5 项的前置因此只剩 **G6**；但
+> 「G6 做完就能拿到有用的数」仍不成立 —— `--dcc-world` 的单卡模拟不体现逐边条件化
+> 的代价与收益，那部分只能等真多卡。
+
