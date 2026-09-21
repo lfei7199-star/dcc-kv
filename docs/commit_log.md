@@ -3,11 +3,13 @@
 > 本文件按提交顺序倒序记录 `dcc-kv` 仓库的每一次提交：动机、改动清单、验证证据、遗留项。
 > 与 `docs/git_strategy.md`（规范）互补 —— 那份说「应该怎么提交」，这份说「实际提交了什么、验没验证过」。
 >
-> 生成时间：2026-09-21 10:40 (GMT+8)
-> 当前 HEAD：`5af59e8`（分支 `paper/sections-5-8`；本文件本次补记为其后紧随的 docs 提交 ——
-> 自 `main`（`8a1d275`）分叉以来的第 46 次提交）
-> 本轮新增一条：`5af59e8`（第 45 次，第 31 条，接上 H0（E6 注意力钩子）
-> 并修正 H2 的 prefill 加速比口径为 dense）。
+> 生成时间：2026-09-21 15:30 (GMT+8)
+> 当前 HEAD：`e58e0ec`（分支 `paper/sections-5-8`；本文件本次补记为其后紧随的 docs 提交 ——
+> 自 `main`（`8a1d275`）分叉以来的第 49 次提交）
+> 本轮新增一条：`e58e0ec`（第 48 次，第 32 条，写出 H0 的**方法侧**注意力钩子，
+> 并修两个被它撞出来的实现缺陷）。
+> 本轮另有两条不单独立条：`873cc69`（第 46 次，第 31 条之后的日志提交自身）、
+> `93ddd16`（第 47 次，把「一次性补丁脚本不入库」从人肉约定升级为 `.gitignore` 结构约束）。
 > 上一轮：`c9ca6b0`（第 43 次，第 30 条，补齐 G1/G2/G3/G5 与 A4，
 > 并落实第五轮对抗性审查的 12 处修复）、`09d4416`（第 44 次，
 > 本文件的日志提交自身，不单独立条）。
@@ -38,6 +40,7 @@
 
 | # | 短哈希 | 日期 | 作者 | 类型 | 文件数 | +行 | −行 |
 |---|---|---|---|---|---|---|---|
+| 32 | `e58e0ec` | 2026-09-21 15:22 | Saluneo | feat(h0)+fix | 10 | 1124 | 28 |
 | 31 | `5af59e8` | 2026-09-21 10:40 | Saluneo | feat(gpu)+fix(h2) | 4 | 318 | 100 |
 | 30 | `c9ca6b0` | 2026-09-20 12:41 | Saluneo | feat(gpu)+fix(audit) | 32 | 5865 | 182 |
 | 29 | `3d76629` | 2026-09-16 22:20 | Saluneo | docs(reports) | 4 | 631 | 28 |
@@ -69,12 +72,12 @@
 | 3 | `8a1d275` | 2026-09-08 09:15 | Mavis | fix(requirements) | 1 | 6 | 6 |
 | 2 | `fcd9718` | 2026-09-08 07:40 | Mavis | docs | 5 | 463 | 0 |
 | 1 | `7ebff65` | 2026-09-08 06:36 | Mavis | feat | 43 | 5382 | 0 |
-| | | | | **合计** | **333 次文件变更** | **251467** | **3297** |
+| | | | | **合计** | **343 次文件变更** | **252591** | **3325** |
 
-仓库当前规模：**178** 个受版本控制文件，其中 75 个 `.py`、10 个 `.tex`、19 个 `.md`、
+仓库当前规模：**180** 个受版本控制文件，其中 77 个 `.py`、10 个 `.tex`、19 个 `.md`、
 30 个 `.csv`、25 个 `.json`、6 个 `.log`（后三者**全部**来自 `results/`，共 61 个，见第 24 条）。
-上一轮新增 **11 个 `.py`**：G1/G2/G3/G5 四个实现 + 7 个锚点文件（见第 30 条）；
-本轮（第 31 条）**未新增文件** —— 只改既有 4 个，受控文件数仍为 **178**。
+第 31 条**未新增文件**（只改既有 4 个）；**本轮（第 32 条）新增 2 个 `.py`**：
+`src/distributed/attention_hook.py` 与其锚点 `tests/test_attention_hook.py`。
 
 分支与推送状态：
 
@@ -93,6 +96,122 @@
 > 29），加上 `ebb8cce..90934a6` 的 5 个才是 34。此前抄录有误，一并更正。
   main                 →  origin/main                  （未动）
 ```
+
+---
+
+## 32. `e58e0ec` — 写出 H0 方法侧的注意力钩子，并修两个被它撞出来的实现缺陷
+
+**日期**：2026-09-21 15:22 | **类型**：feat(h0)+fix | **规模**：10 文件，+1124/−28
+
+### 动机
+
+第 31 条把 H0 的**量具侧**接上了（`measure_prefill` 三段化），但那条自己就写明：
+「**这修的是量具，不是方法实现**」。方法侧的缺口是一句早就写在两处源码里、却从未
+兑现的引用：
+
+```
+experiments/gpu/e5_gpu_ablation.py:105   "...挂进真实模型 forward 的钩子
+                                          （src/distributed/attention_hook.py）"
+src/dcc_kv_ref/attention_kernel.py:126   "2. 钩子里的 dense 参照臂（见
+                                          src/distributed/attention_hook.py）"
+```
+
+**文件不存在。** 而当时的 I 组守卫只认 `tests/test_*.py` 形式的引用，完全看不见
+这类悬空引用 —— 与它当初要防的「引用了从未存在的测试文件」是同一类错，只是换了
+目录。
+
+### 一、钩子（`src/distributed/attention_hook.py`，597 行）
+
+把 G1 的算子核（`attention_kernel`）挂进真实 HF 模型的 attention 分派。模块文档
+列了八条设计约束，其中**三条属于「错了也不报错」**那一类，值得单独记：
+
+1. **注册专用键，不覆盖 `eager` / `sdpa`。**
+   `ALL_ATTENTION_FUNCTIONS` 是**全局**注册表。`register("eager", fn)` 会改掉所有用
+   eager 的模型；更危险的是"还原"若写成 `pop("eager")`，那是把 transformers 自带的
+   实现**删掉**，不是还原。故注册 `HOOK_KEY = "dcc_kv"`，只改
+   `config._attn_implementation`，还原即改回原值（幂等）。
+
+2. **source / destination 两阶段由调用方显式声明。**
+   不许靠「`past_key_values` 是不是 None」去猜：猜错的形态是静默的 —— 把目的端当
+   源端时，钩子会把紧凑块又存一份进 state，产物看着完全正常。后者在 state 为空时
+   直接抛错。
+
+3. **返回值必须转置回 `[B, Lq, H_q*D_v]`。**
+   `LlamaAttention.forward` 拿到后立刻 `reshape(*input_shape, -1)`。若忘了
+   `transpose(1, 2)`，`[B, H_q, Lq, D_v]` 到 `[B, Lq, H_q*D_v]` 的**元素数永远相同**
+   ⇒ reshape 永远能过，只是换个轴读。故显式断言。
+
+另有五条见模块文档：目的端用 state 里的源端 K/V（`cache.update` 发生在钩子**之前**）；
+GQA 分组必须按 `repeat_interleave` 连续切；不吃 `attention_mask` 但整列遮蔽即抛错；
+`dcc_world` 单卡模拟**不体现代价化**（summary 里如实记 `False` 并附原因，不提供
+`mode="shared"` 这种假选项）；每边预算默认 `B_total/world`，`B_total` 只作敏感性对照
+且产物里写明不得用于 H2 质量主张。
+
+### 二、两个被撞出来的实现缺陷
+
+**都由「接钩子」这件事撞出来 —— 静态审计看不出来，因为两个都是"形状对、量级对"。**
+
+1. **`attention_kernel.dense_attention` 的因果掩码把「最后一维是 key 维」写成了
+   「第 0 维」。** 旧实现：
+
+   ```python
+   pos_k = torch.arange(int(keys.shape[0]), ...)
+   logits.masked_fill(pos_k.reshape(1, -1) > query_positions.reshape(-1, 1), -inf)
+   ```
+
+   在 keys 为 `[H, Lk, d_h]` 时取到 **H**（实测 g=2、Lk=24 直接 `RuntimeError`
+   报尺寸 2 vs 24）；而掩码按二维形状构造 ⇒ 前导维被当作 query 维广播，
+   **H == Lk 时不报错、只算错**。第 2 种比第 1 种坏。
+   锚点 `test_dense_causal_mask_supports_leading_dims`；顺带记下它只能到
+   **ULP 级**（把 H 个 head 一次算与逐 head 算，GEMM 的 M 维不同，实测 float64
+   差 1.11e-16、float32 差 1.19e-07）—— 与 `query_chunk` 是同一现象。
+
+2. **`_hf.measure_prefill` 的 ③ 不传 `position_ids`。**
+   取证（本机 CPU，tiny Llama，S=24 / dest=6 / B=12）：
+   `DynamicCache.get_seq_length()` 读的是**实际张量长度** —— 裁剪后返回 **12**，
+   不是 24。于是缺省 `position_ids = arange(6) + 12 = 12..17`，而正确是 24..29。
+   数值后果：logits 最大绝对差 **4.9e-3**，而 dense 参照臂的算子路径差只有
+   **9.7e-08** —— **差 5 个数量级**。
+   更关键的是：dense 臂不裁剪、位置本就是 S.. ⇒ **两臂的目的端位置不一致**，
+   第 31 条刚立下的 A1b 断言「两臂唯一差别是 KV 长度」**在真实模型下不成立**。
+   锚点 `test_h10_destination_positions_are_absolute_and_arm_independent`。
+   这与 `score_choices` 早已显式给 `position_ids` 的做法对齐（其文档要点 ②）。
+
+### 三、守卫扩展：I 组从 `tests/` 开到全仓 `.py`
+
+`_REF_TEST_PATH` → `_REF_PY_PATH`，面从 `tests/test_*.py` 扩到
+`(?:src|experiments|tests)/**/*.py`。扩展前先扫全仓：**58 条引用零误报**，
+所以可以把面开大而不引入永久噪声。
+
+### 四、验证证据
+
+* **全量 `pytest`：447 passed / 2 xfailed / 0 failed**（上一轮 435，本轮 +12 条）。
+* **三条实现变异实测全部被抓**（临时改回错误形态 → 跑锚点 → 逐字节还原，全程不经
+  `git stash`）：
+
+  | 变异 | 结果 |
+  |---|---|
+  | 回退 `position_ids`（= 修复前状态） | `test_h10` 变红 |
+  | 去掉钩子返回值的 `transpose(1, 2)` | `test_h1` 变红 |
+  | GQA 分组改成 `repeat`（整块复制）语义 | `test_h5` 变红 |
+
+  三者还原后重跑全部回绿。
+* **I 组的判别力**另用一次性探针验证：临时放一个引用不存在模块的 `.py`，I1 立即
+  变红并指名到具体路径；探针已删。
+* **dense 参照臂**（`identity_compact`，β≡0、B=L_s）与原生 HF 前向的最大绝对差
+  **9.7e-08**（相对 2.5e-07，约 1.6 ULP）—— 一条断言同时盖住形状、转置、GQA 分组、
+  位置、因果、还原六个维度。
+
+### 五、遗留
+
+* **钩子尚未接进 `measure_point`**：`dcc_kv` 行仍与 `kv_budget_shared` 同路，
+  `measurable` **仍未翻**（理由同第 31 条，未变）。
+* **E6 还没有 `--dcc-world` 入口**：钩子侧只有 `HookConfig.dcc_world`。上一轮文档
+  曾把它写成「计划参数（无默认）」，读起来像"参数在了、只是没默认值" —— 实测
+  `grep -rn dcc-world experiments/` 在代码里**零命中**。本轮已把 `FILE_MAP` 与
+  `gpu_execution_plan` 的措辞改为「尚未加入 CLI」。这类「文档比代码走得快」
+  的偏差正是本仓库反复吃过的亏。
+* **G6 依旧是唯一「只能上机才知道」的一项**（`_env.probe_gpu_construction` 的实机确认）。
 
 ---
 
