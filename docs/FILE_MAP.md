@@ -18,7 +18,7 @@
 | 了解项目主张与边界（哪些**不能**声明） | `README.md` §不主张的内容；`docs/commit_log.md` §P |
 | 跑 CPU 可复现实验（机制级） | `experiments/cpu/`，入口 `experiments/run_cpu.sh` |
 | 跑 GPU 实验（任务级 / 系统级） | `experiments/gpu/`，入口 `experiments/run_gpu.sh` |
-| 规划租卡跑实验、控制预算 | **`docs/gpu_execution_plan.md`**（结论：当前**仍**不能开跑 —— 缺的不是卡，是代码；G1–G5 已实现，剩 **H0**（E6 注意力钩子）与 **G6**；含 S0–S3 梯队） |
+| 规划租卡跑实验、控制预算 | **`docs/gpu_execution_plan.md`**（结论：当前**仍**不能开跑 —— 缺的不是卡，是代码。G1–G5 已提交，**H0 已于 2026-09-21 接上**；剩 **G6** 与「`dcc_kv` 构造路径独立」；含 S0–S3 梯队） |
 | 看算法参考实现 | `src/dcc_kv_ref/` |
 | 看多进程与通信原语 | `src/distributed/` |
 | 看基线（Ring / FastKV / APB） | `src/baselines/` |
@@ -150,11 +150,11 @@
 | `__init__.py` | 17 | **声明 CPU/GPU 两套证据的量纲关系**（E3↔A2、A3 机制↔A3 任务、E0↔E8），并明确不可互推 |
 | `_env.py` | 622 | 环境闸门（`probe` / `enforce`，不达标退出码 3）、计时（`benchmark_ms`；窗口内只做 `device_sync()`，集合 barrier 留窗口外）、设备绑定（`local_rank_of` / `local_device`，取 `LOCAL_RANK`）、`CUDA_CONSTRUCTION_DEFECTS` 历史清单、元数据构造 |
 | `_comm.py` | 469 | 变长 All-to-Allv（阻塞 / 异步）、同步与异步流水线（`run_sync_pipeline` / `run_async_pipeline`）、分块 `_split_chunks`（逐 dst 取片，尺寸自洽）、体积口径（`make_uniform_plan`） |
-| `_hf.py` | 497 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时、KV 字节数 |
+| `_hf.py` | 553 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时（**2026-09-21 起三段化**：源端构造 → 压缩 → 目的端前向，由 `PREFILL_TIMING_CONSUMES_COMPACT_KV=True` 声明且压缩臂缺 `dest_len` 即抛错）、KV 字节数 |
 | `_forward.py` | 426 | **G2
 | `build_eval_set.py` | 557 | **G5
 | `e5_gpu_ablation.py` | 1211 | **A1** 通信集大小、**A2** 压缩预算扫描、**A3** 组件拆分（被阻断，拒绝产假数字）、**A5** 异步 vs 同步（H4 判据走 `hypotheses.h4_pass`）。**A4**（压缩 × 异步交互，2026-09-20 已实现）。**A3 仍被阻断**（缺 G1 → E6 的真实前向通路，即 **H0**），拒绝产假数字 |
-| `e6_main_table.py` | 692 | 主表与可扩展性。`gpu_count` 记为**方法要求**而非自由轴；sync/async 轴对单卡方法**折叠**（不生成两行相同的数）。⚠️ 2026-09-20：`dcc_kv` 等 4 个方法仍 `measurable: False`。**真实阻塞是 H0（注意力钩子未接），不是算子核未写**：全长 prefill 计时窗口里**从不出现裁剪后的 KV**，所以直接翻 `measurable` 只会得到一个**永不达标的 H2** |
+| `e6_main_table.py` | 739 | 主表与可扩展性。`gpu_count` 记为**方法要求**而非自由轴；sync/async 轴对单卡方法**折叠**（不生成两行相同的数）。⚠️ **2026-09-21 更新**：H0 已接（量具灵敏了），但 `dcc_kv` 等 4 个方法**仍** `measurable: False` —— 真实阻塞换了：`dcc_kv` 与 `kv_budget_shared` 仍走同一条 `apply_kv_budget`（共享裁剪）⇒ 质量差恒为 0。此时翻 `measurable` 会得到**假阳性**（拿一条不是本文方法的通路去判质量臂）。prefill 加速比分子已改判为 **dense** |
 | `e7_negative_results.py` | 486 | 负结果四条件：短上下文 / 低预算 / 强 retrieval / batch=1 |
 | `e8_low_precision.py` | 348 | 低精度（FP16/BF16）归并算子与失效边界 |
 
@@ -181,8 +181,8 @@
 | `test_build_eval_set.py` | 168 | **G5 的锚点**（守**口径**而非功能）：选项只能来自数据自身；跳过必须记账且 E7 的「强检索」条件缺数据要被显式识别；非官方提示模板必须如实标记 |
 | `test_forward_pipeline.py` | 532 | **G2 的锚点**（stub 顶掉集合通信后可纯 CPU 跑）。核心不变式只有一条：**流水只改变“什么时候算”，不改变“算什么”**。另有打包/解码互逆、块内源切分、退化为单块时如实上报。⚠️ 为躲开 conftest 的按名自动打标（含 `gpu` / `nccl` / `end_to_end` / `async_overlap` 会被默认排除），本文件**刻意避开这些词** |
 | `test_a4_interaction.py` | 409 | **G4（A4 压缩 × 异步交互）的锚点**。A4 是**唯一**把测量与判定都放在设备无关路径上的消融，故本文件用 stub **真跑一遍** `a4_interaction_grid` 而非只查字符串（字符串检查挡不住“接线接反”）。三类锚点：判定语义、接线纪律（判据不得被重新实现、CI 水平不得硬编码）、测量正确性（A4 计算侧必须是真实算子核，T_comm/T_comp 取自同步臂） |
-| `test_selfcheck_2026_09_18.py` | 320 | **2026-09-18 自查的回归锚点**：每条对应一个已修缺陷，且都是“形状/量级/文件名都正常、不报错但结论错或永远出不来”的那一类（如 `paired_bootstrap` 方向反了、`save_csv` 遇混合行整表 `ValueError`、`h4_pass=None` 被折进“未达标”） |
-| `test_adversarial_2026_09_20.py` | 516 | **2026-09-20 对抗性审查的回归锚点（第五轮）**：12 处已修缺陷（D1–D12）各一条，每条先证明「它本可以不被发现」。A 组 prefill 量具（计时窗口里从未出现裁剪后的 KV ⇒ H2 加速臂结构上恒不超过 1，量具失效时须报 `unresolved(instrument)` 而非 `failed`）；B 组异步臂 `comm_ms` 是上界（落 `nan` 而非 0）；C 组重复次数与 `lambda_beta` 默认值必须进产物且与项目默认**同源**；D 组用 AST 扫设备索引（`set_device(rank)` / `f"cuda:{rank}"`）；E 组双边同步次数断言；F/G 组 E8 元数据与 `json_safe`；**H 组元守卫**保证本文件自身的用例默认全部运行 |
+| `test_selfcheck_2026_09_18.py` | 328 | **2026-09-18 自查的回归锚点**：每条对应一个已修缺陷，且都是“形状/量级/文件名都正常、不报错但结论错或永远出不来”的那一类（如 `paired_bootstrap` 方向反了、`save_csv` 遇混合行整表 `ValueError`、`h4_pass=None` 被折进“未达标”） |
+| `test_adversarial_2026_09_20.py` | 623 | **2026-09-20 对抗性审查 + 2026-09-21 H0 接线的回归锚点**：12 处已修缺陷（D1–D12）各一条，每条先证明「它本可以不被发现」。**A 组已于 2026-09-21 改写** —— 原锁「量具失敏 ⇒ 加速比结构上恒不超 1」，现锁「目的端看到的 KV 必须等于 B、两臂唯一差别就是那个长度、漏给 `dest_len` 必须抛错、分子必须是 dense」；B 组异步臂 `comm_ms` 是上界（落 `nan` 而非 0）；C 组重复次数与 `lambda_beta` 默认值必须进产物且与项目默认**同源**；D 组用 AST 扫设备索引（`set_device(rank)` / `f"cuda:{rank}"`）；E 组双边同步次数断言；F/G 组 E8 元数据与 `json_safe`；**H 组元守卫**保证本文件自身的用例默认全部运行；**I 组（2026-09-21 新增）**断言源码与 `docs/*.md` 里写下的测试路径真实存在（防「声称有测试」） |
 `tests/gpu/`（默认跳过）：
 
 | 文件 | 行数 | 内容 |
@@ -224,12 +224,12 @@
 
 | 文件 | 行数 | 作用与内容 |
 |---|---|---|
-| `commit_log.md` | 2710 | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
+| `commit_log.md` | 2848 | **逐次提交报告**，本仓库最重要的过程文档。体例：每条含动机 / 改动清单 / 验证 / 遗留；被推翻的结论**保留原文**并加 `⚠️ 已被 <hash> 修正`，不抹除历史。§P.1 是"已解决的问题"表，§P.2 是"仍未解决的问题"表，§Q 记录易被误读的坑 |
 | `git_strategy.md` | 418 | Git 管理策略：分支、commit 体例、tag、实验可追溯。§8.1 记录 **`results/` 入库**的决定与体积策略 |
 | `release_checklist.md` | 170 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
-| `reproducibility.md` | 221 | 可复现性说明。§6 抄录 blueprint §3 的 H1–H5 及其阈值；2026-09-16 起附「质量相近」的完整定义摘要 |
+| `reproducibility.md` | 240 | 可复现性说明。§6 的 H1–H5 及其阈值：2026-09-21 起口径来源改为**论文原件（`AuthorKit27` 第 7 章）+ 仓库内机器可读实现 `hypotheses.py`**（原先声明「以 blueprint §3 为准」，该原件不在库内、已裁决不再作为权威锚点，原 C11 关闭）；2026-09-16 起附「质量相近」的完整定义摘要；H2 的 prefill 加速比分子于 2026-09-21 改判为 **dense** |
 | `writing_scope_and_metrics.md` | 182 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录历次裁决的落实（D1–D6）与仍开放项。**2026-09-16 第八轮：M1/M2/M3/M5/M9 全部关闭**（见 §4 后附注）。第九轮补上 E0 的「置换次数」轴，论文 §6 里最后一条非 GPU 待补项关闭 |
-| `gpu_execution_plan.md` | 317 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对。**§0/§5/§6/§7 已于 2026-09-20 第十轮同步**：G1–G5 已实现（CPU 侧测试全绿），新增第五轮对抗性审查的 12 处修复，并新识别出 **H0**（E6 注意力钩子未接 ⇒ prefill 量具失敏）。**G6 与 H0 仍未动，故 §0 “不能开跑”的结论不变** |
+| `gpu_execution_plan.md` | 366 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对。**§0/§5/§6/§7 已于 2026-09-21 第二次同步**：G1–G5 已**提交**（`c9ca6b0`），**H0 已接**（`measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV` 翻正 + E6 加 `--dest-fraction`）。**未变的是结论，变了的是理由**：现在阻的是「`dcc_kv` 的构造路径还没独立」（仍与 `kv_budget_shared` 共用共享裁剪 ⇒ 质量差恒为 0）与 **G6 未做**；翻 `measurable` 仍不可以（否则得到假阳性） |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
 
@@ -262,7 +262,13 @@
 
 ---
 
-## 8. 仓库外依赖的文档（当前**缺失**）
+## 8. 仓库外依赖的文档（**作废**：2026-09-21 裁决不再作为权威锚点）
+
+> ⚠️ **2026-09-21 裁决**：本节登记的这批仓库外文档（原记账为 **C11**）
+> **不再作为权威锚点，不予追索**。口径一律以**论文原件（`AuthorKit27`）**
+> **+ 仓库内机器可读实现（`experiments/common/hypotheses.py`）** 为准。
+> 下表保留原文，只作历史记录 —— 它记下了「长期依赖一份拿不到的原件」这件事
+> 如何制造了下游表述分歧（本节的 H2 例是最好的标本）。
 
 `README.md` §上级文档 与 `docs/` 多份文件都引用以下**不在本仓库内**的规划文档。
 全盘搜索确认它们既不在仓库内、也不在相邻目录，**需要外部提供**（记账为 C11）：
@@ -309,5 +315,5 @@
 - 新增/删除/改名任何文件，**同步更新本文**，并在 `docs/commit_log.md` 追加一条。
 - 本文的统计数字以 `git ls-tree -r HEAD | wc -l` 为准，不手写估算。
 - 引用 hash 时写完整 7 位；被后续提交推翻的表述不要删，加 `⚠️ 已被 <hash> 修正`。
-- **行数列的时效性**：2026-09-20 又校准了本轮真涉及的 20 余个文件（含新增的 11 个）；本列在多轮提交后未逐次校准 —— 2026-09-16 实测发现约 20 处偏小（1 至 90 行不等，例如 `_hf.py` 436→468、`e6_main_table.py` 441→499、`tests/test_gpu_pipeline.py` 400+→447、`e0_order_invariance.py` 277→429（第九轮校准））。本次只校准了**本轮真涉及的文件**，其余保留原值以免制造假精确。需要准确值时以
+- **行数列的时效性**：2026-09-21 校准了本轮真涉及的 7 个文件（`_hf.py`、`e6_main_table.py`、两个测试文件、三份 docs）；2026-09-20 曾校准 20 余个（含新增的 11 个）；本列在多轮提交后未逐次校准 —— 2026-09-16 实测发现约 20 处偏小（1 至 90 行不等，例如 `_hf.py` 436→468、`e6_main_table.py` 441→499、`tests/test_gpu_pipeline.py` 400+→447、`e0_order_invariance.py` 277→429（第九轮校准））。本次只校准了**本轮真涉及的文件**，其余保留原值以免制造假精确。需要准确值时以
   `git ls-tree -r HEAD --name-only | xargs wc -l` 为准，不要相信本列。

@@ -4,11 +4,14 @@
 > `experiments/gpu/README.md`（脚本级前置缺口）。
 > 本文件回答两个问题：**现在能不能租卡跑**、**跑完能不能把论文填完**。
 >
-> ⚠️ **2026-09-20 第十轮已同步**：G1/G2/G3/G4/G5 的**代码已写完**
-> （`src/dcc_kv_ref/attention_kernel.py`、`experiments/gpu/_forward.py`、
-> `src/baselines/operators.py`、`experiments/gpu/build_eval_set.py` 等），
-> 但仍**未提交**，且 **G6 未做**。§0 的结论**依然成立**，但原因变了：
-> 现在阻的不是「没有通路」，而是「通路还没接进 E6 的测量」——详见 §0。
+> ⚠️ **2026-09-21 已同步**：G1/G2/G3/G4/G5 的代码已**提交入库**（`c9ca6b0`，32 文件）；
+> **H0（E6 注意力钩子）已接上** —— `_hf.measure_prefill` 由两段变三段（源端构造 →
+> 压缩 → 目的端前向），`PREFILL_TIMING_CONSUMES_COMPACT_KV` 由 `False` 翻为 `True`；
+> H2 的 prefill 加速比分子同时改判为 **dense**（旧实现取 `shared`，与 §7.5 的三段
+> 划分不符）。**仍只剩 G6 未做**，§0 的结论**依然成立**（现在仍不能租卡开跑），
+> 但阻断原因第二次变化：从「通路没接进测量」变成「**量具修好了，可被测量的那条
+> 通路还不是本文方法**」—— `dcc_kv` 仍与 `kv_budget_shared` 共用同一条共享裁剪
+> 路径，两者质量差恒为 0。**所以翻 `measurable` 仍然不可以**，详见 §0。
 
 ---
 
@@ -35,8 +38,15 @@ python experiments/gpu/e6_main_table.py --plan
 > **只剩 G6 未做**，外加一条本轮新识别的缺口 **H0**（见下表）。
 > 结论**不变：现在仍不能租卡开跑**，但阻断原因已经从「没有实现」变成
 > 「实现没有接进测量 + 唯一只能上机才知道的那项还没做」。
+>
+> ⚠️ **2026-09-21 更正（上段原文保留）**：上段有两点已过期 ——
+> ① G1–G5 **已提交**（`c9ca6b0`）；② **H0 已接**（见下）。
+> 结论**仍是不变**，但依据换了：现在阻的是 **`dcc_kv` 的构造路径还没独立**
+> （它与 `kv_budget_shared` 共用 `apply_kv_budget`，质量差恒为 0），以及 **G6 未做**。
 
-**H0 是 2026-09-20 对抗性审查新识别的一条，且它最容易被误判为已关闭：**
+**H0：2026-09-20 识别为「未做」，2026-09-21 已接上。**
+
+接上前的形态（原文保留 —— 它是这条缺口的证据，也是「量具失效长什么样」的标本）：
 E6 的 `measure_point` 走 `_hf.measure_prefill`，而该函数的计时窗口里**只有一次
 全长前向**，裁剪后的 KV 从未被任何前向使用（桩模型实测：4 次前向 input 恒为 S、
 past 恒为 None）。于是对于任何压缩方法，
@@ -46,27 +56,56 @@ T_prefill(压缩) = 全长注意力耗时 + 压缩开销  >=  T_prefill(精确)
 ```
 
 `prefill_speedup` **结构上恒 <= 1 < 1.10x**，H2 的第二个合取项永远不可能满足。
-⇒ 把 `METHOD_SPECS["dcc_kv"]["measurable"]` 直接翻成 `True` 是**错**的：
-它会得到一个确定性的假阴性（「压缩不加速 prefill」），而根源是量具。
-正确做法是先接 **E6 的注意力钩子**（算子核 + 注意力钩子），让 prefill 也走
-「只对紧凑 KV 做注意力」，再翻 `measurable`。在钩子就绪前，判定程序会按
-`_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV=False` 把该长度记为 **unresolved
-（原因 instrument）**，而不是未达标 —— 两条路径都已由测试锁住。
+⇒ 那时把 `METHOD_SPECS["dcc_kv"]["measurable"]` 直接翻成 `True` 会得到一个
+**确定性的假阴性**（「压缩不加速 prefill」），而根源是量具，不是方法。
+
+**接上后（现行为，2026-09-21）** —— `_one()` 做三件事，缺一不可：
+
+```
+① 源端构造  lm.model(src_ids, use_cache=True)          <- 两臂共有，不可被压缩降低
+② 压缩      apply_kv_budget(cache, B)                  <- 仅压缩臂
+③ 目的端    lm.model(dst_ids, past_key_values=cache)   <- H0 的收益载体
+```
+
+③ 看到的 KV 长度：dense 臂是 S、压缩臂是 B，**其余全同** ⇒ 加速比的差别只能来自
+这里。压缩臂不给 `dest_len` 会直接抛 `ValueError`（堵住「忘了开 ③」这条静默失效
+通路 —— 那正是此前 `PREFILL_TIMING_CONSUMES_COMPACT_KV` 为 `False` 的原因）。
+常量随之翻为 `True`；E6 新增 `--dest-fraction`（默认 0.25），落进每行产物与
+`instrument` 块。
+
+**但 H0 修的是量具，不是方法实现。** 翻 `measurable` 仍然不可以，原因不是量具
+（已修），而是 `measure_point` 里这两行：
+
+```python
+budget_ratio = None if method == "dense" else a.budget_ratio
+mode = "identity" if method == "dense" else a.compaction_mode
+```
+
+`dcc_kv` 与 `kv_budget_shared` 因此**走的是同一条 `apply_kv_budget`（共享裁剪）
+路径** —— 没有目的端条件化构造，也没有 G2 的 `pipelined_attention`。两者的质量差
+会**恒为 0**，H2 的 `quality_gain` 无从谈起。此时翻 `measurable` 会让 H2 拿一条
+**不是本文方法**的通路去判质量臂：那不再是假阴性，而是**假阳性**，更坏。
+**能翻 `measurable` 的充要条件**：`dcc_kv` 在 `measure_point` 里走 G2 的
+`pipelined_attention`，而不是与 `kv_budget_shared` 同一分支。
 
 阻断原因全部是**实现缺口**，与租什么卡无关：
 
-| # | 缺口 | 状态（2026-09-20） | 文件 / 补什么的现状 |
+| # | 缺口 | 状态（2026-09-21） | 文件 / 补什么的现状 |
 |---|---|---|---|
-| **G1** | `CompactKV` → GPU attention kernel | ✅ 代码已写（未提交） | `src/dcc_kv_ref/attention_kernel.py`（`compact_kv_attention` 等） |
-| **G2** | 异步 All-to-Allv 的 GPU 入口 | ✅ 代码已写（未提交） | `experiments/gpu/_forward.py`（`pipelined_attention`） |
-| **G3** | `ring` / `apb` / `fastkv` 的 GPU 实现 | ✅ device-agnostic 版已写（未提交） | `src/baselines/operators.py`。**注意 ring 是单进程模拟，不是 NCCL P2P ring** |
-| **G4** | A4 的代码 | ✅ 已写（未提交） | `e5_gpu_ablation.py` 的 `a4_interaction_grid` |
-| **G5** | 评测集 JSONL 转换器 | ✅ 已写（未提交） | `experiments/gpu/build_eval_set.py` |
+| **G1** | `CompactKV` → GPU attention kernel | ✅ 已提交（`c9ca6b0`） | `src/dcc_kv_ref/attention_kernel.py`（`compact_kv_attention` 等） |
+| **G2** | 异步 All-to-Allv 的 GPU 入口 | ✅ 已提交（`c9ca6b0`） | `experiments/gpu/_forward.py`（`pipelined_attention`） |
+| **G3** | `ring` / `apb` / `fastkv` 的 GPU 实现 | ✅ device-agnostic 版已提交 | `src/baselines/operators.py`。**注意 ring 是单进程模拟，不是 NCCL P2P ring** |
+| **G4** | A4 的代码 | ✅ 已提交（`c9ca6b0`） | `e5_gpu_ablation.py` 的 `a4_interaction_grid` |
+| **G5** | 评测集 JSONL 转换器 | ✅ 已提交（`c9ca6b0`） | `experiments/gpu/build_eval_set.py` |
 | **G6** | CUDA 构造可用性实测 | ❌ **未做** | `_env.probe_gpu_construction()`；只能上机 |
-| **H0** | E6 的注意力钩子（算子核 + 注意力钩子） | ❌ **未做**（新识别） | 让 E6 的 prefill 计时真的用上紧凑 KV；不做则 H2 的 prefill 项不可判 |
+| **H0** | E6 的注意力钩子（算子核 + 注意力钩子） | ✅ **已接**（2026-09-21） | `_hf.measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV=True`。**但只修了量具**：`dcc_kv` 仍与 `kv_budget_shared` 共用 `apply_kv_budget` ⇒ 质量差恒为 0 |
 
-其中 **G6 是唯一「只能上机才知道」的一项**；**H0 是唯一「能本地写、但极其容易被
-一句 `measurable: True` 假装完成」的一项** —— 见上面的说明。
+其中 **G6 是唯一「只能上机才知道」的一项**。**H0 已于 2026-09-21 接上，但它恰好
+演示了为什么那句 `measurable: True` 不等于完成**：钩子接上后量具灵敏了，可
+`dcc_kv` 走的仍是**共享裁剪**路径 —— 这时翻正 measurable，H2 会拿一条
+**不是本文方法**的通路去判质量臂。那比假阴性更坏：它是**假阳性**。
+**能翻 `measurable` 的充要条件**：`dcc_kv` 在 `measure_point` 里走 G2 的
+`pipelined_attention`，而不是与 `kv_budget_shared` 同一分支。
 
 > 「代码已写」不等于「结论成立」。G1–G5 的实现全部只在 CPU 上做过等价性验证
 > （`tests/test_attention_kernel.py`、`tests/test_baseline_operators.py`、
@@ -237,10 +276,14 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
       是否在本轮声称与 Ring Attention 对比需要单独决定
 - [x] G4 A4 的代码写完（`a4_interaction_grid`）
 - [x] G5 评测集转换器写完；**评测集本体仍需生成**（`build_eval_set.py` 是要输入端数据的）
-- [ ] **H0 E6 的注意力钩子接上**，并确认 `_hf.PREFILL_TIMING_CONSUMES_COMPACT_KV`
-      随之翻正 —— 未接之前 H2 的 prefill 项一律记 unresolved
+- [x] **H0 E6 的注意力钩子接上**（2026-09-21）：`measure_prefill` 三段化
+      （源端构造 → 压缩 → 目的端前向）、`PREFILL_TIMING_CONSUMES_COMPACT_KV=True`、
+      E6 加 `--dest-fraction`。**量具已灵敏，但未翻 `measurable`** ——
+      `dcc_kv` 的构造路径仍与 `kv_budget_shared` 共用，质量臂仍为空
 - [ ] G6 CUDA 构造可用性实测（上机后第一件事）
-- [ ] 上面五项已写的代码**提交**（当前未提交 = 未入库）
+- [x] 上面五项已写的代码**提交**（`c9ca6b0`，2026-09-20；H0 于 2026-09-21 提交）
+- [ ] **把 `dcc_kv` 的构造路径独立出来**（G2 的 `pipelined_attention` 接进
+      `measure_point`）—— 这是翻 `measurable` 的充要条件，也是 H2 质量臂的前置
 - [ ] `requirements.lock` 生成并与目标机 CUDA 版本核对（torch 版本声明目前三处不一致）
 - [ ] 目标机的 `NCCL` 版本确认（E5 需要）
 - [x] S0 的 CPU 侧缺口（M1/M2/M3/M5/M9）**全部完成**（`139b1b8`，2026-09-16）
@@ -299,15 +342,15 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
 
 ## 7. 建议的下一步（按性价比排序）
 
-| 顺序 | 事项 | 成本 | 是否进论文 | 状态（2026-09-16） |
+| 顺序 | 事项 | 成本 | 是否进论文 | 状态（2026-09-21） |
 |---|---|---|---|---|
 | 1 | 补 M1 / M3 / M9（纯 CPU） | 零 | **是，直接补进 §5/§6** | ✅ 已完成 |
-| 2 | 写 G5 评测集转换器 | 零 | 否（前置） | ⬜ 待做 |
+| 2 | 写 G5 评测集转换器 | 零 | 否（前置） | ✅ 已完成（`c9ca6b0`） |
 | 3 | 补 M2 / M5 | 零 | **是** | ✅ 已完成 |
-| 4 | 写 G1 / G2 / G4 的代码 | 零 | 否 | ⬜ 待做 |
-| 5 | **S1 单卡探路**（几十分钟） | 最低一档 | E8 数据可写 | ⬜ 待做（依赖第 4 项） |
+| 4 | 写 G1 / G2 / G4 的代码 | 零 | 否 | ✅ 已完成（`c9ca6b0`） |
+| 5 | **S1 单卡探路**（几十分钟） | 最低一档 | E8 数据可写 | ⬜ 待做（依赖第 4 项 ✅；现只差 **G6** 与 **`dcc_kv` 通路独立**） |
 | 6 | S2 单卡收数 | 低 | 负结果可写 | ⬜ 待做（依赖第 5 项） |
-| 7 | 补 G3 → S3 多卡 | 高 | 主结果 | ⬜ 待做 |
+| 7 | 补 G3 → S3 多卡 | 高 | 主结果 | G3 代码 ✅（`c9ca6b0`）；**S3 多卡本身 ⬜ 待做** |
 
 **在第 1–4 项完成之前，租卡不会有任何一项产出能被写进论文。**
 
@@ -315,3 +358,9 @@ E8 的数据本身就可以进论文（低精度归并的误差常数），且�
 > 但第 **2、4** 项（G5 与 G1/G2/G4）**尚未开始** —— 它们才是租卡真正的前置条件。
 > 换句话说：CPU 侧的「零成本、进论文」都已拿到，剩下的全是「零成本、不进论文」的
 > 工程前置，以及其后的真实支出。
+>
+> ⚠️ **2026-09-21 更正（上两段原文保留）**：第 1–4 项**已全部完成**
+> （第 2、4 项随 `c9ca6b0` 入库；H0 于 2026-09-21 接上）。但「第 1–4 项完成
+> 即可租卡」这个推论**依然不成立** —— 第 5 项的前置现在是 **G6** 与
+> **`dcc_kv` 通路独立**。清单确实在缩短，但缩短的不是「能不能开跑」，
+> 而是「开跑之后能不能拿到有用的数」。
