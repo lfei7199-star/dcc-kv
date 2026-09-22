@@ -591,9 +591,16 @@ def print_asymptote(rows: List[Dict[str, Any]],
                    for i in range(len(res["steps"]) - 1))
     c_max = max(ratios) if ratios else float("inf")
     res["c_max"] = c_max
+    # 2026-09-22（F2 重跑衍生缺陷）：verdict 里的 "≤ x.xx·β_std" 是**上界声明**，
+    # 上界必须**向上**取整。原先直接 ``f"{c_max:.2f}"``（四舍五入）——
+    # c_max = 1.608 时凑巧成立（1.61 ≥ 1.608），但 F2 把口径换到 newest 后
+    # c_max = 1.663192，四舍五入得 1.66 < 1.663192 ⇒「不超过」声明字面为假。
+    c_max_ceil = (math.ceil(c_max * 100) / 100
+                  if math.isfinite(c_max) else c_max)
+    res["c_max_ceil"] = c_max_ceil
     if monotone and c_max < 10.0:
         res["verdict"] = (f"与渐近前提一致：β_std 单调衰减，且 max|Δ| ≤ "
-                          f"{c_max:.2f}·β_std（比值有界 ⇒ β_std→0 时 |Δ|→0）")
+                          f"{c_max_ceil:.2f}·β_std（比值有界 ⇒ β_std→0 时 |Δ|→0）")
     elif not monotone:
         res["verdict"] = "β_std 未单调衰减 —— 证据不足，无法确认渐近前提"
     else:
@@ -608,7 +615,7 @@ def print_asymptote(rows: List[Dict[str, Any]],
     print(f"  → {res['verdict']}")
     # 2026-09-22 工程审查衍生缺陷：本函数原先只打印、**不返回** `res`，
     # 而调用方把返回值直接写入 summary["asymptote_check"] ⇒ 落盘恒为 null，
-    # 论文 §6 引用的 "max|Δ| ≤ 1.61·β_std" 因而**无任何落盘支撑**（与 F5 同类）。
+    # 论文 §6 引用的 "max|Δ| ≤ C·β_std" 因而**无任何落盘支撑**（与 F5 同类）。
     # 返回后该结论由落盘可复算；调用方另加断言，防止再次静默丢值。
     return res
 

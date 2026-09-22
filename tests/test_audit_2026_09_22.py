@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
@@ -33,11 +34,11 @@ from experiments.cpu import e4_dist_equivalence as E4  # noqa: E402
 # 新缺陷：print_asymptote 必须返回落盘用 dict
 # ---------------------------------------------------------------------------
 
-def _synthetic_rows() -> list:
+def _synthetic_rows(ratio: float = 2.0) -> list:
     """够 print_asymptote 跑完的最小 rows：全规格各 1 格。
 
-    尾档（λ=10/30/100/1000）刻意让 |Δ| = 2 · β_std（四档比值都定死为 2.0、
-    β_std 严格递减），以便同时断言 c_max 的口径没被改动。
+    尾档（λ=10/30/100/1000）刻意让 |Δ| = ratio · β_std（四档比值都定死为
+    ``ratio``、β_std 严格递减），以便同时断言 c_max 的口径没被改动。
     """
     fields = ("eval_out_err_median", "eval_mixture_median",
               "x_eff_budget_frac", "v_fit_resid_rel")
@@ -49,14 +50,14 @@ def _synthetic_rows() -> list:
     base = next(r for r in rows if r["spec"] == "nobeta")
     base["beta_std"] = 0.0
     base["beta_mean"] = 0.0
-    # 尾档：β_std 递减，|Δ| = 2 · β_std
+    # 尾档：β_std 递减，|Δ| = ratio · β_std
     tail = [f"box_lam{E11._lam_tag(l)}" for l in E11.LAMBDA_LADDER[-4:]]
     for i, spec in enumerate(tail):
         r = next(x for x in rows if x["spec"] == spec)
         bstd = 0.8 / (2 ** i)          # 0.8, 0.4, 0.2, 0.1 —— 严格递减
         r["beta_std"] = bstd
         for f in fields:
-            r[f] = 2.0 * bstd          # |Δ| / β_std 恒为 2.0
+            r[f] = ratio * bstd        # |Δ| / β_std 恒为 ratio
     return rows
 
 
@@ -84,6 +85,29 @@ def test_print_asymptote_c_max_is_max_over_beta_std(capsys):
     assert all(r == pytest.approx(2.0, rel=1e-9)
                for r in res["abs_max_over_beta_std"])
     assert len(res["steps"]) == 4
+
+
+def test_asymptote_verdict_bound_never_understates_c_max(capsys):
+    """上界锚点：verdict 里陈述的 "≤ x.xx·β_std" 必须 ≥ 实测 c_max。
+
+    回归一类「上界向下取整」缺陷（2026-09-22，F2 重跑的衍生）：verdict 原先用
+    ``f"{c_max:.2f}"``（四舍五入）拼出上界。c_max = 1.608 时凑巧成立
+    （1.61 ≥ 1.608），但 F2 把 FPS 口径换到 newest 之后 c_max = 1.663192，
+    四舍五入得 1.66 < 1.663192 —— 「不超过 1.66 倍」于是成了字面为假的声明。
+    上界必须**向上**取整。
+
+    合成数据取比值 2.004：四舍五入得 2.00（< 2.004，为假）；向上取整得 2.01。
+    """
+    ratio = 2.004
+    res = E11.print_asymptote(_synthetic_rows(ratio))
+    capsys.readouterr()
+    assert res["c_max"] == pytest.approx(ratio, rel=1e-9)
+    m = re.search(r"≤\s*([0-9]+\.[0-9]+)\s*·\s*β_std", res["verdict"])
+    assert m, f"verdict 未按「≤ x.xx·β_std」陈述：{res['verdict']!r}"
+    bound = float(m.group(1))
+    assert bound >= res["c_max"], (
+        f"verdict 上界 {bound} 低于实测 c_max {res['c_max']} —— "
+        "上界必须向上取整，否则「不超过」声明为假")
 
 
 def test_summary_payload_keeps_asymptote_check_non_null():
