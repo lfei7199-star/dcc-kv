@@ -131,6 +131,108 @@
 
 ---
 
+## 38. 补记 `a8429f5` / `ab76abd`（前两笔漏登）+ 本轮 `3ed7c2e` / `fc8c1d9`
+
+**日期**：2026-09-22 23:00 | **类型**：docs(commit_log) 补账 + fix(paper)+exp(cpu)+test | **规模**：本条合并记录 4 笔提交
+
+> **本条是补账性质的合并条目。** `a8429f5`（21:30）与 `ab76abd`（22:02）落地时**没有写条目**
+> —— 第 37 条（`c67b1b9`）只在叙述里捎带 F3，未记这两笔。本轮收口审查报告、核对提交序列时
+> 才发现，故一并补记，并接上本轮为收口而生的 `3ed7c2e` / `fc8c1d9`。
+> **序号按「写条目」的时间排**（与本日志既有的「docs 提交补记」惯例一致），
+> 故第 38 条里有两笔提交的时间**早于**第 37 条 —— 这是补账，不是笔误。
+
+### 一、补记 `a8429f5` —— 审查 F1/F3/F4/F5/F6 的仓库侧修复（29 文件，+1434 / −45）
+
+| 缺陷 | 落地内容 | 验证 |
+|---|---|---|
+| **F3**（CPU 落盘无 provenance） | `experiments/common/report.py` 新增 `provenance_stamp()` 与 `save_summary()`：戳含 `git_commit` / `git_dirty` / `fps_start` / `source_sha256`（10 个关键源码）/ `python_version` / `numpy_version` / `written_at_utc`。`git_dirty` **只看 `src experiments tests`**（不看 `results/`，否则跑完第一个实验就翻转；不看 `paper docs/`，写作期常驻脏）；`fps_start` 由 `inspect.signature` **直读** `select_representative_queries` 的默认值 —— 正是 09-22 那次 `random`→`newest` 事后难追的量。**新增入口而不改 `save_json` 契约**（后者被 `test_adversarial_2026_09_20` 逐键断言，不能偷加字段）。17 个实验脚本迁移（cpu 13 + gpu 4），`c10` 的手写 `json.dumps` 一并收口 | `tests/test_provenance_stamp.py` 新增 8 项（键完备性 / `fps_start=="newest"` / 哈希覆盖 / 同进程缓存 / 附戳不改入参 / 非 dict 退化 / 仍是标准 JSON） |
+| **F5**（E4 转发失败无解释） | `e4_dist_equivalence.py::run_existing_tests()` 失败时补记 `command`（可原样复跑）/ `stderr_tail` / `pass_criterion` / `note` | 见 `ab76abd` 的可注入化 + 锚点 |
+| **F1**（台账自相矛盾） | `docs/author_kit27_deviation_log.md` 补齐 D2–D7（fig1/fig2 重绘、StreamingLLM 句、milakov 引用与「定义」措辞、`\Ds` 排版、机械性改动）；汇总表「内容级偏离总数 = 1」更正为 **5（D1–D5）**；补「重建忠实性核验」与「与 `writing_scope_and_metrics.md` 的关系」。后者 `§0.1` 改为显式指向台账 | 台账自洽；老文档不再自成一套口径 |
+| **F4**（陈旧计数） | `reports/code-and-files-guide.md` 两处 `226 passed` → 实测值，并加注「计数会随仓库演进，`0 failed` 才是判据」 | 见下「F4 残留」 |
+| **F6**（证据在仓库外） | `results/diagnostics/` 纳入偏离台账所引的 6 个诊断产物（fps_start / box_constraint / fps_equiv / lam0 的 summary 与日志）+ 36 行 README（来源、关键结论、**三条边界**：只支撑结论不支撑逐格数字；gate2 只对旧落盘有效；生成脚本不在仓库内） | 裁决数字有了落点 |
+
+全仓库验证：**477 passed / 7 deselected / 2 xfailed / 0 failed**（该提交实测）。
+
+**F4 残留（本轮一并修）**：`a8429f5` 写入的是审查当时的实测 `469`，但那一版测试数在写入前
+已因新增 8 项 provenance 测试而涨到 477（本轮再涨到 482）—— **「陈旧计数」的病灶没除干净**。
+本轮改为当前实测 **482**，并标出实测时的提交（`fc8c1d9`）。文件头原有「以本机实测为准，
+判据是 `0 failed`」的注保留（§0 计数类数字行）。
+
+### 二、补记 `ab76abd` —— 新缺陷 B1：`asymptote_check` 静默丢值（3 文件，+139 / −8）
+
+审查在逐档复算 §6 数字时又抓到一个**与 F5 同族**的缺陷（「检查看起来在跑，实际什么都没留下」）：
+
+`e11_lambda_tuning.print_asymptote()` **只 print、不 return**，而调用方把返回值直接写进
+`summary["asymptote_check"]` ⇒ **落盘恒为 `null`**。后果：论文 §6 引用的
+`max|Δ| ≤ C·β_std` **没有任何落盘支撑**，只能靠人记得 stdout。逐档复算证实该数字本身是对的
+（当时 `c_max = 1.608`，口径 = `max_spec( max_field max_cell|Δ| / _med(β_std) )`），
+但**「对」与「可复算」是两件事**。
+
+修复：`print_asymptote()` 补 `return res` 并写明为什么（防后人删掉）；调用方加
+`asymptote is None` 守卫（返回 `None` 直接抛错，不允许再静默落盘）；
+`e4_dist_equivalence.run_existing_tests()` 增可选 `targets` / `cwd`（默认即现状，行为不变），
+使「转发 pytest 失败」这条路径能在**本机真跑出来**，而不是只做源码字符串检查。
+新增 `tests/test_audit_2026_09_22.py` 4 条锚点。验证：**481 passed / 7 deselected / 2 xfailed / 0 failed**。
+
+### 三、本轮 `3ed7c2e` —— 新缺陷 B2：**上界向下取整**（3 文件，+39 / −8）
+
+**这是 F2 重跑（`c67b1b9`）的衍生缺陷**：论文 §6 那句
+「各指标相对"关闭 β"的偏差 `max|Δ|` 始终**不超过** β 标准差的 `1.66` 倍」，
+是把实测最大比值 `c_max = 1.663192` 从 2 位小数**四舍五入**来的 ——
+而 `1.66 < 1.663192`，于是「不超过 1.66 倍」是一条**字面为假的上界声明**。
+
+**为什么上一轮没暴露（值得记下）**：`c_max` 的旧值（`random` 口径）是 `1.608`，
+四舍五入得 `1.61`，恰好 ≥ `1.608` —— 向上取整与四舍五入**同值**，缺陷被掩盖。
+F2 把 FPS 口径换到 `newest` 后 `c_max` 变为 `1.663192`，四舍五入**首次低于真值**，缺陷才显形。
+⇒ **上界类数字必须向上取整；「四舍五入凑巧对」不构成正确性。**
+
+修法（上界一律向上）：
+* `paper/sections/06-experiment.tex`：`$1.66$` → `$1.67$`。
+* `experiments/cpu/e11_lambda_tuning.py`：verdict 里的上界由 `f"{c_max:.2f}"` 改为
+  `math.ceil(c_max*100)/100`，并在函数里写明理由（防后人改回去）；新增 `c_max_ceil` 字段
+  记录实际使用的上界；另修一处注释里的陈旧数字（不再写死具体值）。
+* `tests/test_audit_2026_09_22.py`：新增锚点
+  `test_asymptote_verdict_bound_never_understates_c_max` —— 断言 verdict 陈述的
+  「≤ x.xx·β_std」必须 ≥ 实测 `c_max`。合成数据取比值 `2.004`：
+  四舍五入得 `2.00`（< `2.004`，**旧代码下该测试必失败，已实测证伪**），向上取整得 `2.01`。
+
+验证：全量 **482 passed / 7 deselected / 2 xfailed / 0 failed**（较 B1 修复后 481 多 1）。
+
+### 四、本轮 `fc8c1d9` —— e11 落盘同步刷新（1 文件，+4 / −3）
+
+在同一（**干净**）树上以默认参数重跑 e11（`newest` 口径），使落盘 verdict 与论文的 `1.67` 一致。
+逐字段比对（对重跑前备份 `_audit_tmp/e11_pre_bound/`）：**仅 3 处按设计变化** ——
+`asymptote_check.verdict`（`1.66`→`1.67`）、新增 `asymptote_check.c_max_ceil = 1.67`、
+`provenance.{git_commit,written_at_utc}`；`c_max` 仍为 `1.6631920051085889`，
+**全部数值格逐位未变**，`rows.csv` **逐字节相同**（983,813 B），
+`git_dirty = false`、`fps_start = newest`。
+
+### 五、审查报告 F1–F7 收口对照（含本轮新增 B1/B2）
+
+| 缺陷 | 状态 | 落地提交 | 关键证据 |
+|---|---|---|---|
+| **F1** 台账与其自定规则自相矛盾 | ✅ 已修 | `a8429f5` | 补 D2–D7；总数 `1 → 5`；`§0.1` 加指针 |
+| **F2** §6 表格混用两套 FPS 起点口径 | ✅ 已修（选 (a) 重跑） | `c67b1b9`（+`a8429f5` 代码侧前置） | 13 实验重跑 `newest`；三张主表逐格复算 **0 差异**；全局 stale 扫描 **0 / 0** |
+| **F3** CPU 落盘无 provenance | ✅ 已修 | `a8429f5` | 17 脚本迁 `save_summary`；8 项戳测试；e11 戳 `git_dirty=false` / `fps_start=newest` |
+| **F4** 陈旧计数 `226` | ✅ 已修（含本轮残留 `469→482`） | `a8429f5` + 本条 | guide 两处 → 当前实测 + 「`0 failed` 才是判据」 |
+| **F5** E4 失败无解释 | ✅ 已修 | `a8429f5` + `ab76abd` | 失败记录带 `command` / `stderr_tail` / `pass_criterion` / `note`；`targets`/`cwd` 可注入 + 锚点 |
+| **F6** 裁决证据在仓库外 | ✅ 已修 | `a8429f5` | `results/diagnostics/` 入库 6 产物 + README |
+| **F7** 空间散落 / 副本风险 | ✅ 核心风险已消除 | 仓库外 | `D:\workspace\dcc-kv\README_副本勿改.md` 已加（实测存在）；**临时目录清理未做**（涉删除，另议） |
+| **B1** `asymptote_check` 静默丢值（本轮新增） | ✅ 已修 | `ab76abd` | `return res` + 调用方守卫 + 4 锚点；落盘 `asymptote_check` 非 `null` |
+| **B2** 上界向下取整（本轮新增） | ✅ 已修 | `3ed7c2e` + `fc8c1d9` | §6 `1.67`；verdict 用 `ceil` + 新锚点；落盘 verdict 同步 |
+
+**收口后编译体检**：`latexmk -xelatex` → `^!` 错误 **0**、`Missing character` **0**、
+未定义引用 **0**、`LaTeX Warning` **0**、字体斜体缺形 **3**、Overfull **11**（与基线同数）、
+**18 页**（`sec:refs` 起于第 18 页）。
+
+### 遗留（不随本条关闭）
+
+1. `e9_knob_localization.py` **脚本默认参数仍与论文声明区间不符**（第 36 条遗留 3）—— 默认值未改。
+2. `conditioning()` 的秩诊断探针缺陷（第 36 条遗留 1）仍未修。
+3. E10/E11 的 `clamp 率` 分母口径（`sum(budget)`）**只在脚本内一致、未在论文里写明**。
+4. 第 36 条遗留 2（`tab:knob` 的 `M=8` 行在小 `B` 处比 `M=4` 更差的机制解释）仍缺。
+5. 审查 §5 P2 的可选项「阈值必须走 `hypotheses.py`」的源码级守卫测试 **未做**（原文即标「可选」）。
+
 ---
 
 ## 37. `c67b1b9` — F2 定案（选 (a)）：§6 全部数字统一到 FPS「最新 Query 起点」口径，并给 CPU 落盘补 provenance

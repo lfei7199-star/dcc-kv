@@ -64,7 +64,7 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-期望输出：`469 passed / 7 deselected / 2 xfailed`（2026-09-22 实测）。
+期望输出：`482 passed / 7 deselected / 2 xfailed`（2026-09-22 `fc8c1d9` 实测）。
 
 - `7 deselected` = 被 `pytest.ini` 按 marker 排除的 **GPU 需求测试**（正常现象）；
 - `2 xfailed` = 已知预期失败（记录在案的边界），**不是回归**。
@@ -366,7 +366,7 @@ H1–H5 中：**H1 与 H4 已判定**；**H2 / H3 / H5 为 `no-judge`**——意
 ## 附：最短路径速查
 
 ```bash
-pytest -q                                       # 469 passed / 7 deselected / 2 xfailed（2026-09-22）
+pytest -q                                       # 482 passed / 7 deselected / 2 xfailed（2026-09-22）
 python experiments/gpu/e6_main_table.py --plan  # 看 GPU 实验阻断清单
 python experiments/cpu/e3_edge_conditioning.py --out results/cpu/e3
 bash paper/build.sh                             # 编译论文
