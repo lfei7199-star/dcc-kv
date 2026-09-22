@@ -334,13 +334,15 @@ G_{a,j}^{s \to r} = \exp\!\left(\frac{\widehat{q}_{r,a} (C_k^{s \to r})_{j}^\top
 $w_j = \exp(\beta_j) \ge 0$，则带偏置紧凑块的质量为 $\widehat{m} = Gw$。我们通过非负岭回归
 拟合
 \begin{equation}
-w^* = \arg\min_{w \ge 0} \left\|G^{s \to r} w - m^{s \to r}\right\|_2^2
-      + \lambda_\beta \left\|w - \mathbf{1}\right\|_2^2,\qquad
-\beta_j^{s \to r} = \log\!\left(\max\{w_j^*, \eps\}\right).
+w^* = \arg\min_{e^{-3} \le w \le e^{3}} \left\|G^{s \to r} w - m^{s \to r}\right\|_2^2
+      + \lambda_\beta \left\|w - \mathbf{1}\right\|_2^2,
 \label{eq:beta-fit}
 \end{equation}
+其中 $\beta_j^{s \to r} = \log(\max\{w_j^*, \eps\})$。
 $w_j$ 表示紧凑 Key 所承载的等效注意力质量，可聚合若干被删除 Key 的指数响应；正则项在拟合
 信息不足时将其收缩至无偏置状态 $w = \mathbf{1}$。非负约束保证 $w$ 可映射为 Logit 偏置。
+$w$ 的箱约束等价于 $\beta_j^{s \to r} \in [-3, 3]$，即单个紧凑 Key 的 Logit 偏置
+上下界；该取值沿自 Attention Matching 附录~C.2 对 RMS 选键分支的配置。
 实现中应以逐行最大值平移计算指数项，并在拟合目标中保留相应的行缩放，以避免数值溢出。
 
 \subsubsection{紧凑 Value 拟合}
