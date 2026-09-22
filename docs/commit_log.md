@@ -183,9 +183,16 @@
 系统 Temp **未触碰**；`_audit_tmp` 其余 97 条目**全部保留**。
 记录并入 `_audit_tmp/CLEANUP_2026_09_22.md`。
 
-### 五、本轮无新增遗留
+### 五、推送
 
-`docs/commit_log.md` 之外，仓库内容未见改动。
+`git push origin paper/sections-5-8` → `d8e6fd1..03dfed8`，**6.8 秒 rc=0**。
+独立核验（`git ls-remote` **问远端**，不用本地缓存）：远端
+`03dfed8d2501f096cc08072bc2ce5eef4671108e` 与本地 `HEAD` **逐位相同**；
+跟踪文件数 **192**（与上轮持平 ⇒ 无新跟踪文件混入）。
+
+### 六、遗留
+
+无。`docs/commit_log.md` 之外，仓库内容未见改动。
 
 ---
 
