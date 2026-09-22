@@ -12,7 +12,9 @@
 
 设计
 ----
-网格：M ∈ {4, 8, 16, 32, 48} × B ∈ {8, 16, 32, 64, 128}，每格多个种子。
+网格（默认即论文 §5 声明区间）：`L_s = 2048`，
+M ∈ {4, 8, 16, 32, 48, 96, 192} × B ∈ {8, 16, 32, 64, 100}，每格多个种子
+（默认 5；共 7×5×3×5 = 525 格，`B/L_s ∈ [0.0039, 0.0488]`）。
 
 三条曲线（全部在**留出 Query** 上评估，留出集从未参与选键 / 拟合）：
 
@@ -83,10 +85,39 @@ def oracle_value(
                      values=C_v, selected_indices=compact.selected_indices)
 
 
-def conditioning(compact, probe: torch.Tensor) -> Tuple[float, int]:
-    """返回 (XᵀX + λI 的条件数, X 的数值秩)。"""
+def representative_queries_for(split, dest, M, projection_dim, seed):
+    """重选 V 回归真正用的那 M 个代表 Query。
+
+    `CompactKV` 不保存代表 Query（`build_compact_kv` 内部即用即弃），故此处以
+    **完全相同的参数**（同 `num_samples` / 同 `projection_dim` / 同 `seed`）重选
+    一次。`select_representative_queries` 在固定 seed 下是确定性的，重选结果与
+    Step 1 内部所用逐位一致。
+    """
+    from src.dcc_kv_ref import select_representative_queries
+    rq, _ = select_representative_queries(
+        split.fit_queries[dest],
+        num_samples=M,
+        projection_dim=projection_dim,
+        seed=seed,
+    )
+    return rq
+
+
+def conditioning(compact, rep_queries: torch.Tensor) -> Tuple[float, int]:
+    """返回 (XᵀX + λI 的条件数, X 的数值秩)。
+
+    `X` 必须是 **V 回归真正的设计矩阵**：行 = 代表 Query 数 `M`、列 = 选中 Key
+    数 `B`，即 `softmax(rep_queries @ keysᵀ · scale + β)`。
+
+    2026-09-22 修正（第 36 条遗留 1）：旧实现把 `probe` 传成**整个拟合池**
+    （`split.fit_queries[dest]`，默认 1024 行），于是 `rank(X) ≤ min(拟合池, B)`
+    —— **与 M 无关**；实测 `M=4, B=8` 报出 `rank=8 > min(M,B)=4`，与同格落盘的
+    `rank_upper_bound=min(M,B)=4` 不同源，表格里 `rank/min(M,B)` 的 `*` 标记失效
+    ⇒ 该诊断列不可用。改用 `rep_queries`（`M` 行）后 `rank ≤ min(M, B)` 才是真的
+    上界。（λ = 1e-3 与 `fit_compact_value` 的 `lambda_value` 默认值一致。）
+    """
     scale = 1.0 / (compact.keys.shape[-1] ** 0.5)
-    logits_c = (probe @ compact.keys.T) * scale + compact.logit_bias
+    logits_c = (rep_queries @ compact.keys.T) * scale + compact.logit_bias
     X = torch.softmax(logits_c, dim=-1)
     B = X.shape[1]
     A = X.T @ X + 1e-3 * torch.eye(B, dtype=X.dtype)
@@ -115,8 +146,8 @@ def evaluate_cell(
     lambda_beta: float,
 ) -> Dict[str, Any]:
     """评估一个 (M, B) 格。"""
-    compact, diag = _build(split, dest, M, B, seed, projection_dim,
-                           beta_bound, lambda_beta)
+    compact, diag, rep_queries = _build(split, dest, M, B, seed, projection_dim,
+                                        beta_bound, lambda_beta)
 
     ev = split.eval_queries[dest]
     rel = S.relative_output_error(ev, compact, split.keys, split.values)
@@ -130,7 +161,7 @@ def evaluate_cell(
     mix_or = S.mixture_relative_error(ev, fixed_ctx[0], fixed_ctx[1],
                                       oracle, split.keys, split.values)
 
-    cond, rank = conditioning(compact, split.fit_queries[dest])
+    cond, rank = conditioning(compact, rep_queries)
     kept = retained_mass_fraction(compact, ev, split.keys)
 
     return {
@@ -177,6 +208,9 @@ def _build(split, dest, M, B, seed, projection_dim, beta_bound, lambda_beta):
     # 下界随箱约束变化（2026-09-14 修正）：旧写法固定比较 -13.0，
     # 在默认箱约束 β∈[−3,3] 下该比较恒为假，会把"约束是否顶住"掩盖成 0。
     lo = -13.8155 if beta_bound is None else -float(beta_bound)
+    # V 回归的设计矩阵行 = 代表 Query（M），不是整个拟合池 —— 条件数与秩诊断
+    # 必须用同一套 Query，否则 `rank_upper_bound = min(M,B)` 与实际秩不同源。
+    rep_queries = representative_queries_for(split, dest, M, projection_dim, seed)
     return compact, {
         "beta_mean": float(b.mean().item()),
         "beta_std": float(b.std().item()) if b.numel() > 1 else 0.0,
@@ -184,7 +218,7 @@ def _build(split, dest, M, B, seed, projection_dim, beta_bound, lambda_beta):
         "beta_max": float(b.max().item()),
         "beta_bound": beta_bound,
         "clamp_hits": int((b <= lo + 1e-6).sum().item()),
-    }
+    }, rep_queries
 
 
 # =============================================================================
@@ -196,14 +230,20 @@ def main(argv: List[str] | None = None) -> int:
     p.add_argument("--out", default="results/cpu/e9")
     p.add_argument("--quick", action="store_true")
     p.add_argument("--seeds", type=int, default=5)
-    p.add_argument("--L-s", dest="L_s", type=int, default=256)
+    # 默认值 = 论文 §5 声明区间（`L_s=2048`、`M ∈ [4,192]`、`B ∈ [8,100]`、
+    # `queries_per_dest=2048`）。2026-09-22 之前默认是旧区间（`L_s=256`、`B<=128`、
+    # `M<=48`、fit 池 128），落盘落在 B/L_s 最大 0.50，与论文声明的 B ≪ L_s 量级
+    # 相反 —— 那是一处「默认跑出来的落盘不能作论文依据」的陷阱（第 36 条遗留 3）。
+    # 现在默认跑一次**就是**论文级那一套，不给显式参数也不会产生口径不符的产物。
+    p.add_argument("--L-s", dest="L_s", type=int, default=2048)
     p.add_argument("--d-h", dest="d_h", type=int, default=32)
     p.add_argument("--d-v", dest="d_v", type=int, default=32)
     p.add_argument("--num-dest", dest="num_dest", type=int, default=3)
-    p.add_argument("--queries-per-dest", dest="queries_per_dest", type=int, default=128)
+    p.add_argument("--queries-per-dest", dest="queries_per_dest", type=int, default=2048)
     p.add_argument("--eval-fraction", dest="eval_fraction", type=float, default=0.5)
-    p.add_argument("--Ms", type=int, nargs="+", default=[4, 8, 16, 32, 48])
-    p.add_argument("--budgets", type=int, nargs="+", default=[8, 16, 32, 64, 128])
+    p.add_argument("--Ms", type=int, nargs="+",
+                   default=[4, 8, 16, 32, 48, 96, 192])
+    p.add_argument("--budgets", type=int, nargs="+", default=[8, 16, 32, 64, 100])
     p.add_argument("--projection-dim", dest="projection_dim", type=int, default=32)
     p.add_argument("--fixed-len", dest="fixed_len", type=int, default=128)
     p.add_argument("--focus-strength", dest="focus_strength", type=float, default=8.0)

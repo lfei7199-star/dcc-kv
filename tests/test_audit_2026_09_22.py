@@ -13,6 +13,14 @@
       ⇒ 落盘恒为 ``null``，而论文 §6 引用的 "max|Δ| ≤ 1.61·β_std"
       因此没有任何落盘支撑。**它和 F5 是同一类**：
       检查看起来在跑，实际什么都没留下。
+
+  F7  `e9_knob_localization.conditioning()` 把**整个拟合池**当探针，
+      于是 ``rank(X) ≤ min(拟合池, B)`` —— 与 ``M`` 无关；而同格落盘的
+      ``rank_upper_bound = min(M, B)`` ⇒ 两者不同源，表格里
+      ``rank/min(M,B)`` 的 ``*`` 标记失效（525 格中 255 格 rank 越界）。
+      正解是把探针换成 V 回归真正的设计矩阵：**M 行**代表 Query。
+      另锁 E9 的**脚本默认值**：它原先停在旧区间（``L_s=256``、``B<=128``），
+      默认跑出来的落盘与论文声明的 ``B ≪ L_s`` 量级相反。
 """
 from __future__ import annotations
 
@@ -136,3 +144,112 @@ def test_e4_failed_forwarded_test_is_self_explaining(tmp_path):
         assert k in payload, f"失败记录缺 {k} ⇒ 无法复算（F5）"
     assert payload["pass_criterion"]
     assert payload["command"]
+
+
+# ---------------------------------------------------------------------------
+# F7（理论↔实现一致性审计）：E9 秩诊断必须用 V 回归真正的设计矩阵（M 行）
+# ---------------------------------------------------------------------------
+
+def test_e9_conditioning_rank_bounded_by_min_m_b():
+    """回归：`conditioning()` 的探针必须只有 M 行，rank 才由 M 封顶。
+
+    设计意图：`X` 是 V 回归的设计矩阵 —— 行 = 代表 Query 数 `M`、列 = 键数 `B`，
+    故 `rank(X) ≤ min(M, B)`。旧实现把 `probe` 传成 `split.fit_queries[dest]`
+    （整个拟合池，默认 1024 行）⇒ `rank(X) ≤ min(拟合池, B)`，**与 M 无关**；
+    实测 `M=4, B=8` 报 `rank=8 > 上界 4`，525 格中 **255 格**越界，
+    与同格落盘的 `rank_upper_bound=min(M,B)` 不同源 ⇒ 该诊断列不可用。
+
+    这里用最简的假 compact 直接测函数（不构造 split）：`B=16`、`M∈{2,4,8}`，
+    rank 必须被 M 封顶；若有人把探针换回拟合池，M=2 会报 16（> 2）而立刻失败。
+    """
+    import types
+
+    torch = pytest.importorskip("torch")
+    from experiments.cpu import e9_knob_localization as E9
+
+    B, d = 16, 8
+    torch.manual_seed(0)
+    compact = types.SimpleNamespace(
+        keys=torch.randn(B, d, dtype=torch.float64),
+        logit_bias=torch.zeros(B, dtype=torch.float64),
+    )
+    for M in (2, 4, 8):
+        rep = torch.randn(M, d, dtype=torch.float64)
+        _cond, rank = E9.conditioning(compact, rep)
+        assert rank <= min(M, B), (
+            f"M={M}, B={B} 时 rank={rank} > min(M,B)={min(M, B)} —— "
+            "探针必须只有 M 行（V 回归的设计矩阵），否则 rank 上界失效（F7）")
+
+
+def test_e9_conditioning_probe_is_representative_queries():
+    """源码级：调用点传的必须是 `rep_queries`，不能回退到整个拟合池。"""
+    src = (REPO_ROOT / "experiments" / "cpu"
+           / "e9_knob_localization.py").read_text(encoding="utf-8")
+    assert "conditioning(compact, rep_queries)" in src, (
+        "conditioning 的探针不是 M 个代表 Query（F7 回归）")
+    assert "conditioning(compact, split.fit_queries" not in src, (
+        "conditioning 又拿整个拟合池当探针 ⇒ rank 上界与 min(M,B) 不同源（F7）")
+
+
+def test_e9_defaults_equal_declared_interval():
+    """回归：E9 的**脚本默认值**必须等于论文 §5 声明的区间。
+
+    2026-09-22 之前默认停在旧区间（`L_s=256`、`B<=128`、`M<=48`、
+    fit 池 128），默认跑出来的落盘 `B/L_s` 最大 `0.50`，与论文声明的
+    `B ≪ L_s` 量级**相反** —— 这是一个「默认产物不能作论文依据」的陷阱
+    （commit_log 第 36 条遗留 3）。用 AST 读默认值，不启动 torch。
+    """
+    import ast
+
+    src = (REPO_ROOT / "experiments" / "cpu"
+           / "e9_knob_localization.py").read_text(encoding="utf-8")
+    defaults = {}
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument" and node.args):
+            flag = getattr(node.args[0], "value", None)
+            for kw in node.keywords:
+                if kw.arg == "default":
+                    defaults[flag] = ast.literal_eval(kw.value)
+
+    assert defaults.get("--L-s") == 2048, "E9 默认 L_s 必须等于声明区间的 2048"
+    assert defaults.get("--queries-per-dest") == 2048
+    assert defaults.get("--Ms") == [4, 8, 16, 32, 48, 96, 192]
+    assert defaults.get("--budgets") == [8, 16, 32, 64, 100]
+    # 声明区间的判据：默认网格的最大 B/L_s 必须 <= 0.05
+    assert max(defaults["--budgets"]) / defaults["--L-s"] <= 0.05, (
+        "E9 默认网格越出论文声明的 B ≪ L_s 量级")
+
+
+# ---------------------------------------------------------------------------
+# §5 P2（可选）：再入清单里的「阈值必须走 hypotheses.py」源码级守卫
+# ---------------------------------------------------------------------------
+
+def test_experiment_criteria_route_through_hypotheses():
+    """守卫：`experiments/` 下的**判据**不得用裸阈值。
+
+    `experiments/common/hypotheses.py` 是阈值的单一事实源（H1–H5 的判据函数），
+    但 `e3_edge_conditioning.py` 的 `h1_criterion_met` 曾写成裸比较
+    `ci_95_lower > 0.5` **绕开它** —— 审查报告 §5 P2 指出这"是真实发生过的，
+    不是理论担忧"，并建议加源码级守卫。
+
+    判据：凡名字含 `criterion` 的赋值/字典键，其取值只能来自 `H.` /
+    `hypotheses.py`，不得出现裸的阈值比较（`> 0.5` 这类数字字面量）。
+    """
+    import re
+
+    assign = re.compile(r"""^\s*["']?\w*criterion\w*["']?\s*[:=]""", re.I)
+    bare_cmp = re.compile(r"[<>]=?\s*-?\d")
+    bad = []
+    for p in sorted((REPO_ROOT / "experiments").rglob("*.py")):
+        for i, ln in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            if not assign.match(ln):
+                continue
+            if "H." in ln or "hypotheses" in ln:
+                continue                     # 走了单一事实源
+            if bare_cmp.search(ln):
+                bad.append((p.relative_to(REPO_ROOT).as_posix(), i, ln.strip()))
+    assert not bad, (
+        "以下判据用裸阈值绕过了 hypotheses.py（阈值必须走单一事实源）：\n"
+        + "\n".join("  %s:%d  %s" % b for b in bad))

@@ -148,9 +148,11 @@ python experiments/cpu/e12_representative_query.py --out results/cpu/e12
 python experiments/cpu/e13_bound_tightness.py       --out results/cpu/e13
 # E3 默认按留出协议；--protocol in-sample 仅用于复现历史数字（不得作 H2 证据）
 python experiments/cpu/e3_edge_conditioning.py      --out results/cpu/e3
-# E9 必须显式给参数：脚本默认仍是旧区间（L_s=256、B<=128、fit 池 64），
-# 默认值下的落盘落在 B/L_s 最大 0.50，与论文 §5 声明的 B << L_s 量级不符，
-# 因此不能作论文依据。本节这套参数才是论文用的是那一套
+# E9 的**默认值即论文声明区间**（2026-09-22 起）：L_s=2048、queries_per_dest=2048、
+# M ∈ [4,192]、B ∈ [8,100]。默认跑一次就是论文用的那一套，不再需要显式给参数
+# （旧默认是 L_s=256、B<=128、fit 池 128，落盘 B/L_s 最大 0.50，与 §5 声明的
+# B << L_s 量级相反 —— 那处陷阱已随默认值修正而消除，见 commit_log 第 39 条）。
+# 下面把参数显式列出来，只是为了让命令自解释、便于对照：
 # （B/L_s = 0.0039-0.0488、525 格；本机实测约 2-3 小时）
 python experiments/cpu/e9_knob_localization.py --out results/cpu/e9 \
   --L-s 2048 --queries-per-dest 2048 --Ms 4 8 16 32 48 96 192 \
