@@ -336,7 +336,7 @@ def main() -> int:
     }
 
     out = REPO_ROOT / a.out
-    R.save_json(str(out / "e8_results.json"), payload)
+    R.save_summary(str(out / "e8_results.json"), payload)
     if all_rows:
         R.save_csv(str(out / "e8.csv"), all_rows)
     print()

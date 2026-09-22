@@ -684,7 +684,7 @@ def main() -> int:
         payload["h2"] = h2
 
     out_dir = REPO_ROOT / args.out
-    R.save_json(str(out_dir / "e3_results.json"), payload)
+    R.save_summary(str(out_dir / "e3_results.json"), payload)
     if "h1" in payload:
         R.save_csv(str(out_dir / "e3_h1.csv"), payload["h1"])
     if "h2" in payload:

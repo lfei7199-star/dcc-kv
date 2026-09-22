@@ -1,0 +1,103 @@
+{
+ "diagnostic": "beta_box_constraint_necessity",
+ "specs": [
+  {
+   "name": "box_lam3em2",
+   "lam": 0.03,
+   "w_lower": 0.049787068367863944,
+   "w_upper": 20.085536923187668
+  },
+  {
+   "name": "nobox_lam3em2",
+   "lam": 0.03,
+   "w_lower": 0.0,
+   "w_upper": null
+  },
+  {
+   "name": "box_lam0",
+   "lam": 0.0,
+   "w_lower": 0.049787068367863944,
+   "w_upper": 20.085536923187668
+  },
+  {
+   "name": "nobox_lam0",
+   "lam": 0.0,
+   "w_lower": 0.0,
+   "w_upper": null
+  }
+ ],
+ "gate_vs_fps_start_newest": {
+  "max_abs_diff": 0.0,
+  "passed": true
+ },
+ "paired_box_vs_nobox": {
+  "lambda_3e-2": {
+   "n": 180,
+   "eval_mixture_median": {
+    "n_identical_cells": 12,
+    "max_abs_diff": 0.009990423917770386,
+    "median_delta": -8.940696716308594e-08,
+    "pooled_median_box": 0.43294990062713623,
+    "pooled_median_nobox": 0.43278446793556213
+   },
+   "eval_out_err_median": {
+    "n_identical_cells": 14,
+    "max_abs_diff": 0.007932484149932861,
+    "median_delta": -4.470348358154297e-07,
+    "pooled_median_box": 0.5110623836517334,
+    "pooled_median_nobox": 0.5145964026451111
+   },
+   "eval_abs_mass_median": {
+    "n_identical_cells": 15,
+    "max_abs_diff": 0.010577186942100525,
+    "median_delta": -8.940696716308594e-08,
+    "pooled_median_box": 0.13672950863838196,
+    "pooled_median_nobox": 0.1378980427980423
+   },
+   "box_bind_rate": {
+    "box_max": 0.25,
+    "box_median": 0.0,
+    "nobox_max": 0.25,
+    "nobox_median": 0.0
+   }
+  },
+  "lambda_0": {
+   "n": 180,
+   "eval_mixture_median": {
+    "n_identical_cells": 3,
+    "max_abs_diff": 0.03985685110092163,
+    "median_delta": -0.0004868507385253906,
+    "pooled_median_box": 0.4510422646999359,
+    "pooled_median_nobox": 0.45140671730041504
+   },
+   "eval_out_err_median": {
+    "n_identical_cells": 6,
+    "max_abs_diff": 0.033547013998031616,
+    "median_delta": -0.0009309649467468262,
+    "pooled_median_box": 0.5329312086105347,
+    "pooled_median_nobox": 0.5317291021347046
+   },
+   "eval_abs_mass_median": {
+    "n_identical_cells": 4,
+    "max_abs_diff": 0.08128142356872559,
+    "median_delta": -0.0005716308951377869,
+    "pooled_median_box": 0.14865125715732574,
+    "pooled_median_nobox": 0.15023742616176605
+   },
+   "box_bind_rate": {
+    "box_max": 0.5,
+    "box_median": 0.0625,
+    "nobox_max": 0.5,
+    "nobox_median": 0.0625
+   }
+  }
+ },
+ "verdict": {
+  "lambda_3e-2_box_inert_within_1pct": true,
+  "lambda_3e-2_max_cell_diff": 0.009990423917770386,
+  "lambda_3e-2_pooled_rel_diff": 0.00038225191482317285,
+  "lambda_0_max_cell_diff": 0.03985685110092163,
+  "lambda_0_pooled_rel_diff": -0.0008073707955847269
+ },
+ "note": "落盘在仓库外 _diag_out/box_constraint/。"
+}

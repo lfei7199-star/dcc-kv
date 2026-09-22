@@ -378,7 +378,7 @@ def main(argv: List[str] | None = None) -> int:
             "是**上界**而非可实现结果，只能用于界定 B 轴的表示能力。"
         ),
     }
-    R.save_json(str(pathlib.Path(args.out) / "summary.json"), payload)
+    R.save_summary(str(pathlib.Path(args.out) / "summary.json"), payload)
     R.save_csv(str(pathlib.Path(args.out) / "rows.csv"), rows)
     print()
     print(f"结果已写入 {args.out}/summary.json 与 rows.csv")

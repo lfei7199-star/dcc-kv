@@ -46,6 +46,7 @@ E10 判定 $\beta$ 稀疏塌缩的根因是"per-key 离散度压低有效预算"
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import pathlib
 import sys
@@ -149,13 +150,70 @@ SPEC_ORDER: Tuple[str, ...] = (
     "scalar", "nobeta",
 )
 
-#: E10 中同规格的落盘值（管线互校用；取自 results/cpu/e10/summary.json）
-E10_CROSSCHECK = {
-    "nobox_lam1em3": {"eval_out_err_median": 0.5229, "eval_mixture_median": 0.4344},
-    "nobox_lam1em1": {"eval_out_err_median": 0.4952, "eval_mixture_median": 0.4174},
-    "scalar": {"eval_out_err_median": 0.4996, "eval_mixture_median": 0.4138},
-    "nobeta": {"eval_out_err_median": 0.4996, "eval_mixture_median": 0.5158},
+#: E10 落盘位置 —— 管线互校的参照**来源**（运行时读取，不硬编码值）
+E10_RESULTS_DIR: pathlib.Path = pathlib.Path("results/cpu/e10")
+
+#: E11 规格名 → E10 规格名（同名者不必列出）。
+_E10_SPEC_ALIAS: Dict[str, str] = {
+    # E10 基准：w≥0 无上界 + λ_β=1e-3
+    "nobox_lam1em3": "unbound",
+    # E10 正则族：无箱 + λ_β=1e-1
+    "nobox_lam1em1": "lam1em1",
 }
+
+#: 参与互校的规格（E11 侧命名）
+_E10_CROSSCHECK_SPECS: Tuple[str, ...] = (
+    "nobox_lam1em3", "nobox_lam1em1", "scalar", "nobeta",
+)
+
+
+def load_e10_crosscheck(
+    results_dir: pathlib.Path = E10_RESULTS_DIR,
+) -> Dict[str, Dict[str, Any]]:
+    r"""从 **E10 的当前落盘**读取互校参照值。
+
+    为什么不再硬编码（2026-09-22 工程审查 F2 的衍生缺陷）：原实现把 E10 的四个
+    上中位数写死在本文件里，值取自 09-16 的落盘。当 E10 与 E11 在 FPS 起点口径
+    （论文式(11) 的 ``newest``）统一后**重跑**时，本脚本仍拿旧值比对，四行全部
+    报 ✗（$\Delta$ 0.0068–0.0154）——**假警报掩盖了真实一致**（实跑值其实逐位吻合）。
+    改为运行时读取后，互校永远对应当前落盘：E10 换口径，这里立刻反映。
+
+    口径与 E11 自身的 `_med` 一致：上中位数（升序第 ``n // 2`` 个）。
+
+    返回 ``{}`` 表示 E10 落盘不可用（调用方应跳过而非报错）。
+    """
+    path = pathlib.Path(results_dir) / "rows.csv"
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8", newline="") as f:
+        e10_rows = list(csv.DictReader(f))
+    if not e10_rows:
+        return {}
+
+    # ⚠️ CSV 读出的单元格是 **str**，必须先转 float：`_med` 用 `sorted()`，
+    # 对字符串会按**字典序**排（'0.4' < '0.52'），得到的中位数是错的。
+    _NUMERIC = ("eval_out_err_median", "eval_mixture_median")
+    for r in e10_rows:
+        for fld in _NUMERIC:
+            r[fld] = float(r[fld])
+
+    fam: Dict[str, List[Dict[str, Any]]] = {}
+    for r in e10_rows:
+        fam.setdefault(r["spec"], []).append(r)
+
+    ref: Dict[str, Dict[str, Any]] = {}
+    for e11_spec in _E10_CROSSCHECK_SPECS:
+        e10_spec = _E10_SPEC_ALIAS.get(e11_spec, e11_spec)
+        sub = fam.get(e10_spec)
+        if not sub:
+            continue
+        ref[e11_spec] = {
+            "eval_out_err_median": _med(sub, "eval_out_err_median"),
+            "eval_mixture_median": _med(sub, "eval_mixture_median"),
+            "source_spec": e10_spec,
+        }
+    return ref
+
 
 
 # =============================================================================
@@ -561,16 +619,21 @@ def print_crosscheck(rows: List[Dict[str, Any]],
         print()
         print("管线互校：quick 模式网格与 E10 不同，跳过（仅全网格可比）")
         return {"all_ok": None, "skipped": True}
+    ref_table = load_e10_crosscheck()
+    if not ref_table:
+        print()
+        print("管线互校：E10 落盘不可用（results/cpu/e10/rows.csv 缺失或为空）⇒ 跳过")
+        return {"all_ok": None, "skipped": True, "reason": "e10_results_unavailable"}
     print()
     print("=" * 126)
-    print("管线互校：本脚本与 E10 在同规格上的上中位数对照（E10 值取自其 summary.json）")
+    print("管线互校：本脚本与 E10 在同规格上的上中位数对照（E10 值**运行时**取自其 rows.csv）")
     print("=" * 126)
     out: Dict[str, Any] = {}
     ok_all = True
     print(f"{'规格':<18}{'本脚本(输出)':>14}{'E10(输出)':>12}{'Δ':>10}"
           f"{'本脚本(归并)':>14}{'E10(归并)':>12}{'Δ':>10}")
     print("-" * 126)
-    for spec, ref in E10_CROSSCHECK.items():
+    for spec, ref in ref_table.items():
         sub = [r for r in rows if r["spec"] == spec]
         if not sub:
             continue
@@ -763,7 +826,7 @@ def main(argv: List[str] | None = None) -> int:
             "不构成任务质量主张。所有评估均在留出 Query 上进行。"
         ),
     }
-    R.save_json(str(pathlib.Path(args.out) / "summary.json"), payload)
+    R.save_summary(str(pathlib.Path(args.out) / "summary.json"), payload)
     R.save_csv(str(pathlib.Path(args.out) / "rows.csv"), rows)
     print()
     print(f"结果已写入 {args.out}/summary.json 与 rows.csv")

@@ -1,0 +1,227 @@
+{
+ "diagnostic": "lambda_beta_zero_anchor",
+ "question": "λ_β=0 是不是绝对条件限制？对实验类复现有无影响？",
+ "grid": {
+  "quick": false,
+  "seeds": 5,
+  "L_s": 256,
+  "d_h": 32,
+  "d_v": 32,
+  "num_dest": 3,
+  "queries_per_dest": 96,
+  "M": [
+   8,
+   16,
+   32
+  ],
+  "budgets": [
+   8,
+   16,
+   32,
+   64
+  ],
+  "projection_dim": 16,
+  "eval_fraction": 0.5,
+  "focus_strength": 8.0,
+  "fixed_len": 128,
+  "lambda_value": 0.001
+ },
+ "gate_xcheck_vs_e11": {
+  "spec": "box_lam3em2",
+  "passed": true,
+  "n_keys_mine": 180,
+  "n_keys_e11": 180,
+  "max_abs_diff": 0.0,
+  "worst_cell": null
+ },
+ "table": {
+  "box_lam0": {
+   "all": {
+    "eval_mixture_median": {
+     "median": 0.43651169538497925,
+     "mean": 0.44748724475502966,
+     "worst": 0.79193514585495,
+     "n": 180
+    },
+    "eval_out_err_median": {
+     "median": 0.522182285785675,
+     "mean": 0.5227857043345769,
+     "worst": 0.9050926566123962,
+     "n": 180
+    },
+    "eval_abs_mass_median": {
+     "median": 0.16104239225387573,
+     "mean": 0.17089536434246433,
+     "worst": 0.5498256683349609,
+     "n": 180
+    },
+    "solver_residual_median": 0.05551483482122421,
+    "rank_G_median": 16.0,
+    "box_bind_rate_median": 0.0625,
+    "beta_std_median": 1.203981637954712
+   },
+   "B_le_M": {
+    "eval_mixture_median": {
+     "median": 0.43304920196533203,
+     "mean": 0.4463221881124708,
+     "worst": 0.79193514585495,
+     "n": 90
+    },
+    "eval_out_err_median": {
+     "median": 0.5123252868652344,
+     "mean": 0.5211409019099341,
+     "worst": 0.9050926566123962,
+     "n": 90
+    },
+    "eval_abs_mass_median": {
+     "median": 0.20037837326526642,
+     "mean": 0.2116711236536503,
+     "worst": 0.5498256683349609,
+     "n": 90
+    },
+    "solver_residual_median": 1.3128658533096313,
+    "rank_G_median": 16.0,
+    "box_bind_rate_median": 0.125,
+    "beta_std_median": 1.5175715684890747
+   },
+   "B_gt_M": {
+    "eval_mixture_median": {
+     "median": 0.4367544949054718,
+     "mean": 0.4486523013975885,
+     "worst": 0.7243502736091614,
+     "n": 90
+    },
+    "eval_out_err_median": {
+     "median": 0.5515245795249939,
+     "mean": 0.5244305067592197,
+     "worst": 0.8391656279563904,
+     "n": 90
+    },
+    "eval_abs_mass_median": {
+     "median": 0.12397590279579163,
+     "mean": 0.1301196050312784,
+     "worst": 0.31441861391067505,
+     "n": 90
+    },
+    "solver_residual_median": 0.00024062108423095196,
+    "rank_G_median": 16.0,
+    "box_bind_rate_median": 0.03125,
+    "beta_std_median": 0.9306600093841553
+   }
+  },
+  "box_lam3em2": {
+   "all": {
+    "eval_mixture_median": {
+     "median": 0.42141008377075195,
+     "mean": 0.43470443669292663,
+     "worst": 0.960120677947998,
+     "n": 180
+    },
+    "eval_out_err_median": {
+     "median": 0.5059645175933838,
+     "mean": 0.5103007993764348,
+     "worst": 1.0002210140228271,
+     "n": 180
+    },
+    "eval_abs_mass_median": {
+     "median": 0.14116357266902924,
+     "mean": 0.15255288622445531,
+     "worst": 0.46035799384117126,
+     "n": 180
+    },
+    "solver_residual_median": 0.16306369006633759,
+    "rank_G_median": 16.0,
+    "box_bind_rate_median": 0.0,
+    "beta_std_median": 0.6097084879875183
+   },
+   "B_le_M": {
+    "eval_mixture_median": {
+     "median": 0.41495755314826965,
+     "mean": 0.44576915717787213,
+     "worst": 0.960120677947998,
+     "n": 90
+    },
+    "eval_out_err_median": {
+     "median": 0.49991700053215027,
+     "mean": 0.5242184865805838,
+     "worst": 1.0002210140228271,
+     "n": 90
+    },
+    "eval_abs_mass_median": {
+     "median": 0.18930675089359283,
+     "mean": 0.1998931959271431,
+     "worst": 0.46035799384117126,
+     "n": 90
+    },
+    "solver_residual_median": 1.4978630542755127,
+    "rank_G_median": 16.0,
+    "box_bind_rate_median": 0.0,
+    "beta_std_median": 0.844464898109436
+   },
+   "B_gt_M": {
+    "eval_mixture_median": {
+     "median": 0.4246675968170166,
+     "mean": 0.42363971620798113,
+     "worst": 0.7061497569084167,
+     "n": 90
+    },
+    "eval_out_err_median": {
+     "median": 0.516818106174469,
+     "mean": 0.4963831121722857,
+     "worst": 0.8414728045463562,
+     "n": 90
+    },
+    "eval_abs_mass_median": {
+     "median": 0.09830143302679062,
+     "mean": 0.1052125765217675,
+     "worst": 0.24725750088691711,
+     "n": 90
+    },
+    "solver_residual_median": 0.015736326575279236,
+    "rank_G_median": 16.0,
+    "box_bind_rate_median": 0.0,
+    "beta_std_median": 0.42630261182785034
+   }
+  }
+ },
+ "paired_vs_3em2": {
+  "eval_mixture_median": {
+   "n": 180,
+   "median_delta": 0.011589378118515015,
+   "mean_delta": 0.01278280806210306,
+   "n_lambda0_better": 48,
+   "n_lambda0_worse": 132
+  },
+  "eval_out_err_median": {
+   "n": 180,
+   "median_delta": 0.011821836233139038,
+   "mean_delta": 0.012484904958142175,
+   "n_lambda0_better": 45,
+   "n_lambda0_worse": 135
+  },
+  "eval_abs_mass_median": {
+   "n": 180,
+   "median_delta": 0.01495577022433281,
+   "mean_delta": 0.01834247811800904,
+   "n_lambda0_better": 39,
+   "n_lambda0_worse": 141
+  }
+ },
+ "solver_probe_lambda0": {
+  "pgd": {
+   "raised": false,
+   "all_finite": true,
+   "w_min": 0.049787068367863944,
+   "w_max": 0.09453435087476009,
+   "residual": 5.702970807208336
+  },
+  "repo_legacy": {
+   "raised": false,
+   "all_finite": true,
+   "w_min": 0.0,
+   "w_max": 1.4008907222871052,
+   "residual": 64.12090801363644
+  }
+ },
+ "note": "本脚本不改 src 默认值，只补一个从未跑过的锚点；落盘在仓库外 _diag_out/lam0/。"
+}

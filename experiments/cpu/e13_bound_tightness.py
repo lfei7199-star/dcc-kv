@@ -645,7 +645,7 @@ def main() -> int:
     print(f"\n  总耗时 {time.time() - t0:.0f}s")
 
     out_dir = REPO_ROOT / args.out
-    R.save_json(str(out_dir / "e13_results.json"), payload)
+    R.save_summary(str(out_dir / "e13_results.json"), payload)
     R.save_csv(str(out_dir / "e13_rows.csv"), payload["rows"])
     R.save_csv(str(out_dir / "e13_block_rows.csv"), payload["block_rows"])
     print(f"结果已写入 {out_dir}")

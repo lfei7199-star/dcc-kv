@@ -237,7 +237,7 @@ def main() -> int:
     print("     （旧口径 mass_error，列名曾误作 eps_mass_abs_*）**不可互比**。")
 
     out_dir = REPO_ROOT / args.out
-    R.save_json(str(out_dir / "e2_results.json"), payload)
+    R.save_summary(str(out_dir / "e2_results.json"), payload)
     R.save_csv(str(out_dir / "e2.csv"), payload["rows"])
     print()
     print(f"结果已写入 {out_dir}")

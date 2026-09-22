@@ -1,0 +1,199 @@
+{
+ "diagnostic": "fps_start_convention",
+ "conflict": {
+  "paper": "main.tex:283 「以最新 Query 为初始锚点」(AuthorKit27 原件)",
+  "code": "representative_query.py:82 torch.randint 随机起点"
+ },
+ "verdict_basis": "用户裁定：代码服从论文逻辑",
+ "gate1_selfcheck": {
+  "ok": true,
+  "cases": [
+   {
+    "n": 64,
+    "m": 8,
+    "seed": 42,
+    "identical": true
+   },
+   {
+    "n": 96,
+    "m": 16,
+    "seed": 43,
+    "identical": true
+   },
+   {
+    "n": 128,
+    "m": 32,
+    "seed": 44,
+    "identical": true
+   },
+   {
+    "n": 200,
+    "m": 48,
+    "seed": 45,
+    "identical": true
+   }
+  ]
+ },
+ "gate2_xcheck_vs_e11": {
+  "spec": "box_lam3em2",
+  "passed": true,
+  "max_abs_diff": 0.0,
+  "n_mine": 180,
+  "n_e11": 180
+ },
+ "domains": {
+  "all": {
+   "eval_mixture_median": {
+    "n": 180,
+    "median_delta": 8.940696716308594e-08,
+    "mean_delta": 0.011130796124537786,
+    "max_abs": 0.3159003257751465
+   },
+   "eval_out_err_median": {
+    "n": 180,
+    "median_delta": 0.0022698938846588135,
+    "mean_delta": 0.015127233581410514,
+    "max_abs": 0.466203510761261
+   },
+   "eval_abs_mass_median": {
+    "n": 180,
+    "median_delta": -8.791685104370117e-07,
+    "mean_delta": -0.002599181938502524,
+    "max_abs": 0.1773281991481781
+   }
+  },
+  "B_le_M": {
+   "eval_mixture_median": {
+    "n": 90,
+    "median_delta": 9.834766387939453e-07,
+    "mean_delta": 0.01166986839638816,
+    "max_abs": 0.3159003257751465
+   },
+   "eval_out_err_median": {
+    "n": 90,
+    "median_delta": 0.0018033385276794434,
+    "mean_delta": 0.015468838314215342,
+    "max_abs": 0.42847877740859985
+   },
+   "eval_abs_mass_median": {
+    "n": 90,
+    "median_delta": -2.682209014892578e-07,
+    "mean_delta": -0.0036751075751251644,
+    "max_abs": 0.1773281991481781
+   }
+  },
+  "B_gt_M": {
+   "eval_mixture_median": {
+    "n": 90,
+    "median_delta": -2.9802322387695312e-08,
+    "mean_delta": 0.010591723852687411,
+    "max_abs": 0.2608048915863037
+   },
+   "eval_out_err_median": {
+    "n": 90,
+    "median_delta": 0.0037694573402404785,
+    "mean_delta": 0.014785628848605686,
+    "max_abs": 0.466203510761261
+   },
+   "eval_abs_mass_median": {
+    "n": 90,
+    "median_delta": -0.00034090131521224976,
+    "mean_delta": -0.0015232563018798828,
+    "max_abs": 0.0641663670539856
+   }
+  }
+ },
+ "pooled_median": {
+  "random": {
+   "eval_mixture_median": 0.42141008377075195,
+   "eval_out_err_median": 0.5059645175933838,
+   "eval_abs_mass_median": 0.14116357266902924
+  },
+  "newest": {
+   "eval_mixture_median": 0.43294990062713623,
+   "eval_out_err_median": 0.5110623836517334,
+   "eval_abs_mass_median": 0.13672950863838196
+  }
+ },
+ "noise_floor": {
+  "eval_mixture_median": {
+   "n_cells": 180,
+   "median_seed_spread_within_cell": 0.1653660535812378,
+   "median_abs_shift_newest": 0.04222607612609863,
+   "ratio_shift_over_spread": 0.2553491191912289
+  },
+  "eval_out_err_median": {
+   "n_cells": 180,
+   "median_seed_spread_within_cell": 0.21413439512252808,
+   "median_abs_shift_newest": 0.04451453685760498,
+   "ratio_shift_over_spread": 0.20788130198389512
+  },
+  "eval_abs_mass_median": {
+   "n_cells": 180,
+   "median_seed_spread_within_cell": 0.06556756049394608,
+   "median_abs_shift_newest": 0.018552608788013458,
+   "ratio_shift_over_spread": 0.28295408046676435
+  }
+ },
+ "pooled_median_by_seed": {
+  "random": {
+   "42": {
+    "eval_mixture_median": 0.4369930326938629,
+    "eval_out_err_median": 0.5477716326713562,
+    "eval_abs_mass_median": 0.13648037612438202
+   },
+   "43": {
+    "eval_mixture_median": 0.47288259863853455,
+    "eval_out_err_median": 0.5516079664230347,
+    "eval_abs_mass_median": 0.15679751336574554
+   },
+   "44": {
+    "eval_mixture_median": 0.4223959743976593,
+    "eval_out_err_median": 0.48372527956962585,
+    "eval_abs_mass_median": 0.14753612875938416
+   },
+   "45": {
+    "eval_mixture_median": 0.39215049147605896,
+    "eval_out_err_median": 0.467475950717926,
+    "eval_abs_mass_median": 0.14175395667552948
+   },
+   "46": {
+    "eval_mixture_median": 0.39488962292671204,
+    "eval_out_err_median": 0.46676212549209595,
+    "eval_abs_mass_median": 0.12455611675977707
+   }
+  },
+  "newest": {
+   "42": {
+    "eval_mixture_median": 0.48660221695899963,
+    "eval_out_err_median": 0.5658195614814758,
+    "eval_abs_mass_median": 0.13672950863838196
+   },
+   "43": {
+    "eval_mixture_median": 0.4544505476951599,
+    "eval_out_err_median": 0.5313237309455872,
+    "eval_abs_mass_median": 0.14558064937591553
+   },
+   "44": {
+    "eval_mixture_median": 0.4560031294822693,
+    "eval_out_err_median": 0.49736344814300537,
+    "eval_abs_mass_median": 0.13900671899318695
+   },
+   "45": {
+    "eval_mixture_median": 0.4062497913837433,
+    "eval_out_err_median": 0.4926871955394745,
+    "eval_abs_mass_median": 0.13505646586418152
+   },
+   "46": {
+    "eval_mixture_median": 0.41217246651649475,
+    "eval_out_err_median": 0.4556339979171753,
+    "eval_abs_mass_median": 0.12588466703891754
+   }
+  }
+ },
+ "rows_files": [
+  "rows_random.csv",
+  "rows_newest.csv"
+ ],
+ "note": "本脚本只 monkey-patch，不改 src；落盘在仓库外 _diag_out/fps_start/。"
+}

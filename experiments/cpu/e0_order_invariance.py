@@ -416,7 +416,7 @@ def main() -> int:
         print(f"  - {dt}: {v:.4f}" if v is not None else f"  - {dt}: (无)")
 
     out_dir = REPO_ROOT / args.out
-    R.save_json(str(out_dir / "e0_results.json"), payload)
+    R.save_summary(str(out_dir / "e0_results.json"), payload)
     R.save_csv(str(out_dir / "e0.csv"), payload["rows"])
     R.save_csv(str(out_dir / "e0_perm_ladder.csv"), payload["perm_ladder"])
     print()

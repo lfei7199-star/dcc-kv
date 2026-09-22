@@ -1252,7 +1252,7 @@ def main() -> int:
     }
 
     out = REPO_ROOT / a.out
-    R.save_json(str(out / "e6_results.json"), payload)
+    R.save_summary(str(out / "e6_results.json"), payload)
     R.save_csv(str(out / "e6_main_table.csv"), rows)
     print()
     print(f"数据点：计划 {payload['grid']['n_points_planned']} / "

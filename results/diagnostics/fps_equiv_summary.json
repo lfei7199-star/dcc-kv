@@ -1,0 +1,150 @@
+{
+ "diagnostic": "fps_change_equivalence",
+ "A_random_mode_identical": {
+  "passed": true,
+  "cases": [
+   {
+    "N": 64,
+    "M": 8,
+    "d": 32,
+    "seed": 42,
+    "dtype": "float32",
+    "identical": true,
+    "n_pos_diff": 0,
+    "n_set_diff": 0
+   },
+   {
+    "N": 96,
+    "M": 16,
+    "d": 16,
+    "seed": 43,
+    "dtype": "float32",
+    "identical": true,
+    "n_pos_diff": 0,
+    "n_set_diff": 0
+   },
+   {
+    "N": 128,
+    "M": 32,
+    "d": 32,
+    "seed": 44,
+    "dtype": "float32",
+    "identical": true,
+    "n_pos_diff": 0,
+    "n_set_diff": 0
+   },
+   {
+    "N": 200,
+    "M": 48,
+    "d": 32,
+    "seed": 45,
+    "dtype": "float64",
+    "identical": true,
+    "n_pos_diff": 0,
+    "n_set_diff": 0
+   },
+   {
+    "N": 257,
+    "M": 64,
+    "d": 32,
+    "seed": 46,
+    "dtype": "float64",
+    "identical": true,
+    "n_pos_diff": 0,
+    "n_set_diff": 0
+   },
+   {
+    "N": 512,
+    "M": 96,
+    "d": 32,
+    "seed": 47,
+    "dtype": "float32",
+    "identical": true,
+    "n_pos_diff": 0,
+    "n_set_diff": 0
+   }
+  ]
+ },
+ "B_newest_effect": [
+  {
+   "N": 64,
+   "M": 8,
+   "seed": 42,
+   "intersection": 1,
+   "first_is_last_index": true
+  },
+  {
+   "N": 96,
+   "M": 16,
+   "seed": 43,
+   "intersection": 2,
+   "first_is_last_index": true
+  },
+  {
+   "N": 128,
+   "M": 32,
+   "seed": 44,
+   "intersection": 6,
+   "first_is_last_index": true
+  },
+  {
+   "N": 200,
+   "M": 48,
+   "seed": 45,
+   "intersection": 14,
+   "first_is_last_index": true
+  },
+  {
+   "N": 257,
+   "M": 64,
+   "seed": 46,
+   "intersection": 23,
+   "first_is_last_index": true
+  },
+  {
+   "N": 512,
+   "M": 96,
+   "seed": 47,
+   "intersection": 25,
+   "first_is_last_index": true
+  }
+ ],
+ "C_complexity": {
+  "measured": [
+   {
+    "N": 1024,
+    "M": 32,
+    "d": 32,
+    "seconds_old": 0.003768400001717964,
+    "seconds_new": 0.005063100001279963,
+    "old_matrix_mb": 4.0
+   },
+   {
+    "N": 4096,
+    "M": 32,
+    "d": 32,
+    "seconds_old": 0.06729740000082529,
+    "seconds_new": 0.005703200000425568,
+    "old_matrix_mb": 64.0
+   },
+   {
+    "N": 8192,
+    "M": 32,
+    "d": 32,
+    "seconds_old": 0.21676099999967846,
+    "seconds_new": 0.0030660000011266675,
+    "old_matrix_mb": 256.0
+   }
+  ],
+  "extrapolation": [
+   {
+    "N": 100000,
+    "old_matrix_gb": 37.25290298461914
+   }
+  ]
+ },
+ "verdict": {
+  "complexity_change": "逐位等价，零影响",
+  "start_change": "索引集合变化，但 180 格实测偏移量级为起点噪声的 0.21–0.28 倍（见 _diag_out/fps_start）"
+ }
+}

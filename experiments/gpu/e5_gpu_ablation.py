@@ -1104,7 +1104,7 @@ def worker(rank: int, world: int, a: Dict[str, Any]) -> None:
             )
             payload["metadata"] = meta.to_dict()
             out = REPO_ROOT / a["out"]
-            R.save_json(str(out / "e5_results.json"), payload)
+            R.save_summary(str(out / "e5_results.json"), payload)
             for part, res in payload["results"].items():
                 rows = res.get("rows")
                 if rows:

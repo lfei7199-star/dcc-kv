@@ -222,7 +222,7 @@ def main() -> int:
     print(f"  {payload['caveat']}")
 
     out_dir = REPO_ROOT / args.out
-    R.save_json(str(out_dir / "a3_results.json"), payload)
+    R.save_summary(str(out_dir / "a3_results.json"), payload)
     R.save_csv(str(out_dir / "a3.csv"), payload["rows"])
     print()
     print(f"结果已写入 {out_dir}")

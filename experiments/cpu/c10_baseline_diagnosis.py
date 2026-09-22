@@ -65,6 +65,7 @@ from src.dcc_kv_ref import (  # noqa: E402
     merge_softmax_states,
     online_softmax_from_attention,
 )
+from experiments.common import report as R  # noqa: E402
 
 
 # -----------------------------------------------------------------------------
@@ -367,9 +368,9 @@ def main() -> int:
 
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    # 走公共落盘（自带 provenance 戳）；原先手写 json.dumps 是仓库里唯一的例外，
+    # 使得本实验的产物长期无法自证代码版本。
+    R.save_summary(str(out_dir / "summary.json"), summary)
     print()
     print(f"落盘：{out_dir / 'summary.json'}")
     return 0

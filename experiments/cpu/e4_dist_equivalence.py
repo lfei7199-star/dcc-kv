@@ -191,24 +191,57 @@ def run_existing_tests() -> Dict[str, Any]:
 
     真 2 进程 gloo 的 all_reduce / broadcast / 变长 all_to_all_v 由这些
     测试覆盖；本脚本不重复实现，只转发结果。
+
+    为什么失败要自带解释（审查项 F5）：2026-09-16 的落盘里只留下
+    ``{"ran": true, "returncode": 1, "summary": ""}`` —— 一个非零返回码
+    配一段空 summary，既没有 stderr 也没有命令行，事后**无法追查**是
+    收集阶段崩了还是断言失败。因此这里：
+
+    * 把实际 argv 记进 ``command``，让失败可原样复跑；
+    * 同时保留 stdout 与 **stderr** 尾部 —— pytest 在收集/启动阶段
+      中止时，线索通常只在 stderr；
+    * 非零码时补一条 ``note``，说明该返回码该怎么读。
+
+    这样"转发测试失败"这一事件在产物内部就是自解释的，不需要依赖
+    外部日志或人工记忆。
     """
     targets = [
         "tests/test_dist_equivalence.py",
         "tests/test_var_len_msg.py",
     ]
+    argv = [sys.executable, "-m", "pytest", *targets, "-q", "--no-header"]
+    base: Dict[str, Any] = {
+        "targets": targets,
+        "command": " ".join(argv),
+        "pass_criterion": "returncode == 0；非零即视为未通过，不得写作「E4 通过」。",
+    }
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", *targets, "-q", "--no-header"],
-            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=900,
+            argv, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=900,
         )
         tail = "\n".join((proc.stdout or "").strip().splitlines()[-6:])
-        return {"ran": True, "returncode": proc.returncode, "summary": tail}
+        err_tail = "\n".join((proc.stderr or "").strip().splitlines()[-12:])
+        out: Dict[str, Any] = {
+            **base,
+            "ran": True,
+            "returncode": proc.returncode,
+            "summary": tail,
+            "stderr_tail": err_tail,
+        }
+        if proc.returncode != 0:
+            out["note"] = (
+                "转发测试以非零码退出。summary 为空通常意味着 pytest 在收集或启动"
+                "阶段就中止（而不是断言失败）——此时线索在 stderr_tail 里。"
+                "此前（2026-09-16）的落盘缺这一字段，只留下 returncode=1 与空"
+                "summary，导致该失败事后不可追查。"
+            )
+        return out
     except FileNotFoundError:
-        return {"ran": False, "reason": "pytest 未安装"}
+        return {**base, "ran": False, "reason": "pytest 未安装"}
     except subprocess.TimeoutExpired:
-        return {"ran": False, "reason": "测试超时"}
+        return {**base, "ran": False, "reason": "测试超时"}
     except Exception as exc:  # noqa: BLE001
-        return {"ran": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {**base, "ran": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -272,7 +305,7 @@ def main() -> int:
     print("  3. 压缩版：真实预算下的端到端偏差。")
 
     out_dir = REPO_ROOT / args.out
-    R.save_json(str(out_dir / "e4_results.json"), payload)
+    R.save_summary(str(out_dir / "e4_results.json"), payload)
     R.save_csv(str(out_dir / "e4.csv"), payload["rows"])
     print()
     print(f"结果已写入 {out_dir}")

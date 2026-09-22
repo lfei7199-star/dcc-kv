@@ -171,7 +171,7 @@ def main() -> int:
     print(f"  通过 {payload['n_pass']}/{payload['n_total']}")
 
     out_dir = REPO_ROOT / args.out
-    R.save_json(str(out_dir / "e1_results.json"), payload)
+    R.save_summary(str(out_dir / "e1_results.json"), payload)
     R.save_csv(str(out_dir / "e1_checks.csv"), payload["checks"])
     print(f"结果已写入 {out_dir}")
     return 0 if payload["n_pass"] == payload["n_total"] else 1

@@ -12,10 +12,15 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
+import pathlib
+import subprocess
+import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -368,6 +373,116 @@ def save_csv(path: str, rows: List[Dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+# =============================================================================
+# provenance 戳（2026-09-22 工程审查 F3）
+# =============================================================================
+
+# 参与 provenance 的关键源码。入选标准：**改变它们就可能改变落盘数字**。
+_PROVENANCE_SOURCES = (
+    "src/dcc_kv_ref/representative_query.py",
+    "src/dcc_kv_ref/key_selection.py",
+    "src/dcc_kv_ref/calibration.py",
+    "src/dcc_kv_ref/value_regression.py",
+    "src/dcc_kv_ref/compact_kv.py",
+    "src/dcc_kv_ref/online_softmax.py",
+    "experiments/common/synthetic.py",
+    "experiments/common/beta_variants.py",
+    "experiments/common/hypotheses.py",
+    "experiments/common/report.py",
+)
+
+_PROVENANCE_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _repo_root() -> pathlib.Path:
+    """由本文件位置推出仓库根：`experiments/common/report.py` → 仓库根。"""
+    return pathlib.Path(__file__).resolve().parents[2]
+
+
+def provenance_stamp() -> Dict[str, Any]:
+    """本次 run 的 provenance 戳 —— 让落盘自证「哪版代码、哪个口径」。
+
+    为什么需要（审查项 F3）：全部 CPU 实验的产物原本**没有任何版本标识**，
+    而论文 §6 的数字全部来自 CPU 落盘（GPU 被阻断）。后果不是理论担忧：
+    代表 Query 最远点采样的起点默认值在 09-22 由 `random` 改为 `newest`，而
+    E10/E11 的落盘停在 09-16（旧口径）⇒ 论文混用了两套起点口径，事后只能靠
+    人工翻 git 历史才查得出来。本戳把这些信息写进**产物本身**：
+
+    1. ``git_commit`` / ``git_dirty`` —— 代码版本。**`results/` 自身的脏不参与判定**，
+       否则每跑完一个实验 `git_dirty` 就会翻转一次，戳就失去意义；
+    2. ``fps_start`` —— 代表 Query 最远点采样的起点口径（论文式(11) 要求 ``newest``）；
+    3. ``source_sha256`` —— 关键源码的 sha256 前 16 位。
+
+    同进程内缓存：每个实验进程通常只写一次 summary，但 E2b/E9 之类会写多份。
+    """
+    global _PROVENANCE_CACHE
+    if _PROVENANCE_CACHE is not None:
+        return dict(_PROVENANCE_CACHE)
+
+    root = _repo_root()
+    prov: Dict[str, Any] = {
+        "written_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git_commit": "unknown",
+        "git_dirty": None,
+        "fps_start": "unknown",
+        "python_version": sys.version.split()[0],
+        "numpy_version": getattr(np, "__version__", "unknown"),
+        "source_sha256": {},
+    }
+
+    try:
+        from src.experiment_metadata import get_git_commit
+        prov["git_commit"] = get_git_commit()
+    except Exception:
+        pass
+
+    try:
+        # 只看**决定数字的代码**（src / experiments / tests）。
+        # 不看 results/：它本身就是本次落盘的产物，否则跑完第一个实验
+        # `git_dirty` 就翻转，戳失去意义。
+        # 不看 paper/ docs/：它们不影响实验数字，却会在写作期常驻脏状态。
+        out = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", "src", "experiments", "tests"],
+            cwd=str(root), stderr=subprocess.DEVNULL,
+        ).decode(encoding="utf-8", errors="replace")
+        prov["git_dirty"] = bool(out.strip())
+    except Exception:
+        pass
+
+    try:
+        import inspect
+        from src.dcc_kv_ref.representative_query import select_representative_queries
+        prov["fps_start"] = inspect.signature(
+            select_representative_queries).parameters["start"].default
+    except Exception:
+        pass
+
+    for rel in _PROVENANCE_SOURCES:
+        fp = root / rel
+        try:
+            prov["source_sha256"][rel] = hashlib.sha256(fp.read_bytes()).hexdigest()[:16]
+        except OSError:
+            prov["source_sha256"][rel] = "missing"
+
+    _PROVENANCE_CACHE = prov
+    return dict(prov)
+
+
+def save_summary(path: str, payload: Any) -> None:
+    """写实验产物：在 dict 顶层附加 ``provenance`` 戳（见 `provenance_stamp`）。
+
+    **为什么不直接改 `save_json`**：后者的契约是「把 payload 原样写成合法 JSON」，
+    且 `tests/test_adversarial_2026_09_20.py::test_g1_save_json_emits_standard_json`
+    逐键断言它的输出。往里偷偷加字段会破坏该契约。本函数的契约则是「写**实验
+    产物**」—— 产物带来源戳正是它该做的事。
+
+    非 dict 的 payload 退化为 `save_json`：无处可附戳，不静默篡改形状。
+    """
+    if isinstance(payload, dict):
+        payload = {**payload, "provenance": provenance_stamp()}
+    save_json(path, payload)
+
+
 def format_run_result(r: RunResult, indent: str = "  ") -> str:
     """把 RunResult 格式化为一行人类可读文本。"""
     return (
@@ -386,5 +501,7 @@ __all__ = [
     "bootstrap_ratio_ci",
     "save_json",
     "save_csv",
+    "provenance_stamp",
+    "save_summary",
     "format_run_result",
 ]

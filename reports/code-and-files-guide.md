@@ -6,8 +6,9 @@
 | 项 | 内容 |
 |---|---|
 | 仓库 | `github.com/lfei7199-star/dcc-kv` |
-| 说明对应版本 | `cc582ae`（分支 `paper/sections-5-8`） |
-| 更新日期 | 2026-09-16 |
+| 说明对应版本 | 滚动维护。最近一次**逐条核验基线**：`b0304bd`（2026-09-22） |
+| 更新日期 | 2026-09-22 |
+| 计数类数字 | ⚠️ 测试数、文件数等**会随仓库演进**，以本机实测为准（判据是 `0 failed`，不是某个具体计数） |
 
 ---
 
@@ -63,10 +64,14 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-期望输出：`226 passed / 7 deselected / 2 xfailed`。
+期望输出：`469 passed / 7 deselected / 2 xfailed`（2026-09-22 实测）。
 
 - `7 deselected` = 被 `pytest.ini` 按 marker 排除的 **GPU 需求测试**（正常现象）；
 - `2 xfailed` = 已知预期失败（记录在案的边界），**不是回归**。
+
+> ⚠️ **判据是 `0 failed`，不是上面那个数字。** 测试会持续增加（本文档上一版写的
+> `226` 是 2026-09-16 的实况，此后新增 243 项），因此**任何计数都可能滞后于你手上的版本**——
+> 以你本机实测为准。真正需要警惕的是 `failed` 不为零。
 
 ### 2.3 跑一个 CPU 实验
 
@@ -361,7 +366,7 @@ H1–H5 中：**H1 与 H4 已判定**；**H2 / H3 / H5 为 `no-judge`**——意
 ## 附：最短路径速查
 
 ```bash
-pytest -q                                       # 226 passed / 7 deselected / 2 xfailed
+pytest -q                                       # 469 passed / 7 deselected / 2 xfailed（2026-09-22）
 python experiments/gpu/e6_main_table.py --plan  # 看 GPU 实验阻断清单
 python experiments/cpu/e3_edge_conditioning.py --out results/cpu/e3
 bash paper/build.sh                             # 编译论文
