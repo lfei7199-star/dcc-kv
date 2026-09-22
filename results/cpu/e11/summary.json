@@ -382,7 +382,8 @@
       1.4761545224247727
     ],
     "c_max": 1.6631920051085889,
-    "verdict": "与渐近前提一致：β_std 单调衰减，且 max|Δ| ≤ 1.66·β_std（比值有界 ⇒ β_std→0 时 |Δ|→0）"
+    "c_max_ceil": 1.67,
+    "verdict": "与渐近前提一致：β_std 单调衰减，且 max|Δ| ≤ 1.67·β_std（比值有界 ⇒ β_std→0 时 |Δ|→0）"
   },
   "crosscheck_vs_e10": {
     "nobox_lam1em3": {
@@ -93318,8 +93319,8 @@
   "source_grounding": "箱约束 [−3,3] 与 λ 的口径（尺度无关相对量）承接 E10；E10 判定 λ_β 是比箱约束更对症的旋钮但未定位最优值。",
   "caveat": "机制级证据（合成数据上的注意力分布与线性输出重构精度），不构成任务质量主张。所有评估均在留出 Query 上进行。",
   "provenance": {
-    "written_at_utc": "2026-09-22T14:14:28+00:00",
-    "git_commit": "ab76abd4b07afdb3a654e927f2bb1a4d66abf7bb",
+    "written_at_utc": "2026-09-22T14:58:33+00:00",
+    "git_commit": "3ed7c2e98041cab872b90904fc8e852f0dbcec36",
     "git_dirty": false,
     "fps_start": "newest",
     "python_version": "3.13.3",
