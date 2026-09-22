@@ -6,10 +6,10 @@
       "chunk_size": 64,
       "L_total": 128,
       "budget": 16,
-      "max_abs_diff_compressed": 0.40679317712783813,
-      "rel_diff_compressed": 0.5461793541908264,
+      "max_abs_diff_compressed": 0.8134599924087524,
+      "rel_diff_compressed": 0.6055492162704468,
       "within_repo_threshold_1e-2": false,
-      "max_abs_diff_budget_eq_chunk": 0.3216325342655182,
+      "max_abs_diff_budget_eq_chunk": 0.28315025568008423,
       "max_abs_diff_no_compression_isolated": 2.980232238769531e-07,
       "rel_diff_no_compression_isolated": 3.3894960438374255e-07,
       "merge_path_correct": true,
@@ -20,10 +20,10 @@
       "chunk_size": 64,
       "L_total": 256,
       "budget": 16,
-      "max_abs_diff_compressed": 0.4461657404899597,
-      "rel_diff_compressed": 0.7981245517730713,
+      "max_abs_diff_compressed": 0.5920891761779785,
+      "rel_diff_compressed": 0.8592522740364075,
       "within_repo_threshold_1e-2": false,
-      "max_abs_diff_budget_eq_chunk": 0.34810614585876465,
+      "max_abs_diff_budget_eq_chunk": 0.34957343339920044,
       "max_abs_diff_no_compression_isolated": 3.2782554626464844e-07,
       "rel_diff_no_compression_isolated": 4.149202936787333e-07,
       "merge_path_correct": true,
@@ -31,8 +31,36 @@
     }
   ],
   "repo_tests": {
+    "targets": [
+      "tests/test_dist_equivalence.py",
+      "tests/test_var_len_msg.py"
+    ],
+    "command": "C:\\Users\\29914\\.workbuddy\\binaries\\python\\envs\\repo-tests\\Scripts\\python.exe -m pytest tests/test_dist_equivalence.py tests/test_var_len_msg.py -q --no-header",
+    "cwd": "C:\\Users\\29914\\WorkBuddy\\2026-09-13-16-25-13\\dcc-kv",
+    "pass_criterion": "returncode == 0；非零即视为未通过，不得写作「E4 通过」。",
     "ran": true,
-    "returncode": 1,
-    "summary": ""
+    "returncode": 0,
+    "summary": "collected 24 items\n\ntests\\test_dist_equivalence.py ...............xx.                        [ 75%]\ntests\\test_var_len_msg.py ......                                         [100%]\n\n======================== 22 passed, 2 xfailed in 5.11s ========================",
+    "stderr_tail": ""
+  },
+  "provenance": {
+    "written_at_utc": "2026-09-22T14:07:26+00:00",
+    "git_commit": "ab76abd4b07afdb3a654e927f2bb1a4d66abf7bb",
+    "git_dirty": false,
+    "fps_start": "newest",
+    "python_version": "3.13.3",
+    "numpy_version": "2.2.6",
+    "source_sha256": {
+      "src/dcc_kv_ref/representative_query.py": "20719c8c81725a8d",
+      "src/dcc_kv_ref/key_selection.py": "07f1cb94a7368ee6",
+      "src/dcc_kv_ref/calibration.py": "dda729a261daefd7",
+      "src/dcc_kv_ref/value_regression.py": "9f52f4eb89327f91",
+      "src/dcc_kv_ref/compact_kv.py": "f4a865d47fb2ede5",
+      "src/dcc_kv_ref/online_softmax.py": "4ba238d17c2c5350",
+      "experiments/common/synthetic.py": "c472422adfe665a7",
+      "experiments/common/beta_variants.py": "2ad4b2afd374fa0e",
+      "experiments/common/hypotheses.py": "570e7fb472611f09",
+      "experiments/common/report.py": "03c55bda5a7290ba"
+    }
   }
 }

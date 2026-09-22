@@ -7,6 +7,8 @@
 # 编译产物（可随时由 main.tex 重新生成）
 # main*.pdf 覆盖 main.pdf 及调试用的 main-*.pdf 变体
 main*.pdf
+# xelatex 的中间产物（latexmk -xelatex 会生成；根规则未覆盖 .xdv）
+main*.xdv
 *.synctex.gz
 *.fls
 *.fdb_latexmk

@@ -6,7 +6,7 @@ selected_indices 形状为 [B],True,"got (64,)"
 选中索引互不重复,True,唯一值 64/64
 "选中索引落在 [0, L_s) 内",True,min=1 max=255 L_s=256
 keys/values 无 NaN/Inf,True,
-logit_bias 无 NaN/Inf,True,"范围 [-2.0697, 0.9813]"
+logit_bias 无 NaN/Inf,True,"范围 [-0.7894, 1.0249]"
 同种子下构造完全一致,True,
 异种子可分辨（证明种子真的接入）,True,种子改变了选中索引
 B < L_s 时确实发生压缩,True,

@@ -11063,5 +11063,25 @@
       "beta_clamped": 6
     }
   ],
-  "caveat": "机制级证据（合成数据上的注意力分布与线性输出重构精度）。不得用于主张任务质量、通信性能或与基线的对比优势 —— 那些需要 GPU 侧的 E5/E6。oracle 曲线使用评估 Query 自身拟合 V，是**上界**而非可实现结果，只能用于界定 B 轴的表示能力。"
+  "caveat": "机制级证据（合成数据上的注意力分布与线性输出重构精度）。不得用于主张任务质量、通信性能或与基线的对比优势 —— 那些需要 GPU 侧的 E5/E6。oracle 曲线使用评估 Query 自身拟合 V，是**上界**而非可实现结果，只能用于界定 B 轴的表示能力。",
+  "provenance": {
+    "written_at_utc": "2026-09-22T14:31:18+00:00",
+    "git_commit": "ab76abd4b07afdb3a654e927f2bb1a4d66abf7bb",
+    "git_dirty": false,
+    "fps_start": "newest",
+    "python_version": "3.13.3",
+    "numpy_version": "2.2.6",
+    "source_sha256": {
+      "src/dcc_kv_ref/representative_query.py": "20719c8c81725a8d",
+      "src/dcc_kv_ref/key_selection.py": "07f1cb94a7368ee6",
+      "src/dcc_kv_ref/calibration.py": "dda729a261daefd7",
+      "src/dcc_kv_ref/value_regression.py": "9f52f4eb89327f91",
+      "src/dcc_kv_ref/compact_kv.py": "f4a865d47fb2ede5",
+      "src/dcc_kv_ref/online_softmax.py": "4ba238d17c2c5350",
+      "experiments/common/synthetic.py": "c472422adfe665a7",
+      "experiments/common/beta_variants.py": "2ad4b2afd374fa0e",
+      "experiments/common/hypotheses.py": "570e7fb472611f09",
+      "experiments/common/report.py": "03c55bda5a7290ba"
+    }
+  }
 }
