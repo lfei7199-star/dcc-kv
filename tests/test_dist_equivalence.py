@@ -202,6 +202,46 @@ class TestCompactKV:
         assert torch.equal(idx1, idx2)
         assert torch.allclose(r1, r2)
 
+    def test_fps_start_follows_paper(self):
+        """FPS 起点口径 = 论文 eq.(11) 的「以最新 Query 为初始锚点」。
+
+        断言建在**结构**上（首点必须是 index N-1、结果与 seed 无关），
+        不建在数值上：换起点本来就会换掉选出的集合，把集合内容写进断言
+        等于把一次巧合固化成测试。
+
+        2026-09-22：改前代码用 ``torch.randint`` 取随机起点，与论文 §4.2 的
+        ``S_r^(1) = {L_r}``（1-based，即 0-based 的 ``N-1``）不符，
+        故默认改为 ``newest``；``random`` 保留为复现旧落盘的开关。
+        """
+        import pytest
+        from dcc_kv_ref import farthest_point_sampling
+
+        N, M = 64, 8
+        torch.manual_seed(0)
+        feats = torch.randn(N, 32, dtype=torch.float64)
+
+        # 默认口径：首点 = 最后一个 Query，且与 seed 无关（起点确定）
+        idx = farthest_point_sampling(feats, num_samples=M)
+        assert int(idx[0].item()) == N - 1
+        assert torch.equal(idx, farthest_point_sampling(feats, num_samples=M,
+                                                        seed=999))
+
+        # 形状 / 下标范围 / 不重复
+        assert idx.shape == (M,)
+        assert int(idx.min()) >= 0
+        assert int(idx.max()) <= N - 1
+        assert len(set(idx.tolist())) == M
+
+        # random 分支仍可用：起点由 seed 决定 ⇒ 至少两个 seed 给出不同结果
+        seen = {tuple(farthest_point_sampling(feats, num_samples=M, seed=s,
+                                              start="random").tolist())
+                for s in range(8)}
+        assert len(seen) > 1, "random 模式下不同 seed 应给出不同起点"
+
+        # 非法模式必须显式报错，而不是静默退回某个默认
+        with pytest.raises(ValueError):
+            farthest_point_sampling(feats, num_samples=M, start="bogus")
+
 
 # ============================================================================
 # 基线 vs Dense 对比（Phase C）
@@ -249,12 +289,18 @@ class TestBaselineEquivalence:
         assert max_diff < 1e-5, f"Ring vs Dense diff = {max_diff}"
 
     def test_fast_kv_vs_dense_within_tolerance(self):
-        """FastKV vs Dense：非因果下的压缩保真度（实测 0.2397）。
+        r"""FastKV vs Dense：非因果下的压缩保真度（实测 0.4070）。
 
         本设置的 ``budget = chunk_size = 64 = L_s``，即**没有发生选键压缩**：
         ``selected_indices`` 恰为 0..63，``compact.keys`` 与原始 K 逐位相同。
         剩下的偏差全部来自 Value 回归——把 ``compact.values`` 换成精确 V 后
-        偏差降到 0.0076，说明 β 与选键在 $B=L_s$ 下几乎无害。
+        偏差降到 0.0068，说明 $\beta$ 与选键在 $B=L_s$ 下几乎无害。
+
+        2026-09-22 更新：FPS 起点由「随机」改为论文 eq.(11) 的「以最新 Query
+        为初始锚点」（见 ``representative_query.farthest_point_sampling``），
+        实测由 0.2397 变为 0.4070 —— 即该 mock 的 V 回归质量**对代表 Query
+        集合敏感**。按本测试既有约定（越界先重跑 ``c10_baseline_diagnosis.py``
+        再用新落盘数字改阈值），阈值由 0.30 调整为 0.49。
         """
         config = FastKVConfig(budget=64, num_repr_queries=32, projection_dim=16)
         fkv_out = fast_kv_cpu(
@@ -265,9 +311,9 @@ class TestBaselineEquivalence:
             self.Q, self.K, self.V, self.chunk_size, self.world_size, causal=False,
         )
         max_diff = (fkv_out - dense_out).abs().max().item()
-        # 阈值 = 实测 0.2397 的约 1.2 倍余量。若因实现或默认超参变化越界，
+        # 阈值 = 实测 0.4070 的约 1.2 倍余量。若因实现或默认超参变化越界，
         # 应先重跑 c10_baseline_diagnosis.py 更新落盘数字，再改这里。
-        assert max_diff < 0.30, f"FastKV vs Dense diff = {max_diff}"
+        assert max_diff < 0.49, f"FastKV vs Dense diff = {max_diff}"
 
     def test_apb_vs_dense_within_tolerance(self):
         """APB vs Dense：非因果下的压缩保真度（实测 0.6030）。

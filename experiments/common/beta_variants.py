@@ -150,10 +150,31 @@ def nonneg_ridge_pgd(
     n_iter: int = 2000,
     tol: float = 1e-12,
     lambda_mode: str = "relative",
+    lambda_disp: Optional[float] = None,
     w_lower: float = 0.0,
     w_upper: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """求解 min_{w∈[lo,hi]} ||G w − target||² + λ||w − 1||²，用步长 1/L 的投影梯度。
+
+    两项惩罚的**正交分解**（2026-09-22 新增 ``lambda_disp``）
+    ------------------------------------------------------
+    以 c = mean(w) 为界，岭惩罚可拆成两个正交分量之和：
+
+        λ‖w − 1‖²  =  λ·B(c − 1)²   +   λ‖w − c·1‖²
+                      ↑ 块级常数         ↑ per-key 离散度
+
+    这两个分量对**归并误差**的作用方向相反：块级常数是 β 的唯一收益来源
+    （softmax 对 logit 的整体常数位移免疫，只有与其他块共处同一个分母时
+    它才起作用 —— 见 `mixture_output` 的说明），而 per-key 离散度在该度量上
+    是**净成本**（E10 的结论）。旧实现用同一个 λ 等速惩罚两者，等于把收益
+    与成本按等权重对冲；归并阶梯在 $10^{-1}$ 触底仍略高于标量 β，正是这条的
+    数值表现。
+
+    沿 1 方向的特征值 = λ_c（块级常数的收缩强度），沿 1⊥ 方向 = λ_d
+    （per-key 离散度的收缩强度）。`lambda_disp=None`（默认）时 λ_d = λ_c，
+    A、b 与本函数旧实现**逐位相同**；λ_d > λ_c 把解推向"无离散度"一端
+    （其极限即标量 β），λ_d < λ_c 反之。`lambda_mode="relative"` 时两者
+    都按同一平均曲率缩放。
 
     规范化后等价于 `A w = b` 在**箱约束**上的投影，其中
     `A = GᵀG + λ_eff·I`、`b = Gᵀ·target + λ_eff·1`。
@@ -197,14 +218,24 @@ def nonneg_ridge_pgd(
     B = G.shape[1]
     A_data = G.T @ G
     if lambda_mode == "relative":
-        lam = lambda_reg * float(torch.diagonal(A_data).mean().item())
+        curvature = float(torch.diagonal(A_data).mean().item())
+        lam_c = lambda_reg * curvature
+        lam_d = lam_c if lambda_disp is None else lambda_disp * curvature
     elif lambda_mode == "absolute":
-        lam = lambda_reg
+        lam_c = lambda_reg
+        lam_d = lam_c if lambda_disp is None else lambda_disp
     else:
         raise ValueError(f"未知 lambda_mode: {lambda_mode}（可选 absolute / relative）")
+    lam = lam_c                     # 保留旧字段名，语义见 diag 的两个新字段
 
-    A = A_data + lam * torch.eye(B, dtype=G.dtype)
-    b = G.T @ target + lam * torch.ones(B, dtype=G.dtype)
+    # λ‖w − 1‖² = λ_c·B(c−1)² + λ_d‖w − c·1‖²（两项正交，故 A 可加性分解）：
+    #     A = GᵀG + λ_d·I + ((λ_c − λ_d)/B)·1·1ᵀ ,   b = Gᵀm + λ_c·1
+    # λ_d = λ_c 时第二项是严格零矩阵 ⇒ A、b 与旧实现逐位相同。
+    # 可解释性：沿 1 方向的特征值 = λ_c，沿 1⊥ 方向 = λ_d。
+    ones = torch.ones(B, dtype=G.dtype)
+    A = (A_data + lam_d * torch.eye(B, dtype=G.dtype)
+         + ((lam_c - lam_d) / B) * torch.outer(ones, ones))
+    b = G.T @ target + lam_c * ones
 
     # Lipschitz 常数 = A 的最大特征值
     try:
@@ -231,6 +262,8 @@ def nonneg_ridge_pgd(
         "solver_iters": n_used,
         "solver_lipschitz": L,
         "solver_lambda_eff": lam,
+        "solver_lambda_const": lam_c,
+        "solver_lambda_disp": lam_d,
         "solver_curvature": float(torch.diagonal(A_data).mean().item()),
         "solver_residual": resid,
         "w_lower": float(w_lower),
@@ -376,6 +409,7 @@ def fit_logit_bias_variant(
     shift: float = 0.0,
     solver: str = "pgd",
     lambda_mode: str = "relative",
+    lambda_disp: Optional[float] = None,
     w_lower: float = 0.0,
     w_upper: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -422,6 +456,7 @@ def fit_logit_bias_variant(
     if solver == "pgd":
         w, sdiag = nonneg_ridge_pgd(G, m, lambda_reg=lambda_reg,
                                     lambda_mode=lambda_mode,
+                                    lambda_disp=lambda_disp,
                                     w_lower=w_lower, w_upper=w_upper)
     elif solver == "repo_legacy":
         w = _legacy_nonneg_least_squares(G, m, lambda_reg=lambda_reg)
@@ -519,6 +554,7 @@ def build_compact_kv_variant(
     projection_dim: int = 32,
     lambda_beta: float = 1e-3,
     lambda_value: float = 1e-3,
+    lambda_disp: Optional[float] = None,
     seed: int = 42,
     w_lower: float = 0.0,
     w_upper: Optional[float] = None,
@@ -553,6 +589,7 @@ def build_compact_kv_variant(
         repr_queries, compact_keys, logits_orig,
         mass_target=cfg["mass"], lambda_reg=lambda_beta, shift=shift,
         solver=cfg["solver"], lambda_mode=cfg["lam"],
+        lambda_disp=lambda_disp,
         w_lower=w_lower, w_upper=w_upper,
     )
 

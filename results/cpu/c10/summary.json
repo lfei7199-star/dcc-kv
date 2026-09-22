@@ -12,27 +12,27 @@
       {
         "causal": true,
         "dense_absmax": 2.2650642924644617,
-        "fastkv_maxdiff": 1.121353205474043,
+        "fastkv_maxdiff": 1.2497805923141945,
         "apb_maxdiff": 1.6867791023303527
       },
       {
         "causal": false,
         "dense_absmax": 0.5281829469743575,
-        "fastkv_maxdiff": 0.23973934424500798,
+        "fastkv_maxdiff": 0.4069498755116306,
         "apb_maxdiff": 0.6029584193063218
       }
     ]
   },
   "d2_error_decomposition": {
     "causal_True": {
-      "src_fast_kv_maxdiff": 1.121353205474043,
-      "ref_regressed_v_maxdiff": 1.121353205474043,
-      "ref_exact_v_maxdiff": 0.013631240279850632
+      "src_fast_kv_maxdiff": 1.2497805923141945,
+      "ref_regressed_v_maxdiff": 1.2497805923141945,
+      "ref_exact_v_maxdiff": 0.012125921203962164
     },
     "causal_False": {
-      "src_fast_kv_maxdiff": 0.23973934424500798,
-      "ref_regressed_v_maxdiff": 0.23973934424500798,
-      "ref_exact_v_maxdiff": 0.00755860798981739
+      "src_fast_kv_maxdiff": 0.4069498755116306,
+      "ref_regressed_v_maxdiff": 0.4069498755116306,
+      "ref_exact_v_maxdiff": 0.00684694372423944
     },
     "selected_indices_is_identity": true,
     "fastkv_config": {
