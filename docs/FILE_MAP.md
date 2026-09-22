@@ -1,10 +1,10 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**180** 个受控文件 = 77 `.py` / 30 `.csv` / 25 `.json` /
-> 19 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
+> 统计口径：`git ls-tree -r HEAD`（**184** 个受控文件 = 77 `.py` / 31 `.csv` / 26 `.json` /
+> 21 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
 > `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
-> 不含编译产物与本地素材（见 §9）。其中 **61 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
+> 不含编译产物与本地素材（见 §9）。其中 **63 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
 > （决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
 > **2026-09-20 新增 11 个受控文件**：G1 算子核、G3 基线向量化算子、G2 桥接层、G5 评测集转换器，以及对应的 7 个锚点文件（含 2026-09-18 自查与 2026-09-20 对抗性审查各一份）。
@@ -26,6 +26,15 @@
 > `code-and-files-guide.md` / `experiments/README.md`）。
 > **本文件的「行数」字段在历次局部更新中会累积陈旧值** —— 每轮只刷新当时被改动的
 > 那些，其余保持旧值不变，故引用前请以文件实际内容为准。
+> ⚠️ **2026-09-22 第五次更新（`39063e7`）**：**新增 4 个受控文件**（仓库 180 → 184）——
+> `reports/2026-09-22-theory-code-consistency-audit.md`、
+> `reports/2026-09-22-lambda-zero-and-interval-verdicts.md` 与
+> `results/cpu/e9_L2048/{rows.csv,summary.json}`（故 `results/` 计数 61 → 63）。
+> 同轮按实测刷新 3 处行数（`representative_query.py` / `beta_variants.py` /
+> `test_dist_equivalence.py`，见 §2.2 与 §4），并修正该轮报告自身的一处行数误记
+> —— 原稿把 `git diff --stat` 的**总变更行数**（54 / 45 / 53）当成了「+行数」，
+> 且 `representative_query.py` 计数含了一个随后删掉的空行（PEP8 E303）。
+> 三处均已改成与 `git diff --numstat` 逐项对齐的实测值。
 
 
 ---
@@ -84,7 +93,7 @@
 |---|---|---|
 | `__init__.py` | 82 | 汇总导出 **27** 个公开符号（见各模块） |
 | `online_softmax.py` | 176 | Online Softmax 状态机与归并算子 ⊕。`OnlineSoftmaxState`、`online_softmax_from_attention`、`merge_softmax_states(_list)`、`attention_output_from_state`、`verify_order_invariance`。**归并要求两侧 `d_v` 相同** |
-| `representative_query.py` | 124 | 目的端代表 Query 选取。最远点采样（`farthest_point_sampling`）、Rademacher 投影（`rademacher_projection`）、`select_representative_queries` |
+| `representative_query.py` | 142 | 目的端代表 Query 选取。最远点采样（`farthest_point_sampling`）、Rademacher 投影（`rademacher_projection`）、`select_representative_queries`。**2026-09-22（`39063e7`）**：FPS 起点默认 `newest`（服从论文 eq.(11)「以最新 Query 为初始锚点」，0-based 的 `N-1`），旧行为留在 `start="random"`；复杂度改为**增量维护 `min_dist`**，不再预计算 `N×N` 相似度矩阵（`L_r=10^5` 时需 37 GB），与 §4.2 声明的 `O(M·L_r·d_p)` 一致 |
 | `key_selection.py` | 64 | 选键。per-token RMS 打分（`rms_per_token_score`）+ `select_topk_keys`。`budget >= L_s` 时短路返回全部键与索引 |
 | `calibration.py` | 232 | **β（质量偏置）拟合**。`DEFAULT_BETA_BOUND = 3.0`（箱约束，默认生效）、`DEFAULT_LAMBDA_BETA`、`nonneg_least_squares`（箱约束求解器，非旧版纯 NNLS）、`fit_logit_bias` |
 | `value_regression.py` | 98 | 紧凑 V 的岭回归拟合。`ridge_regression_value`、`fit_compact_value` |
@@ -138,7 +147,7 @@
 | `synthetic.py` | 854 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等）。`mass_error` 已标废弃，公开偏移版本为 `absolute_mass_error`（列名 `eps_mass_abscommon_*`） |
 | `report.py` | 390 | 结果汇总：`summarize`（median / p5 / p95 / bootstrap CI）、配对检验、`save_json` / `save_csv` |
 | `hypotheses.py` | 825 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`）。2026-09-16 新增 H2 前提「质量相近」的判定程序 `quality_comparable_non_inferior`（入参显式含 `delta_pp` / `noise_floor_pp`，越出可行区间即 `ValueError` 而**拒绝执行**）与两个常量（`QUALITY_COMPARABLE_REFERENCE = "dense"`、非劣边界上界 = 1.5 pp）。2026-09-16 补 H2 的**跨长度聚合入口** `h2_pass_across_lengths`（逐长度分别判定、全通过才成立；前提未定记 `unresolved` 而非 `failed`），已接入 `e6_main_table.py` |
-| `beta_variants.py` | 652 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解） |
+| `beta_variants.py` | 689 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解）。**2026-09-22（`39063e7`，上一轮写出）**：`nonneg_ridge_pgd` 增 `lambda_disp`，把岭惩罚正交分解为「块级常数」与「per-key 离散度」两项；默认 `None` ⇒ **逐位兼容旧实现** |
 
 ### 3.2 `experiments/cpu/` —— 机制级实验（任意多核机器可复现，无需权重/NCCL）
 
@@ -189,7 +198,7 @@
 | `__init__.py` | 2 | 声明测试包 |
 | `test_smoke.py` | 477 | 冒烟测试：核心 API 的形状与数值 sanity（含 `recv_sizes` 声明不符必须报错的 2 进程 gloo 锚点） |
 | `test_phase_a.py` | 239 | Phase A（多进程 + 通信原语）验收 |
-| `test_dist_equivalence.py` | 402 | 分布式等价性（含 2 进程 gloo 真实测试，标记 `distributed`） |
+| `test_dist_equivalence.py` | 448 | 分布式等价性（含 2 进程 gloo 真实测试，标记 `distributed`）。**2026-09-22（`39063e7`）**：新增 `test_fps_start_follows_paper`（结构性断言：首点 = `N-1`、与 seed 无关、不重复、非法模式抛 `ValueError`）；FastKV 越界阈值 0.30 → 0.49（先重跑 `c10_baseline_diagnosis.py` 更新落盘，再按该测试自身约定改阈值） |
 | `test_var_len_msg.py` | 97 | 变长消息协议 |
 | `test_experiment_metadata.py` | 100 | 元数据与结果 schema 的字段契约 |
 | `test_hypotheses.py` | 254 | **H1–H5 阈值表的锚点**：H2 的双条件口径（2026-09-15 裁决）、H1 用严格大于而其余用闭区间、`UNJUDGED` 缺口记录、以及"e5 不得硬编码 H4 阈值"与"e3 不得硬编码 H1 阈值"的源码级断言。2026-09-16 补 7 个锚点覆盖「质量相近」判定程序（参照物、两个上界、数据依赖上界、单侧严格性、正数校验、返回原生 bool） |
@@ -279,6 +288,8 @@
 |---|---|---|
 | `2026-09-16-progress-report.md` | 200 | **进展汇报**（面向师姐）。一句话结论（论文非 GPU 内容已收口 + 当前仍不能租卡）、今日 6 项完成项（附证据）、论文/代码/证据三层状态快照、4 条风险、待完成事项分「CPU 可做 / 需租卡 / 需外部输入」、下一步计划、自查命令附录 |
 | `code-and-files-guide.md` | 370 | **代码与文件说明**。面向第一次接触仓库的人：怎么用本文档、项目做什么与**原创边界**、五分钟上手、目录总览、`src/` 逐模块、`experiments/` 逐脚本（含 15 个 CPU 实验一览）、测试的定位、论文与排版注意、`results/` 产物约定、`docs/` 各文件作用、**§10 已知缺口与诚实边界**（含引用数字的三条禁令） |
+| `2026-09-22-theory-code-consistency-audit.md` | 246 | **理论—实现一致性审计**（2026-09-22）。以 AM 原文（`2602.16284`）＋桌面 `AuthorKit27 (1).pdf` 为标尺，逐节对齐机制 / 口径 / 证据区间，查出 **8 处不一致（F1–F8）** 并列**三项待裁（Q1–Q3）** |
+| `2026-09-22-lambda-zero-and-interval-verdicts.md` | 302 | **Q1–Q3 裁决的落地与证据**（2026-09-22）。Q1：`λ=0` 非绝对限制但实测更差（超定域也差 4.3%）⇒ 维持 `3e-2`；Q2b：E9 搬进声明区间（`results/cpu/e9_L2048/`），M 主导性 1.83× → **3.23×**；Q3：FPS 起点 / 复杂度按论文改代码、箱约束实测 0.038% 保留。文末列**三项待裁** |
 
 ---
 
@@ -325,7 +336,7 @@
 | `scripts/.patch_*.py` | 一次性补丁脚本（2026-09-17 的 G2/G4 补丁 5 个）。按 G2 体例**不入库** —— 它们承载的结论已补记进 `docs/commit_log.md`。留在工作区仅供溯源，**任何一次 `git add -A` 都会把它们误收**（见 §10） |
 | `models/`、`data/`、`traces/` | 权重、数据集、profiling trace —— 由根 `.gitignore` 显式排除（体积大、可能涉许可） |
 
-> **`results/` 已不再属于本节。** 自 2026-09-16 起它**入库**（61 个文件；`results/cpu/**` 全部 + `results/gpu/e8_cpu_reduced/**`），由根 `.gitignore` 末尾的 `!results/**` 显式放行 —— 目的是让论文中每个 CPU 数字都能随仓库复现。
+> **`results/` 已不再属于本节。** 自 2026-09-16 起它**入库**（63 个文件；`results/cpu/**` 全部 + `results/gpu/e8_cpu_reduced/**`），由根 `.gitignore` 末尾的 `!results/**` 显式放行 —— 目的是让论文中每个 CPU 数字都能随仓库复现。
 > 两条须知：① 该规则的**位置有约束**，必须排在 LaTeX 段的 `*.log` 之后，否则 `results/cpu/*_run.log` 仍会被挡掉；② `results/gpu/e8_cpu_reduced/` 是 **CPU 缩规模下的通路验证**，不是 GPU 机器上的实测。体积策略见 `docs/git_strategy.md` §8.1。
 
 ---

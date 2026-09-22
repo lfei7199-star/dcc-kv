@@ -148,6 +148,11 @@ python experiments/cpu/e12_representative_query.py --out results/cpu/e12
 python experiments/cpu/e13_bound_tightness.py       --out results/cpu/e13
 # E3 默认按留出协议；--protocol in-sample 仅用于复现历史数字（不得作 H2 证据）
 python experiments/cpu/e3_edge_conditioning.py      --out results/cpu/e3
+# E9 有两套落盘：results/cpu/e9/（旧区间 L_s=256，B/L_s 最大 0.50）与
+# results/cpu/e9_L2048/（论文声明区间 B/L_s <= 0.05，2026-09-22 新增）
+python experiments/cpu/e9_knob_localization.py --out results/cpu/e9_L2048 \
+  --L-s 2048 --queries-per-dest 2048 --Ms 4 8 16 32 48 96 192 \
+  --budgets 8 16 32 64 100 --num-dest 3 --seeds 5
 ```
 
 CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一一对应。
@@ -158,6 +163,15 @@ CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一
 平衡树相对顺序归并**没有系统性方向**（$12$ 格中 $7$ 格不劣、$5$ 格更差），
 故该规模下误差量级由浮点精度而非归并结构支配。**E3 的旧样本内落盘保留在
 `results/cpu/e3_in_sample/`，仅供口径对照，不得作为 H2 的证据。**
+
+> **E9 的两套区间（2026-09-22 补）**：论文 §5 声明 `B ≪ L_s` 与 `M ≪ L_r`，
+> 而 `results/cpu/e9/` 旧落盘落在 `B/L_s ∈ [0.031, 0.50]`（`B>M` 占 64%）、
+> `M`/拟合池 ≤ 75% —— **两轴同时偏离且方向相反**。因此新增
+> `results/cpu/e9_L2048/`（`L_s=2048`、`B/L_s = 0.0039–0.0488`、525 格），
+> **旧落盘未改动，两者并列**：新区间把沿 B 的改善由 0.3039 压到 0.1364、沿 M 由
+> 0.5565 压到 0.4407 ⇒ M 主导性由 1.83× 升到 **3.23×**，即「**B 定可达上界、
+> M 定能否触及**」在声明区间被**强化**。两套区间是否在论文 §6 并列报告，见
+> `reports/2026-09-22-lambda-zero-and-interval-verdicts.md` §5 的待裁项 3。
 
 ## 6. 预期结果
 
