@@ -606,6 +606,11 @@ def print_asymptote(rows: List[Dict[str, Any]],
     print("  max|Δ| / β_std（各档）："
           + "，".join(f"{r:.2f}" for r in ratios))
     print(f"  → {res['verdict']}")
+    # 2026-09-22 工程审查衍生缺陷：本函数原先只打印、**不返回** `res`，
+    # 而调用方把返回值直接写入 summary["asymptote_check"] ⇒ 落盘恒为 null，
+    # 论文 §6 引用的 "max|Δ| ≤ 1.61·β_std" 因而**无任何落盘支撑**（与 F5 同类）。
+    # 返回后该结论由落盘可复算；调用方另加断言，防止再次静默丢值。
+    return res
 
 
 # =============================================================================
@@ -790,6 +795,9 @@ def main(argv: List[str] | None = None) -> int:
     argmin_stats = print_argmin_table(rows)
     win_counts = print_win_counts(rows)
     asymptote = print_asymptote(rows)
+    if asymptote is None:   # 防回归：见 print_asymptote 末尾注释（曾静默落盘 null）
+        raise RuntimeError(
+            "print_asymptote() 未返回 dict ⇒ asymptote_check 会静默落盘为 null")
     crosscheck = print_crosscheck(rows, enabled=not args.quick)
     paired = run_paired(rows) if args.paired else {}
 

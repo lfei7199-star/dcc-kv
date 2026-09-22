@@ -30,7 +30,7 @@ import argparse
 import pathlib
 import subprocess
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -186,7 +186,10 @@ def run(args) -> Dict[str, Any]:
     return {"experiment": "E4", "rows": rows}
 
 
-def run_existing_tests() -> Dict[str, Any]:
+def run_existing_tests(
+    targets: Optional[List[str]] = None,
+    cwd: Optional[str] = None,
+) -> Dict[str, Any]:
     """调用仓库已有的多进程等价性测试，把结果并入报告。
 
     真 2 进程 gloo 的 all_reduce / broadcast / 变长 all_to_all_v 由这些
@@ -204,20 +207,26 @@ def run_existing_tests() -> Dict[str, Any]:
 
     这样"转发测试失败"这一事件在产物内部就是自解释的，不需要依赖
     外部日志或人工记忆。
+
+    ``targets`` / ``cwd`` 只为**测试注入**而开放（默认即现状），
+    使非零返回码这条路径能在本机真跑出来，而不是只做源码字符串检查。
     """
-    targets = [
-        "tests/test_dist_equivalence.py",
-        "tests/test_var_len_msg.py",
-    ]
+    if targets is None:
+        targets = [
+            "tests/test_dist_equivalence.py",
+            "tests/test_var_len_msg.py",
+        ]
+    workdir = str(REPO_ROOT) if cwd is None else cwd
     argv = [sys.executable, "-m", "pytest", *targets, "-q", "--no-header"]
     base: Dict[str, Any] = {
-        "targets": targets,
+        "targets": list(targets),
         "command": " ".join(argv),
+        "cwd": workdir,
         "pass_criterion": "returncode == 0；非零即视为未通过，不得写作「E4 通过」。",
     }
     try:
         proc = subprocess.run(
-            argv, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=900,
+            argv, cwd=workdir, capture_output=True, text=True, timeout=900,
         )
         tail = "\n".join((proc.stdout or "").strip().splitlines()[-6:])
         err_tail = "\n".join((proc.stderr or "").strip().splitlines()[-12:])
