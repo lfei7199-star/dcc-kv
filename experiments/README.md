@@ -64,7 +64,7 @@ python experiments/cpu/e3_edge_conditioning.py --out results/cpu/e3
 
 关于第 1–3 条的一个可检验推论：**紧凑 KV 的真正瓶颈是 M（代表 Query 数），
 不是 B（预算）。** 这与论文当前把 B 当作主要旋钮的叙述有出入 —— 该推论已由
-E9（375 格 M×B 扫描）落实为"两轴职责不同、必须同时扫"，见 `docs/commit_log.md`。
+E9（525 格 M×B 扫描（`L_s=2048`、`B/L_s <= 0.05`））落实为"两轴职责不同、必须同时扫"，见 `docs/commit_log.md`。
 
 第 4–5 条的 device 缺陷（连同 `key_selection.py` 里同类的一处）已在 `5b5ce98`
 与本次审计中修复。**但本机无 CUDA，这是静态审计结论**：是否真正可用，须由

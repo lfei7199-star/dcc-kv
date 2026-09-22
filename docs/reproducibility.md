@@ -148,9 +148,11 @@ python experiments/cpu/e12_representative_query.py --out results/cpu/e12
 python experiments/cpu/e13_bound_tightness.py       --out results/cpu/e13
 # E3 默认按留出协议；--protocol in-sample 仅用于复现历史数字（不得作 H2 证据）
 python experiments/cpu/e3_edge_conditioning.py      --out results/cpu/e3
-# E9 有两套落盘：results/cpu/e9/（旧区间 L_s=256，B/L_s 最大 0.50）与
-# results/cpu/e9_L2048/（论文声明区间 B/L_s <= 0.05，2026-09-22 新增）
-python experiments/cpu/e9_knob_localization.py --out results/cpu/e9_L2048 \
+# E9 必须显式给参数：脚本默认仍是旧区间（L_s=256、B<=128、fit 池 64），
+# 默认值下的落盘落在 B/L_s 最大 0.50，与论文 §5 声明的 B << L_s 量级不符，
+# 因此不能作论文依据。本节这套参数才是论文用的是那一套
+# （B/L_s = 0.0039-0.0488、525 格；本机实测约 2-3 小时）
+python experiments/cpu/e9_knob_localization.py --out results/cpu/e9 \
   --L-s 2048 --queries-per-dest 2048 --Ms 4 8 16 32 48 96 192 \
   --budgets 8 16 32 64 100 --num-dest 3 --seeds 5
 ```
@@ -164,14 +166,17 @@ CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一
 故该规模下误差量级由浮点精度而非归并结构支配。**E3 的旧样本内落盘保留在
 `results/cpu/e3_in_sample/`，仅供口径对照，不得作为 H2 的证据。**
 
-> **E9 的两套区间（2026-09-22 补）**：论文 §5 声明 `B ≪ L_s` 与 `M ≪ L_r`，
-> 而 `results/cpu/e9/` 旧落盘落在 `B/L_s ∈ [0.031, 0.50]`（`B>M` 占 64%）、
-> `M`/拟合池 ≤ 75% —— **两轴同时偏离且方向相反**。因此新增
-> `results/cpu/e9_L2048/`（`L_s=2048`、`B/L_s = 0.0039–0.0488`、525 格），
-> **旧落盘未改动，两者并列**：新区间把沿 B 的改善由 0.3039 压到 0.1364、沿 M 由
-> 0.5565 压到 0.4407 ⇒ M 主导性由 1.83× 升到 **3.23×**，即「**B 定可达上界、
-> M 定能否触及**」在声明区间被**强化**。两套区间是否在论文 §6 并列报告，见
-> `reports/2026-09-22-lambda-zero-and-interval-verdicts.md` §5 的待裁项 3。
+> **E9 的区间与替换（2026-09-22 定案，`ad2f091`）**：论文 §5 声明 `B ≪ L_s`、`M ≪ L_r`，
+> 而旧 `results/cpu/e9/` 落在 `B/L_s ∈ [0.031, 0.50]`（`B>M` 占 64%）——
+> 与声明区间的量级相反。裁决取「**替换**」：重跑并替换 `results/cpu/e9/`
+> （`L_s=2048`、`B/L_s = 0.0039–0.0488`、525 格、7×5×3×5）；旧落盘归档到工作区外
+> `_archive/results_cpu_e9_L256_2026-09-22/`，**不再作为论文依据**。
+> 新区间测得：沿 M 平均改善 **0.4207**、沿 B **0.1456** ⇒ M/B 比值 **2.89×**。
+>
+> ⚠️ **2026-09-22 之前短暂存在的 `results/cpu/e9_L2048/` 已删除**：它是 **FPS 起点
+> 改动之前**的产物（改动 `representative_query.py` 后按同一规格重跑，60 格中
+> **642 个字段不同**），故其 `0.4407 / 0.1364 / 3.23×` 一组数字**不可复现、已作废**。
+> 归档于 `_archive/results_cpu_e9_L2048_stale_2026-09-22/`。
 
 ## 6. 预期结果
 

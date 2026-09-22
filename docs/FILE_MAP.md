@@ -29,12 +29,22 @@
 > ⚠️ **2026-09-22 第五次更新（`39063e7`）**：**新增 4 个受控文件**（仓库 180 → 184）——
 > `reports/2026-09-22-theory-code-consistency-audit.md`、
 > `reports/2026-09-22-lambda-zero-and-interval-verdicts.md` 与
-> `results/cpu/e9_L2048/{rows.csv,summary.json}`（故 `results/` 计数 61 → 63）。
+> `results/cpu/e9/{rows.csv,summary.json}`（故 `results/` 计数 61 → 63）——
+> **该目录 `e9_L2048/` 已于 `ad2f091` 删除并归档，见第六次更新。**
 > 同轮按实测刷新 3 处行数（`representative_query.py` / `beta_variants.py` /
 > `test_dist_equivalence.py`，见 §2.2 与 §4），并修正该轮报告自身的一处行数误记
 > —— 原稿把 `git diff --stat` 的**总变更行数**（54 / 45 / 53）当成了「+行数」，
 > 且 `representative_query.py` 计数含了一个随后删掉的空行（PEP8 E303）。
 > 三处均已改成与 `git diff --numstat` 逐项对齐的实测值。
+> ⚠️ **2026-09-22 第六次更新（`ad2f091`）**：**删除 2 个、新增 1 个受控文件**
+> （仓库 184 → **183**）—— 删除 `results/cpu/e9_L2048/{rows.csv,summary.json}`
+> （FPS 起点改动**之前**的产物、不可复现，归档于工作区外
+> `_archive/results_cpu_e9_L2048_stale_2026-09-22/`；同轮 `results/cpu/e9/` 被
+> 声明的 `L_s=2048` 区间**替换**，旧值归档于 `_archive/results_cpu_e9_L256_2026-09-22/`），
+> 新增 `docs/author_kit27_deviation_log.md`（故 `results/` 计数 63 → **61**、
+> `docs/` 8 → **9**）。同轮把 §2.2 的 `e9_knob_localization.py` 说明由「375 格」
+> 改为「525 格（`L_s=2048`）」，并刷新被本轮改动文件的实测行数。
+>
 
 
 ---
@@ -161,7 +171,7 @@
 | `probe_e3_heldout.py` | 226 | **E3 留出集判定探针**（一次性，保留以便复现）：同场景并排跑 in-sample 与 heldout 两套口径，只打印不写结果。结论：负对照上样本内口径造出 +0.156 的假优势；主线 \|Δ\| 缩水约 31%；方向稳定性 20/20 → 18/20 |
 | `e4_dist_equivalence.py` | 283 | 分布式等价性（单进程 mock） |
 | `e5a_mechanism_ablation.py` | 234 | A3 的机制级版本（重构误差口径，对应 GPU 版的任务指标口径）；落 `results/cpu/a3/`，用 `absolute_mass_error` |
-| `e9_knob_localization.py` | 389 | **M–B 旋钮定位**：375 格扫描，分离"可达上界（B）"与"能否触及上界（M）" |
+| `e9_knob_localization.py` | 389 | **M–B 旋钮定位**：525 格扫描（`L_s=2048`、`B/L_s<=0.05`），分离"可达上界（B）"与"能否触及上界（M）" |
 | `e10_beta_stability.py` | 656 | **β 稀疏塌缩**的定位与修复；把 β 分解为"块级常数分量（收益）"与"per-key 离散分量（代价）" |
 | `e11_lambda_tuning.py` | 774 | λ_β 调参（尺度无关的相对正则强度） |
 | `e12_representative_query.py` | 421 | **代表 Query 投影维度 $d_p$** 的扫描（`$d_p\in\{4,8,16,32,64\}$` + 无投影参照），报 JL 畸变 / 覆盖率 / 下游误差；5 种子 + 留出 |
@@ -289,7 +299,7 @@
 | `2026-09-16-progress-report.md` | 200 | **进展汇报**（面向师姐）。一句话结论（论文非 GPU 内容已收口 + 当前仍不能租卡）、今日 6 项完成项（附证据）、论文/代码/证据三层状态快照、4 条风险、待完成事项分「CPU 可做 / 需租卡 / 需外部输入」、下一步计划、自查命令附录 |
 | `code-and-files-guide.md` | 370 | **代码与文件说明**。面向第一次接触仓库的人：怎么用本文档、项目做什么与**原创边界**、五分钟上手、目录总览、`src/` 逐模块、`experiments/` 逐脚本（含 15 个 CPU 实验一览）、测试的定位、论文与排版注意、`results/` 产物约定、`docs/` 各文件作用、**§10 已知缺口与诚实边界**（含引用数字的三条禁令） |
 | `2026-09-22-theory-code-consistency-audit.md` | 246 | **理论—实现一致性审计**（2026-09-22）。以 AM 原文（`2602.16284`）＋桌面 `AuthorKit27 (1).pdf` 为标尺，逐节对齐机制 / 口径 / 证据区间，查出 **8 处不一致（F1–F8）** 并列**三项待裁（Q1–Q3）** |
-| `2026-09-22-lambda-zero-and-interval-verdicts.md` | 302 | **Q1–Q3 裁决的落地与证据**（2026-09-22）。Q1：`λ=0` 非绝对限制但实测更差（超定域也差 4.3%）⇒ 维持 `3e-2`；Q2b：E9 搬进声明区间（`results/cpu/e9_L2048/`），M 主导性 1.83× → **3.23×**；Q3：FPS 起点 / 复杂度按论文改代码、箱约束实测 0.038% 保留。文末列**三项待裁** |
+| `2026-09-22-lambda-zero-and-interval-verdicts.md` | 302 | **Q1–Q3 裁决的落地与证据**（2026-09-22）。Q1：`λ=0` 非绝对限制但实测更差（超定域也差 4.3%）⇒ 维持 `3e-2`；Q2b：E9 搬进声明区间（现为 `results/cpu/e9/`），M 主导性 1.83× → **2.89×**（⚠️ 报告正文的 0.4407/0.1364/3.23× 取自已删除的 `e9_L2048/`，**已被 `ad2f091` 修正**）；Q3：FPS 起点 / 复杂度按论文改代码、箱约束实测 0.038% 保留。文末列**三项待裁** |
 
 ---
 
