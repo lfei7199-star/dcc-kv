@@ -1,11 +1,14 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**184** 个受控文件 = 77 `.py` / 31 `.csv` / 26 `.json` /
-> 21 `.md` / 10 `.tex` / 6 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
+> 统计口径：`git ls-tree -r HEAD`（**194** 个受控文件 = 81 `.py` / 30 `.csv` / 29 `.json` /
+> 23 `.md` / 10 `.tex` / 8 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
 > `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
-> 不含编译产物与本地素材（见 §9）。其中 **63 个是 `results/` 实验产物 —— 自 2026-09-16 起入库**
-> （决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
+> 不含编译产物与本地素材（见 §9）。其中 **68 个在 `results/` 下（30 `.csv` + 29 `.json` +
+> 8 `.log` + 1 `.md`）—— 自 2026-09-16 起入库**（决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
+> ⚠️ **2026-09-30 按提交后实测刷新**：本段数字自第五次更新（`184`）后**未再同步** ——
+> 实测**提交前 HEAD 已是 `192`**（差额来自第 37–40 条累积的文件增删），本次新增 2 个 `.py`
+> ⇒ `194`。刷新前的分布为 `77 / 31 / 26 / 21 / 6 / 63`（在本文件中保留，供对账）。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
 > **2026-09-20 新增 11 个受控文件**：G1 算子核、G3 基线向量化算子、G2 桥接层、G5 评测集转换器，以及对应的 7 个锚点文件（含 2026-09-18 自查与 2026-09-20 对抗性审查各一份）。
 > **2026-09-21 新增 2 个受控文件**：`src/distributed/attention_hook.py`（H0 的方法侧 —— 把 G1 的算子核挂进真实模型 attention 的钩子）与其锚点 `tests/test_attention_hook.py`。同日一并修了两处实现缺陷（见下）并把 I 组守卫的扫描面从 `tests/test_*.py` 扩到**仓库内任意 `.py` 引用**。
@@ -44,6 +47,13 @@
 > 新增 `docs/author_kit27_deviation_log.md`（故 `results/` 计数 63 → **61**、
 > `docs/` 8 → **9**）。同轮把 §2.2 的 `e9_knob_localization.py` 说明由「375 格」
 > 改为「525 格（`L_s=2048`）」，并刷新被本轮改动文件的实测行数。
+>
+> ⚠️ **2026-09-30 第七次更新**：**新增 2 个受控文件**（`experiments/common/discrimination.py`
+> 与 `tests/test_discrimination.py`）—— 落地用户裁定的**量具判据**（`writing_scope_and_metrics.md`
+> §5 第 8 条），并同步 §5 第 4 条的显式修订。§3.1 / §4 已登记其条目与实测行数；
+> 顶部「统计口径」与 `commit_log.md` 的「仓库当前规模」两处 **HEAD 口径**数字
+> **已按本次提交后实测刷新为 `194`**（明细见顶部 ⚠️ 注记）。同轮刷新
+> `writing_scope_and_metrics.md` 的实测行数（181 → **210**）。
 >
 
 
@@ -157,6 +167,7 @@
 | `synthetic.py` | 854 | 合成场景生成、完整注意力参考、误差与分布度量（含 KL / JS 等）。`mass_error` 已标废弃，公开偏移版本为 `absolute_mass_error`（列名 `eps_mass_abscommon_*`） |
 | `report.py` | 390 | 结果汇总：`summarize`（median / p5 / p95 / bootstrap CI）、配对检验、`save_json` / `save_csv` |
 | `hypotheses.py` | 825 | **H1–H5 阈值的单一事实源**（blueprint §3 的机器可读版）：阈值本体 + `h1_pass`…`h5_pass` + `HYPOTHESES` 注册表 + `UNJUDGED`（尚未接判据的假设，现为 `{H2,H3,H5}`）。2026-09-16 新增 H2 前提「质量相近」的判定程序 `quality_comparable_non_inferior`（入参显式含 `delta_pp` / `noise_floor_pp`，越出可行区间即 `ValueError` 而**拒绝执行**）与两个常量（`QUALITY_COMPARABLE_REFERENCE = "dense"`、非劣边界上界 = 1.5 pp）。2026-09-16 补 H2 的**跨长度聚合入口** `h2_pass_across_lengths`（逐长度分别判定、全通过才成立；前提未定记 `unresolved` 而非 `failed`），已接入 `e6_main_table.py` |
+| `discrimination.py` | 418 | **「本条对照可否用于比较」判据的单一事实源**（2026-09-30 用户裁定新增）：判据 = **不一致对 > 0 且（方向不对称 或 参照臂两端都有余量）**。含 `mcnemar_exact_p`（精确双尾，`b+c=0` 时**拒绝执行**）、`discrimination_verdict`（返回原始统计量 / 三条判据分量 / `grade` / `licence` 四层结果）、`discrimination_verdict_from_arms`（直接吃 `niah_eval*.json` 的 `arms`）。三个登记常量：`DISCRIMINATION_ALPHA = 0.05`、`DISCRIMINATION_CI_LEVEL = 0.95`、`REF_HEADROOM_MIN_ACC = 0.10`。⚠️ 两处刻意设计：①`required_resolution_pp` **必填无默认值**；②`resolution_halfwidth_pp` 是**分辨率读数、不是可推断的置信区间**（推断以 `p_value` 为准；`b=0,c=4,n=20` 是实测反例）。与 `hypotheses.py` 分工：那个管**假设判据**、这个管**量具判据** |
 | `beta_variants.py` | 689 | β 的各种口径变体与对照（per-key / 标量 / 关闭 β 分解）。**2026-09-22（`39063e7`，上一轮写出）**：`nonneg_ridge_pgd` 增 `lambda_disp`，把岭惩罚正交分解为「块级常数」与「per-key 离散度」两项；默认 `None` ⇒ **逐位兼容旧实现** |
 
 ### 3.2 `experiments/cpu/` —— 机制级实验（任意多核机器可复现，无需权重/NCCL）
@@ -222,6 +233,7 @@
 | `test_a4_interaction.py` | 409 | **G4（A4 压缩 × 异步交互）的锚点**。A4 是**唯一**把测量与判定都放在设备无关路径上的消融，故本文件用 stub **真跑一遍** `a4_interaction_grid` 而非只查字符串（字符串检查挡不住“接线接反”）。三类锚点：判定语义、接线纪律（判据不得被重新实现、CI 水平不得硬编码）、测量正确性（A4 计算侧必须是真实算子核，T_comm/T_comp 取自同步臂） |
 | `test_selfcheck_2026_09_18.py` | 362 | **2026-09-18 自查的回归锚点**：每条对应一个已修缺陷，且都是“形状/量级/文件名都正常、不报错但结论错或永远出不来”的那一类（如 `paired_bootstrap` 方向反了、`save_csv` 遇混合行整表 `ValueError`、`h4_pass=None` 被折进“未达标”） | **2026-09-21 补（`b44a7b3`）**：T6 新增一条 —— **单卡下表里写出的 `dcc_kv` 行 `sync_async` 也是 `"n/a"`**，H2 配对必须仍能找到它（旧实现只给基线做了轴无关查找，dcc 那一侧仍按 `sync_modes[0]` 查 ⇒ 折叠后配对恒为空；这是 `bee3388` 给基线修过的同一个坑在 `dcc_kv` 身上的第二次） |
 | `test_adversarial_2026_09_20.py` | 989 | **2026-09-20 对抗性审查 + 2026-09-21 H0 接线的回归锚点**：12 处已修缺陷（D1–D12）各一条，每条先证明「它本可以不被发现」。**A 组已于 2026-09-21 改写** —— 原锁「量具失敏 ⇒ 加速比结构上恒不超 1」，现锁「目的端看到的 KV 必须等于 B、两臂唯一差别就是那个长度、漏给 `dest_len` 必须抛错、分子必须是 dense」；B 组异步臂 `comm_ms` 是上界（落 `nan` 而非 0）；C 组重复次数与 `lambda_beta` 默认值必须进产物且与项目默认**同源**；D 组用 AST 扫设备索引（`set_device(rank)` / `f"cuda:{rank}"`）；E 组双边同步次数断言；F/G 组 E8 元数据与 `json_safe`；**H 组元守卫**保证本文件自身的用例默认全部运行；**I 组（2026-09-21 新增、同日扩展）**断言源码与 `docs/*.md` 里引用的**仓库内任意 `.py` 路径**真实存在（原先只守 `tests/test_*.py`，于是 `src/distributed/attention_hook.py` 被两处源码引用却不存在这件事它看不见） | **2026-09-21 第三次更新（`b44a7b3`）**：A 组的分子由 dense 改为 **kernel-matched**（同核），并新增「缺列时不得回落 native、且不得把 nan 比成未达标」；另新增 **I4**：`docs/*.md` 里不得有**未闭合的表格行**（`FILE_MAP.md` 曾有 4 行以 ``| **G1`` 这种半截形态存在，而它的职责恰是逐项说明每个受控文件） |
+| `test_discrimination.py` | 434 | **量具判据（`experiments/common/discrimination.py`）的锚点**（2026-09-30 新增，29 项）。四类断言：①**判据字面**（用户裁定的三段式不得被改动）；②**真实黄金值** —— NIAH x20 / LongBench n=20 的逐样本对错**抄自落盘产物**（抄进来而非读文件，因为产物在 `_onetime_scripts/_out/`、**仓库测试不得依赖仓外文件**）；③**边界语义**（`b=0,c=5` 的 `p=0.0625` **不算**方向可分辨 —— 这正是 n=8 那轮把「方向复现」误当结论的坑）；④**声明↔实现绑定**（阈值只有一处赋值，用 AST 按**结构**判定而非 grep 字符串；文档必须点到该模块）。另含一条反例锚点：`b=0,c=4,n=20` 时分辨率读数 19.6 pp < `|Δ|` 20 pp 却**不显著** ⇒ 钉死「读数不是置信区间、推断以 `p_value` 为准」 |
 `tests/gpu/`（默认跳过）：
 
 | 文件 | 行数 | 内容 |
@@ -267,7 +279,7 @@
 | `git_strategy.md` | 418 | Git 管理策略：分支、commit 体例、tag、实验可追溯。§8.1 记录 **`results/` 入库**的决定与体积策略 |
 | `release_checklist.md` | 177 | 投稿前 / Camera Ready 清单。§4 是 failure_thresholds 校核（H2/H3/H4/H5）；2026-09-16 起该节附「质量相近」的定义摘要 |
 | `reproducibility.md` | 293 | 可复现性说明。§6 的 H1–H5 及其阈值：2026-09-21 起口径来源改为**论文原件（`AuthorKit27` 第 7 章）+ 仓库内机器可读实现 `hypotheses.py`**（原先声明「以 blueprint §3 为准」，该原件不在库内、已裁决不再作为权威锚点，原 C11 关闭）；2026-09-16 起附「质量相近」的完整定义摘要；H2 的 prefill 加速比分子于 2026-09-21 改判为 **dense** |
-| `writing_scope_and_metrics.md` | 181 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；7 条口径硬约束。§6 记录历次裁决的落实（D1–D6）与仍开放项。**2026-09-16 第八轮：M1/M2/M3/M5/M9 全部关闭**（见 §4 后附注）。第九轮补上 E0 的「置换次数」轴，论文 §6 里最后一条非 GPU 待补项关闭 |
+| `writing_scope_and_metrics.md` | 210 | **撰写范围与指标口径**。以第 1–4 章原始建模（桌面 `AuthorKit27 (1).pdf`）为标尺的「建模条款 → 应报指标 → 口径 → 现状 → 缺口」对照表：六个误差术语 ↔ 四个代码度量函数 ↔ §5 理论量的三方映射；缺口 M1–M9 及各自判定标准；**8 条**口径硬约束。§6 记录历次裁决的落实（D1–D6）与仍开放项。**2026-09-16 第八轮：M1/M2/M3/M5/M9 全部关闭**（见 §4 后附注）。第九轮补上 E0 的「置换次数」轴，论文 §6 里最后一条非 GPU 待补项关闭。**2026-09-30**：§5 第 4 条**显式修订**为「单一事实源有**两个**模块」（原写「一律走 `hypotheses.py`」，现按职能拆为「假设判据 `hypotheses.py` / 量具判据 `discrimination.py`」）；新增 §5 第 8 条 = 量具判据本体，并声明其**非 AuthorKit27 原件内容** |
 | `gpu_execution_plan.md` | 460 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对。**§0/§5/§6/§7 已于 2026-09-21 第二次同步**：G1–G5 已**提交**（`c9ca6b0`），**H0 已接**（`measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV` 翻正 + E6 加 `--dest-fraction`）。**未变的是结论，变了的是理由**：现在阻的是「`dcc_kv` 的构造路径还没独立」（仍与 `kv_budget_shared` 共用共享裁剪 ⇒ 质量差恒为 0）与 **G6 未做**；翻 `measurable` 仍不可以（否则得到假阳性） | ⚠️ **已被 `b44a7b3` 修正**（上句保留）：**接线已完成、`measurable` 已翻**；§0/§5/§7 已第三次同步，口径变化三条（sync 轴折叠判据推广、prefill 加速比两列、计时与评测同一份切分） |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
