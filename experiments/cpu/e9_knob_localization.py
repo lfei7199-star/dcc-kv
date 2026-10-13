@@ -60,6 +60,12 @@ from src.dcc_kv_ref.value_regression import (  # noqa: E402
 )
 
 
+# 表头标签「行 = M，列 = B」。单独成变量而非写在 f-string 表达式里：
+# 表达式内含反斜杠的写法在 Python 3.11 及以下直接是 SyntaxError，
+# 曾导致整个模块无法导入（测试收集即失败）。
+_MB_LABEL = "M\\B"
+
+
 # =============================================================================
 # 评估
 # =============================================================================
@@ -326,7 +332,7 @@ def main(argv: List[str] | None = None) -> int:
     print("-" * 78)
     print("表 1：留出集上的相对输出误差（fit 链路）     行 = M，列 = B")
     print("-" * 78)
-    print(f"{'M\\B':>6} " + " ".join(f"{b:>10}" for b in args.budgets))
+    print(f"{_MB_LABEL:>6} " + " ".join(f"{b:>10}" for b in args.budgets))
     for M in args.Ms:
         cells = [med("rel_err", M=M, B=B) for B in args.budgets]
         print(f"{M:>6} " + " ".join(f"{c:>10.4e}" for c in cells))
@@ -334,7 +340,7 @@ def main(argv: List[str] | None = None) -> int:
     print()
     print("表 2：oracle 上界（同 Key/β，用评估 Query 拟合 V）")
     print("-" * 78)
-    print(f"{'M\\B':>6} " + " ".join(f"{b:>10}" for b in args.budgets))
+    print(f"{_MB_LABEL:>6} " + " ".join(f"{b:>10}" for b in args.budgets))
     for M in args.Ms:
         cells = [med("rel_err_oracle", M=M, B=B) for B in args.budgets]
         print(f"{M:>6} " + " ".join(f"{c:>10.4e}" for c in cells))
@@ -342,7 +348,7 @@ def main(argv: List[str] | None = None) -> int:
     print()
     print("表 3：估计差距 gap = fit − oracle（越小说明 M 越够用）")
     print("-" * 78)
-    print(f"{'M\\B':>6} " + " ".join(f"{b:>10}" for b in args.budgets))
+    print(f"{_MB_LABEL:>6} " + " ".join(f"{b:>10}" for b in args.budgets))
     for M in args.Ms:
         cells = [med("gap_rel", M=M, B=B) for B in args.budgets]
         print(f"{M:>6} " + " ".join(f"{c:>10.4e}" for c in cells))
@@ -350,7 +356,7 @@ def main(argv: List[str] | None = None) -> int:
     print()
     print("表 4：归并侧误差（β 参与其中，更贴近实际使用）")
     print("-" * 78)
-    print(f"{'M\\B':>6} " + " ".join(f"{b:>10}" for b in args.budgets))
+    print(f"{_MB_LABEL:>6} " + " ".join(f"{b:>10}" for b in args.budgets))
     for M in args.Ms:
         cells = [med("mix_err", M=M, B=B) for B in args.budgets]
         print(f"{M:>6} " + " ".join(f"{c:>10.4e}" for c in cells))
@@ -360,7 +366,7 @@ def main(argv: List[str] | None = None) -> int:
     print("-" * 78)
     print("轴敏感度：固定另一个轴时，沿该轴可获得的相对改善")
     print("-" * 78)
-    print(f"{'M\\B':>6} {'沿 B 轴改善':>14} {'沿 M 轴改善':>14} "
+    print(f"{_MB_LABEL:>6} {'沿 B 轴改善':>14} {'沿 M 轴改善':>14} "
           f"{'主/次':>10}")
     axis_rows = []
     for M in args.Ms:
@@ -385,7 +391,7 @@ def main(argv: List[str] | None = None) -> int:
     print("-" * 78)
     print("秩诊断：rank_upper_bound = min(M,B)；是否触及（= 回归欠定）")
     print("-" * 78)
-    print(f"{'M\\B':>6} " + " ".join(f"{b:>10}" for b in args.budgets))
+    print(f"{_MB_LABEL:>6} " + " ".join(f"{b:>10}" for b in args.budgets))
     for M in args.Ms:
         cells = []
         for B in args.budgets:
