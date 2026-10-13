@@ -5,12 +5,31 @@
 --------------
 `docs/writing_scope_and_metrics.md` 的 M3 —— 论文 §5.4 给出了误差界
 
-    ‖Âttn(q) − Attn(q)‖₂ ≤ ε_out(q)/S(q) + 2·ε_mass(q)/S(q)·max_s‖O_s(q)‖₂   (37)
+    ‖Âttn(q) − Attn(q)‖₂
+      ≤ [ε_out(q) + ε_mass(q)·max_s(‖Ô_s(q)‖₂ + ‖O_s(q)‖₂)] / Ŝ(q)      (37)
+      ≤ 2·[同左] / S(q)          （前置条件 ε_mass(q) < S(q)/2 ⇒ Ŝ(q) > S(q)/2）
 
-但**这个界从未被数值检验过**。原因有二：其一，界里的 ε_mass、ε_out 是
-**跨块绝对量**（对全部有效块求和），而论文 §6 报的所有误差数字都是
-**单块版本**（见 §6 的度量定义表）；其二，界成立需要前置条件
-Σ_s|δM_s| < S/2，而该条件的实际违反率也无人测过。
+其中 Ŝ(q) = Σ_s M̂_s(q) 是紧凑侧全局分母，S(q) = Σ_s M_s(q) 是精确侧。
+
+⚠️ **2026-10-12 修正（旧界有构造反例，勿回退）**
+初版式(37) 为 `ε_out/S + 2·ε_mass/S·max_s‖O_s‖`。2026-10-12 全面核查构造出
+反例：两块归并，O₁=0、O₂=e₁、M₁=M₂=1（S=2），δM₁=0.1、δO₁=6e₁，
+前置条件 Σ|δM|=0.1 < S/2=1 满足，但 LHS=3.119 > RHS=3.100（违反 0.6%）。
+根因：分子扰动 ΔN = Σ_s(M_s·δO_s + δM_s·Ô_s) 含 **δM_s·Ô_s** 项
+（质量误差作用在紧凑输出上），旧界只 crediting 了前项。修正界把该项以
+ε_mass·max_s‖Ô_s‖ 纳入，并把分母从 S 改为紧凑侧实际分母 Ŝ（前置条件保证
+Ŝ > S/2 > 0，故同时给出 2[...]/S 的推论形式）。
+验证：`_onetime_scripts/_verify_eq37_fix_20261012.py` —— 反例上新界成立；
+20 万次多块对抗搜索（宽量级、含 O=0 / 大 δO / 负 δM / 近前置边界）下
+新界零真反例（108 次浮点"违反"均为等号格子的 ULP 级噪声，最大相对亏损
+3.3e-16），同期旧界被击穿 11337 次（搜索有杀伤力的对照）。
+**旧界并非恒被违反**——它只在 δM_s·Ô_s 项不可忽略时失效，E13 合成网格
+恰好未覆盖该区域，这正是"零反例"曾长期成立的原因。
+
+但**这个界在此前从未被数值检验过**（除上述对抗搜索外）。原因有二：其一，
+界里的 ε_mass、ε_out 是**跨块绝对量**（对全部有效块求和），而论文 §6 报的
+所有误差数字都是**单块版本**（见 §6 的度量定义表）；其二，界成立需要前置
+条件 Σ_s|δM_s| < S/2，而该条件的实际违反率也无人测过。
 
 于是式(37) 目前的地位是"看起来严谨的装饰"：它支撑 §5 性质 3
 （"误差不随块数累积发散"），而性质 3 又被用来论证 DCC-KV 在 N 大时仍可用。
@@ -34,7 +53,9 @@
 - 质量取公共偏移 c = max(ℓ_full)（全块拼接后的最大 logit），否则 β 的
   常数分量不可观测、且 S(q) 的尺度不可定。归一化常数在任何比值里都会
   约掉，故不影响界本身。
-- O_s 取**归一化后的块输出** softmax(ℓ_s)·V_s，与式(37) 的 max_s‖O_s‖ 一致。
+- O_s 取**归一化后的块输出** softmax(ℓ_s)·V_s，与式(37) 的 max_s‖O_s‖ 一致；
+  Ô_s 为紧凑侧对应输出（固定上下文块两侧相同，故 max_s‖Ô_s‖ 取
+  max(‖O_上下文‖, ‖Ô_源‖)）。
 - 评估只用不相交的留出 Query（`heldout_split`）；构造只用 fit Query。
 - 多种子：网格型实验按 `docs/reproducibility.md` §7 用 5 个种子（42–46）。
 
@@ -108,10 +129,19 @@ def bound_terms(
     块 1 = 源块（精确 vs 紧凑）。因此
 
         ε_mass = |δM₁|,          ε_out = M₁·‖Oˆ₁ − O₁‖
-        S      = M₀ + M₁,        max_s‖O_s‖ = max(‖O₀‖, ‖O₁‖)
+        S      = M₀ + M₁,        Ŝ      = M₀ + Mˆ₁（紧凑侧分母）
+        max_s‖O_s‖   = max(‖O₀‖, ‖O₁‖)
+        max_s‖Ô_s‖  = max(‖O₀‖, ‖Ô₁‖)   （固定块两侧相同）
 
     注意 ε_out 用 **M₁**（完整侧的质量）加权、ε_mass 取**绝对值** —— 与
     式(35)(36) 的定义一致，不能用紧凑侧质量或带符号误差替代。
+
+    修正界（2026-10-12）：
+        RHS = [ε_out + ε_mass·(max_s‖Ô_s‖ + max_s‖O_s‖)] / Ŝ
+    分子扰动 ΔN = Σ_s(M_s·δO_s + δM_s·Ô_s)：除输出拟合误差外，质量误差
+    还通过紧凑输出 Ô_s 进入分子；分母侧 N·ΔS 项由 max_s‖O_s‖ 控制。
+    旧界 `ε_out/S + 2·ε_mass/S·max‖O_s‖` 漏 crediting 了 δM_s·Ô_s 项，
+    2026-10-12 被构造反例击穿（见模块 docstring），勿回退。
     """
     from experiments.common.synthetic import beta_applied, mixture_output
 
@@ -124,7 +154,9 @@ def bound_terms(
     term_mass = torch.zeros(n, dtype=torch.float64)
     dM_signed = torch.zeros(n, dtype=torch.float64)
     s_total = torch.zeros(n, dtype=torch.float64)
+    s_hat = torch.zeros(n, dtype=torch.float64)
     max_o = torch.zeros(n, dtype=torch.float64)
+    max_o_hat = torch.zeros(n, dtype=torch.float64)
 
     for i in range(n):
         q = probe_queries[i]
@@ -141,14 +173,18 @@ def bound_terms(
         dM = m_cmp - m_src
         eps_mass = dM.abs()
         eps_out = m_src * (o_cmp - o_src).norm()
-        S_q = m_fx + m_src
-        o_max = torch.maximum(o_fx.norm(), o_src.norm())
+        S_q = m_fx + m_src        # 精确侧全局分母
+        S_hat_q = m_fx + m_cmp    # 紧凑侧全局分母（前置条件保证 > S/2 > 0）
+        o_max = torch.maximum(o_fx.norm(), o_src.norm())      # max_s‖O_s‖
+        o_hat_max = torch.maximum(o_fx.norm(), o_cmp.norm())  # max_s‖Ô_s‖
 
         dM_signed[i] = dM
         s_total[i] = S_q
+        s_hat[i] = S_hat_q
         max_o[i] = o_max
-        term_out[i] = eps_out / S_q
-        term_mass[i] = 2.0 * eps_mass / S_q * o_max
+        max_o_hat[i] = o_hat_max
+        term_out[i] = eps_out / S_hat_q
+        term_mass[i] = eps_mass * (o_hat_max + o_max) / S_hat_q
         rhs[i] = term_out[i] + term_mass[i]
 
         y_c = mixture_output(
@@ -163,7 +199,8 @@ def bound_terms(
     return {
         "lhs": lhs, "rhs": rhs,
         "term_out": term_out, "term_mass": term_mass,
-        "dM_signed": dM_signed, "S": s_total, "max_O": max_o,
+        "dM_signed": dM_signed, "S": s_total, "S_hat": s_hat,
+        "max_O": max_o, "max_O_hat": max_o_hat,
     }
 
 
@@ -174,13 +211,21 @@ def ratio_stats(
     """把逐 Query 量聚成可报的标量。
 
     容差是必需的，不是宽容
-    ----------------------
-    当 δM ≡ 0 时（例如 B = L_s、源块不裁剪），式(37) 的右侧与左侧
-    **在解析上恒等**：RHS = ε_out/S = M·‖Ô − O‖/S = LHS。
+    ---------------------
+    修正界（2026-10-12）RHS = [ε_out + ε_mass·(max‖Ô_s‖+max‖O_s‖)]/Ŝ 在两类
+    情形下与左侧**解析上恒等**：
+    (a) δM ≡ 0（例如 B = L_s、源块不裁剪）：ε_mass = 0、Ŝ = S，
+        RHS = ε_out/S = ‖Σ_s M_s δO_s‖/S = LHS（δO_s 同向时）；
+    (b) 精确分子 N(q) = Σ_s M_s O_s = 0（各有效块精确输出为零或质量为零）
+        且 δO_s 与 Ô_s 同向：此时分母侧重加权项消失、分子侧三角不等式
+        逐项取等。对抗搜索实测 1067/20 万个等号样本出自这两类，
+        且 (b) 恰是击穿初版界的构型家族——修正项补在了旧界真正失控处。
     但两侧走的是不同的数值路径 —— LHS 经 `mixture_output`（online softmax
-    逐块归并），RHS 由质量/输出范数直接算出。于是取等号处会有约 40%
-    的 Query 因舍入出现 rhs 略小于 lhs。**那是浮点误差，不是界失效。**
-    若不设容差，就会把"界恰好取到等号"误报成"界被推翻"。
+    逐块归并），RHS 由质量/输出范数直接算出。于是取等号处会有 Query 因
+    舍入出现 rhs 略小于 lhs（最大相对亏损 3.3e-16，ULP 级）。
+    **那是浮点误差，不是界失效。** 若不设容差，就会把"界恰好取到等号"
+    误报成"界被推翻"。注意 (b) 类等号**不限于** δM ≡ 0 的格子 —— 这是
+    修正界比旧界更紧的直接证据，也是容差判据必须按 Query 逐条判的原因。
     """
     valid = lhs > 0
     ratio = rhs[valid] / (lhs[valid] + 1e-300)
@@ -361,18 +406,22 @@ def run(args) -> Dict[str, Any]:
             "seeds": list(args.seeds),
         },
         "bound_note": (
-            "RHS = ε_out/S + 2·ε_mass/S·max_s‖O_s‖，LHS = ‖Âttn − Attn‖，"
-            "按式(37) 逐 Query 计算。ε_mass、ε_out 是**跨块绝对量**"
+            "RHS = [ε_out + ε_mass·(max_s‖Ô_s‖ + max_s‖O_s‖)]/Ŝ(q)（2026-10-12 修正；"
+            "旧式 ε_out/S + 2·ε_mass/S·max‖O_s‖ 有构造反例，漏 crediting 了分子扰动"
+            "里的 δM_s·Ô_s 项）。LHS = ‖Âttn − Attn‖，按式(37) 逐 Query 计算。"
+            "ε_mass、ε_out 是**跨块绝对量**"
             "（本脚本 2 个有效块：固定上下文块 + 压缩源块），"
-            "与 E2/E5a 的单块口径不可互比。"
+            "与 E2/E5a 的单块口径不可互比。前置条件 Σ|δM| < S/2 保证 Ŝ > S/2 > 0，"
+            "故同时有推论形式 RHS ≤ 2[同左]/S。"
         ),
         "verdict_rule": (
-            "界必须在**每一个** Query 上成立（frac_rhs_ge_lhs_tol = 1.0）；"
-            "任一超出相对容差的 rhs < lhs 都是该解析命题的反例，不得用中位数掩盖。"
+            "界必须在**每一个** Query 上成立（超出相对容差的 rhs < lhs 记为该解析命题的"
+            "反例，不得用中位数掩盖）。"
             "相对容差（默认 1e-9）只用于吸收「界恰好取等号」时的浮点舍入 —— "
-            "此时两侧解析上恒等（δM ≡ 0 ⇒ RHS = ε_out/S = LHS），"
-            "但 LHS 走逐块归并、RHS 走解析式，两条数值路径不同。"
-            "取等率 frac_at_equality 单列，正是为了把这个情形与真反例分开。"
+            "等号有两类：δM ≡ 0（RHS = ε_out/S = LHS，解析恒等）与各块输出/扰动"
+            "全部同向的退化构型；两侧数值路径不同（LHS 逐块归并、RHS 解析式），"
+            "故等号处必有 ULP 级抖动。取等率 frac_at_equality 单列，"
+            "正是为了把这个情形与真反例分开。"
         ),
         "heldout_note": "紧凑 KV 用 fit Query 构造，评估只用不相交的 eval Query。",
         "caveat": (
