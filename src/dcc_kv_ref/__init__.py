@@ -29,6 +29,7 @@ from .calibration import (
     fit_logit_bias,
 )
 from .value_regression import (
+    DEFAULT_LAMBDA_VALUE,
     ridge_regression_value,
     fit_compact_value,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "nonneg_least_squares",
     "fit_logit_bias",
     # value regression
+    "DEFAULT_LAMBDA_VALUE",
     "ridge_regression_value",
     "fit_compact_value",
     # compact KV

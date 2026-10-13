@@ -123,6 +123,7 @@ import torch
 
 from src.dcc_kv_ref import (
     DEFAULT_LAMBDA_BETA,
+    DEFAULT_LAMBDA_VALUE,
     CompactKV,
     build_compact_kv,
     identity_compact,
@@ -185,7 +186,7 @@ class HookConfig:
     n_repr: int = 64
     projection_dim: int = 32
     lambda_beta: float = DEFAULT_LAMBDA_BETA
-    lambda_value: float = 1e-3
+    lambda_value: float = DEFAULT_LAMBDA_VALUE
     seed: int = 42
     build_dtype: str = "auto"
     query_chunk: Optional[int] = None

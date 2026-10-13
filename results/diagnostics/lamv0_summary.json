@@ -1,0 +1,101 @@
+{
+ "diagnostic": "lambda_value_zero_anchor",
+ "question": "λ_v=0 能不能跑？改成 0 对误差有多大影响？",
+ "grid": {
+  "seeds": 5,
+  "L_s": 256,
+  "d_h": 32,
+  "d_v": 32,
+  "num_dest": 3,
+  "queries_per_dest": 96,
+  "M": [
+   8,
+   16,
+   32
+  ],
+  "budgets": [
+   8,
+   16,
+   32,
+   64
+  ],
+  "projection_dim": 16,
+  "eval_fraction": 0.5,
+  "focus_strength": 8.0,
+  "fixed_len": 128,
+  "lambda_beta_spec": "box_lam3em2",
+  "lambda_v_grid": [
+   0.0,
+   0.001
+  ]
+ },
+ "solver_probe": {
+  "underdetermined_B_gt_M__lam0": {
+   "solved": true,
+   "all_finite": true,
+   "cond_XTX": 3.5214129697332516e+18,
+   "c_norm": 515.6991410731092,
+   "resid": 2.913586934455085e-13
+  },
+  "underdetermined_B_gt_M__lam0.001": {
+   "solved": true,
+   "all_finite": true,
+   "cond_XTX": 3.5214129697332516e+18,
+   "c_norm": 2.1148817218857885,
+   "resid": 0.0004971780952024375
+  },
+  "square_B_eq_M__lam0": {
+   "solved": true,
+   "all_finite": true,
+   "cond_XTX": 954.8419665980057,
+   "c_norm": 17.477865150645027,
+   "resid": 1.4248396723988474e-13
+  },
+  "square_B_eq_M__lam0.001": {
+   "solved": true,
+   "all_finite": true,
+   "cond_XTX": 954.8419665980057,
+   "c_norm": 17.276487361968446,
+   "resid": 0.05892871304295362
+  },
+  "overdetermined_B_lt_M__lam0": {
+   "solved": true,
+   "all_finite": true,
+   "cond_XTX": 8.862513327477142,
+   "c_norm": 2.1478351056259557,
+   "resid": 28.411290785255357
+  },
+  "overdetermined_B_lt_M__lam0.001": {
+   "solved": true,
+   "all_finite": true,
+   "cond_XTX": 8.862513327477142,
+   "c_norm": 2.1477701468218586,
+   "resid": 28.411290787710637
+  }
+ },
+ "paired_delta_vs_default": {
+  "eval_mixture_median": {
+   "n": 180,
+   "median_delta": 1.9945533871650696,
+   "max_abs_delta": 720.1506552100182
+  },
+  "eval_out_err_median": {
+   "n": 180,
+   "median_delta": 2.4906013011932373,
+   "max_abs_delta": 902.955526471138
+  },
+  "eval_abs_mass_median": {
+   "n": 180,
+   "median_delta": 0.0,
+   "max_abs_delta": 0.0
+  }
+ },
+ "gate_xcheck_vs_e11": {
+  "spec": "box_lam3em2",
+  "e11_rows": 180,
+  "max_abs_diff": 0.0,
+  "worst_cell": null,
+  "passed": true
+ },
+ "n_grid_cells": 180
+}

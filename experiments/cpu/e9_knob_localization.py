@@ -54,7 +54,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from experiments.common import synthetic as S       # noqa: E402
 from experiments.common import report as R          # noqa: E402
-from src.dcc_kv_ref.value_regression import ridge_regression_value  # noqa: E402
+from src.dcc_kv_ref.value_regression import (  # noqa: E402
+    DEFAULT_LAMBDA_VALUE,
+    ridge_regression_value,
+)
 
 
 # =============================================================================
@@ -66,7 +69,7 @@ def oracle_value(
     fit_queries: torch.Tensor,
     keys: torch.Tensor,
     values: torch.Tensor,
-    lambda_value: float = 1e-3,
+    lambda_value: float = DEFAULT_LAMBDA_VALUE,
 ):
     """在**固定**的选中 Key 与 β 下，用给定 Query 重新拟合 V。
 

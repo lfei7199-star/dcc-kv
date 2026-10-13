@@ -40,6 +40,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.dcc_kv_ref import DEFAULT_LAMBDA_VALUE        # noqa: E402
 from src.experiment_metadata import ExperimentMetadata  # noqa: E402
 
 GATE_EXIT_CODE = 3
@@ -245,7 +246,7 @@ def build_metadata(
     num_repr_queries: int = 64,
     projection_dim: int = 32,
     lambda_beta: float = 3e-2,   # 与 src.dcc_kv_ref.DEFAULT_LAMBDA_BETA 一致（E11）
-    lambda_value: float = 1e-3,
+    lambda_value: float = DEFAULT_LAMBDA_VALUE,
     warmup: int = 3,             # 重复次数：必须进产物，否则冒烟与合规不可区分
     iters: int = 10,
     task: str = "unknown",

@@ -20,24 +20,49 @@
 
 softmax 对 β 的整体常数不敏感，所以「除以 M」并不改变 β 的中心水平，
 但它把 β 的**跨 Key 离散度**压缩了 M 倍 —— 而 β 的全部作用恰恰在于这个离散度。
+
+λ_v 的默认值与「单一事实源」（2026-09-23）
+------------------------------------------
+λ_β 的默认值有单一事实源（`calibration.DEFAULT_LAMBDA_BETA`），λ_v 此前**没有**：
+`1e-3` 这个字面量在 `src/` 与 `experiments/` 中重复出现十余次，任何一次单点改动
+都会让「论文里写死的 λ_v」与「实际跑出来的 λ_v」静默分叉。本模块现定义
+``DEFAULT_LAMBDA_VALUE``，其余各处的默认值一律引用它。
+
+注意 λ_v 与 λ_β 的角色**不对称**，取默认值时不能互推：
+
+* λ_β 作用在**质量**通路（块级 Softmax 分母）。它缺席时 `w` 会发散，
+  因此必须显式定档（E11：相对 AM 的 λ=0 有意偏移到 3e-2）。
+* λ_v 作用在**输出**通路（紧凑 Value 的内容误差），是式(19) 的岭正则。
+  它同时承担一个数值职责：`ridge_regression_value` 走 `torch.linalg.solve`，
+  当 B > M 时 `XᵀX` 奇异（rank(X) ≤ M），**解完全由 λ_v 的正则方向决定**；
+  λ_v = 0 会使该情形直接崩溃或给出无意义的巨大解。故 λ_v = 0 只可作为
+  诊断锚点（对照 AM 的 λ_v = 0 原配置），不应作为运行默认值。
+
+代价：闭式解的构造成本为 O(M B² + B³ + M B d_v) —— 求逆/分解项是 O(B³)，
+在仓库 E9/E10/E11 的网格中有一半格子 B > M，此时 B³ 项而非 M B² 项支配。
 """
 from __future__ import annotations
 
 import torch
 from typing import Optional
 
+# λ_v 的默认强度：Value 回归（式(19)）的岭正则。
+# 该值沿自 Attention Matching 参考实现的量级选择，并被本仓库 E2/E5a/E9--E11
+# 全量落盘采用。改动它会使所有历史落盘不可比，故显式集中在此处。
+DEFAULT_LAMBDA_VALUE: float = 1e-3
+
 
 def ridge_regression_value(
     X: torch.Tensor,
     Y: torch.Tensor,
-    lambda_reg: float = 1e-3,
+    lambda_reg: float = DEFAULT_LAMBDA_VALUE,
 ) -> torch.Tensor:
     """Ridge 回归闭式解。
 
     Args:
         X: [M, B] 设计矩阵
         Y: [M, d_v] 目标
-        lambda_reg: λ_v
+        lambda_reg: λ_v（默认 `DEFAULT_LAMBDA_VALUE`=1e-3，见模块文档）
 
     Returns:
         C_v: [B, d_v] 紧凑 Value
@@ -60,7 +85,7 @@ def fit_compact_value(
     original_values: torch.Tensor,
     compact_keys: torch.Tensor,
     logit_bias: torch.Tensor,
-    lambda_reg: float = 1e-3,
+    lambda_reg: float = DEFAULT_LAMBDA_VALUE,
 ) -> torch.Tensor:
     """拟合紧凑 Value。
 
@@ -70,7 +95,7 @@ def fit_compact_value(
         original_values: [L_s, d_v] 原始块 V
         compact_keys: [B, d_h] 紧凑 K
         logit_bias: [B] β 偏置
-        lambda_reg: λ_v
+        lambda_reg: λ_v（默认 `DEFAULT_LAMBDA_VALUE`=1e-3，见模块文档）
 
     Returns:
         compact_values: [B, d_v] 紧凑 V

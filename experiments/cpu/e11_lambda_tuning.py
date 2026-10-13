@@ -61,6 +61,7 @@ if str(REPO_ROOT) not in sys.path:
 from experiments.common import synthetic as S          # noqa: E402
 from experiments.common import report as R             # noqa: E402
 from experiments.common import beta_variants as BV     # noqa: E402
+from src.dcc_kv_ref import DEFAULT_LAMBDA_VALUE        # noqa: E402
 
 
 # =============================================================================
@@ -229,7 +230,7 @@ def evaluate_cell(
     projection_dim: int,
     seed: int,
     fixed_ctx: Optional[Tuple[torch.Tensor, torch.Tensor]],
-    lambda_value: float = 1e-3,
+    lambda_value: float = DEFAULT_LAMBDA_VALUE,
 ) -> Dict[str, Any]:
     """在单个 (M, B, dest, seed) 上按指定规格构造并评估。"""
     c = LAMBDA_SPECS[spec]
@@ -743,7 +744,8 @@ def main(argv: List[str] | None = None) -> int:
     p.add_argument("--eval-fraction", dest="eval_fraction", type=float, default=0.5)
     p.add_argument("--focus-strength", dest="focus_strength", type=float, default=8.0)
     p.add_argument("--fixed-len", dest="fixed_len", type=int, default=128)
-    p.add_argument("--lambda-value", dest="lambda_value", type=float, default=1e-3)
+    p.add_argument("--lambda-value", dest="lambda_value", type=float,
+                   default=DEFAULT_LAMBDA_VALUE)
     p.add_argument("--no-paired", dest="paired", action="store_false")
     args = p.parse_args(argv)
 

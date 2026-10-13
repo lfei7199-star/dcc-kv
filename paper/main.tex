@@ -65,7 +65,8 @@
 方法主要在单设备内依据局部或历史注意力保留重要条目，难以直接回答一个分布式场景中的关键问题：
 同一源端上下文应当向具有不同 Query 分布的目的设备发送什么信息？本文提出 DCC-KV
 （Destination-Conditioned Compact KV Communication），一种面向长上下文协同推理的训练无关
-框架。每个目的设备首先从本地 Query 中选取少量代表样本，并通过 Ring 通信传播其注意力需求；
+框架。每个目的设备首先从本地 Query 中选取少量代表样本，并通过等大小的集合通信在设备间
+传播其注意力需求；
 随后，每个源设备针对不同目的设备分别构造方向非对称的紧凑 KV。受 MIT 团队 Attention Matching
 \cite{zweiger2026attentionmatching} 的启发，我们采用 Key 选择、注意力质量校准与 Value 回归
 构造紧凑表示。本文的核心创新在于面向变长紧凑 KV 设计异步 All-to-Allv 执行机制：远程块到达后
@@ -131,9 +132,9 @@ Query 分布也不相同；同一个源端 KV 块对不同目的端的重要部�
       目的设备的代表 Query 构造专属紧凑缓存，使 $C^{s \to r_1}$ 与 $C^{s \to r_2}$ 可以不同。
 \item 紧凑 KV 构造受 MIT 团队 Attention Matching \cite{zweiger2026attentionmatching} 启发，
       沿用其 Key 选择、质量偏置和 Value 回归思想；\textbf{该压缩机制不作为本文的原创贡献}。
-\item 本文原创设计变长紧凑 KV 的异步 All-to-Allv 通信实现，使已到达远程块的注意力计算与
-      其余消息传输并行，并利用 Online Softmax 合并算子的交换律与结合律消除对消息接收顺序的
-      依赖。
+\item 本文原创设计变长紧凑 KV 的异步 All-to-Allv 通信与块级双缓冲流水实现，使已到达的
+      紧凑块参与注意力计算与其余消息的传输并行，并利用 Online Softmax 合并算子的交换律与
+      结合律消除对消息接收顺序的依赖。
 \item 给出全局注意力的块分解、误差界与通信/计算复杂度分析，并设计覆盖长文本检索、多跳推理
       和端到端性能的实验协议。
 \end{itemize}
@@ -259,8 +260,7 @@ C^{s \to r_1} \neq C^{s \to r_2}.
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{fig1_architecture.pdf}
-\caption{DCC-KV 的总体架构。目的设备仅发送少量代表 Query $\widehat{Q}_r$（虚线，经 Ring
-交换）；每个源设备针对每条有向边 $(s,r)$ 独立构造紧凑 KV $C^{s\to r}$（实线）。由于构造以
+\caption{DCC-KV 的总体架构。目的设备仅发送少量代表 Query $\widehat{Q}_r$（虚线）；每个源设备针对每条有向边 $(s,r)$ 独立构造紧凑 KV $C^{s\to r}$（实线）。由于构造以
 目的端 Query 为条件，同一源块对不同目的端产生不同表示
 （$C^{s\to r_1} \neq C^{s\to r_2}$）。}
 \label{fig:arch}
@@ -295,9 +295,11 @@ u_{m+1} = \arg\max_{u \notin \mathcal{S}_r^{(m)}} \Delta_{r,u}^{(m)},\quad
 \end{equation}
 而非传输投影向量。选择复杂度为 $O(L_r d_h d_p + M L_r d_p)$。
 
-所有 $\widehat{Q}_r$ 形状相同，适合使用 $N-1$ 轮 Ring All-Gather。第 $p$ 轮设备 $i$ 向
-$[i+1]_N$ 转发当前 Query 摘要，并从 $[i-1]_N$ 接收另一摘要。通信后，源设备 $s$ 获得所有满足
-$(s,r) \in \mathcal{E}$ 的 $\widehat{Q}_r$。
+所有 $\widehat{Q}_r$ 形状相同（均为 $M \times d_h$），因此该摘要的传播可由任意等大小集合
+通信实现，例如 $N-1$ 轮环形转发或一次 All-Gather；接口层只要求交换后源设备 $s$ 持有
+所有满足 $(s,r) \in \mathcal{E}$ 的 $\widehat{Q}_r$。其开销为 $O(NMd_h)$，与上下文长度
+无关。需要说明的是，当前 GPU 实验路径尚未接线该交换，故本文的构造侧实验均在单进程内以
+本地 Query 构造；该缺口已在 \S\ref{sec:exp-gpu} 的缺口清单中登记。
 
 \subsection{目的端条件化紧凑 KV}
 
@@ -343,7 +345,11 @@ $w_j$ 表示紧凑 Key 所承载的等效注意力质量，可聚合若干被删
 信息不足时将其收缩至无偏置状态 $w = \mathbf{1}$。非负约束保证 $w$ 可映射为 Logit 偏置。
 $w$ 的箱约束等价于 $\beta_j^{s \to r} \in [-3, 3]$，即单个紧凑 Key 的 Logit 偏置
 上下界；该取值沿自 Attention Matching 附录~C.2 对 RMS 选键分支的配置。
-实现中应以逐行最大值平移计算指数项，并在拟合目标中保留相应的行缩放，以避免数值溢出。
+实现中以\textbf{公共偏移} $c = \max_{a,k} \ell_{a,k}^{s \to r}$ 平移指数项，并在拟合目标
+中保留相应的缩放，以避免数值溢出。取公共偏移而非逐行最大值，是因为 Softmax 对 Logit 的
+整体常数不敏感：公共偏移使 $c$ 在质量目标与设计矩阵 $G$ 两侧完全对消，因而拟合出的 $\beta$
+不受其取值影响；逐行平移则引入与行相关的缩放，该对消不再成立，$\beta$ 的常数分量亦随之
+不可辨识。
 
 \subsubsection{紧凑 Value 拟合}
 
@@ -379,24 +385,36 @@ X^{s \to r} = \softmax\!\left(\frac{\widehat{Q}_r (C_k^{s \to r})^\top}{\sqrt{d_
 
 \subsection{异步 All-to-Allv 通信与顺序无关的 Online Softmax}
 
-不同有向边采用不同预算 $B_{s,r}$，因此 $C^{s \to r}$ 的长度随源--目的设备对变化。本文采用
-循环错位的 All-to-Allv 调度：在第 $p \in \{1,\ldots,N-1\}$ 轮，设备 $s$ 向 $r = [s+p]_N$
-发送 $C^{s \to r}$，并从 $[s-p]_N$ 接收消息；若对应边无效，则将发送长度置为零。实现时先
-交换每条边的长度与缓冲区偏移，再为各轮提交非阻塞收发。与等待全部通信完成后统一计算不同，
-我们使用独立的通信流与计算流，并以逐块完成事件建立依赖：任一远程块到达后，计算流立即启动该
-块的注意力计算，通信流则继续接收其余消息，由此形成
+不同有向边采用不同预算 $B_{s,r}$，因此 $C^{s \to r}$ 的长度随源--目的设备对变化，而标准
+All-to-All 要求预先声明各接收段的长度。本文的交换分两步：先做一次仅含长度与缓冲区偏移的
+元数据交换，使每个设备在接收前即掌握各来源的实际长度；随后用一次携带变长分段表的集合
+All-to-All（\texttt{all\_to\_all\_single} 的 split-size 形式）完成全部消息体的交换。若某条
+有向边无效，则将其发送长度置为零。由于长度声明必须与实际发送量逐位一致，实现对该一致性做
+显式校验而不静默采用对端实际值。
+
+通信与计算的重叠由\textbf{块级双缓冲}实现：把出站缓冲区按目的端切成 $k$ 块，在第 $i$ 块的
+非阻塞收发提交之后、等待其完成之前，先提交第 $i+1$ 块的收发；第 $i$ 块到达后计算侧立即
+启动该块的注意力计算，该计算与第 $i+1$ 块的传输重叠，由此形成
 \begin{equation}
-\text{接收 } C^{s_1 \to r} \;\parallel\; \text{计算 } C^{s_0 \to r} \;\parallel\; \text{发送 } C^{r \to t}
+\text{传输 } C^{s_1 \to r}_{(i+1)} \;\parallel\; \text{计算 } C^{s_0 \to r}_{(i)}
 \label{eq:pipeline}
 \end{equation}
-的流水。\textbf{该实现是本文区别于既有紧凑 KV 方法的核心系统设计。}
+的流水。与等待全部通信完成后统一计算不同，理想流水下总耗时由两阶段中较慢者支配，而非二者
+之和。
+
+需明确该重叠的\textbf{退化条件}：块级切分要求各条边的预算对齐（发送与接收分段各自等长）才
+存在可重叠窗口；当逐边预算不同时，当前实现\emph{退化为单块发送}，此时只有一次无法与计算
+重叠的传输，异步收益为零。实际可重叠块数随产物一并落盘，以免将实测加速比趋近 $1$ 误读为
+流水实现的缺陷。解除该退化需按目的端独立分块，属实现层面的工作而非方法限制。
+\textbf{这套「变长集合交换 $+$ 块级双缓冲 $+$ 顺序无关归并」的组合，是本文区别于既有紧凑
+KV 方法的核心系统设计。}
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{fig2_async_pipeline.pdf}
-\caption{异步 All-to-Allv 流水。上：通信流与计算流相互独立，远程块到达后立即启动该块的
-注意力计算，无需等待全部消息。下：与"等全部消息到达再统一计算"的同步实现对比；理想流水下
-总耗时由两阶段中较慢者支配，而非二者之和。}
+\caption{异步 All-to-Allv 流水的块级双缓冲。上：第 $i$ 块到达后立即启动其注意力计算，
+与此同时第 $i+1$ 块的非阻塞传输正在进行，无需等待全部消息。下：与"等全部消息到达再统一
+计算"的同步实现对比；理想流水下总耗时由两阶段中较慢者支配，而非二者之和。}
 \label{fig:async}
 \end{figure}
 
@@ -449,7 +467,7 @@ S_r^{\text{global}} = S_r \oplus \bigoplus_{s \in \Er} S^{s \to r},\qquad
 \ForAll{设备 $r$（并行）}
   \State 投影 $Q_r$，以最远点采样得到 $\widehat{Q}_r$
 \EndFor
-\State 通过 Ring 交换所有有效目的端的 $\widehat{Q}_r$
+\State 通过等大小集合通信（如环形转发或 All-Gather）交换所有有效目的端的 $\widehat{Q}_r$
 \ForAll{有效边 $(s,r) \in \mathcal{E}$（并行）}
   \State 用式~\eqref{eq:ck} 选取 $C_k^{s \to r}$
   \State 用式~\eqref{eq:beta-fit} 拟合 $\beta^{s \to r}$
@@ -458,7 +476,8 @@ S_r^{\text{global}} = S_r \oplus \bigoplus_{s \in \Er} S^{s \to r},\qquad
 \EndFor
 \ForAll{目的设备 $r$（并行）}
   \State 计算本地状态 $S_r$，并提交变长消息的非阻塞 All-to-Allv 收发
-  \ForAll{已到达的 $C^{s \to r}$（按任意顺序）}
+  \ForAll{已到达的 $C^{s \to r}$（实现按块序处理；归并算子满足式~\eqref{eq:comm-assoc}，
+  故结果与到达顺序无关）}
     \State 计算 $S^{s \to r}$，并用式~\eqref{eq:merge-op} 立即归并
   \EndFor
   \State 所有接收完成后，用式~\eqref{eq:global-state} 输出 $O_r$

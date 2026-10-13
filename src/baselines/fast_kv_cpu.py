@@ -18,13 +18,13 @@ try:  # 允许两种导入根：包内 `src.` 导入 与 把 `src/` 直接加入
     from ..dcc_kv_ref import (
         build_compact_kv, CompactKV, OnlineSoftmaxState,
         online_softmax_from_attention, merge_softmax_states,
-        DEFAULT_LAMBDA_BETA,
+        DEFAULT_LAMBDA_BETA, DEFAULT_LAMBDA_VALUE,
     )
 except ImportError:  # pragma: no cover - 兼容把 src/ 直接加入 sys.path 的调用方
     from dcc_kv_ref import (
         build_compact_kv, CompactKV, OnlineSoftmaxState,
         online_softmax_from_attention, merge_softmax_states,
-        DEFAULT_LAMBDA_BETA,
+        DEFAULT_LAMBDA_BETA, DEFAULT_LAMBDA_VALUE,
     )
 
 
@@ -39,7 +39,8 @@ class FastKVConfig:
     # 条件化"，因此 λ_β 必须与主方法取同一个默认值，否则对照不公平
     # （此时 FastKV 用的是已被替换掉的旧默认）。实测结论不变，但数字会变。
     lambda_beta: float = DEFAULT_LAMBDA_BETA
-    lambda_value: float = 1e-3
+    # 与主方法共用同一套 Value 回归，故 λ_v 亦取自同一事实源（2026-09-23）。
+    lambda_value: float = DEFAULT_LAMBDA_VALUE
     seed: int = 42
 
 

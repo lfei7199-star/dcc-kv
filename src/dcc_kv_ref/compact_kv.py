@@ -18,7 +18,7 @@ import torch
 from .representative_query import select_representative_queries
 from .key_selection import select_topk_keys
 from .calibration import DEFAULT_BETA_BOUND, DEFAULT_LAMBDA_BETA, fit_logit_bias
-from .value_regression import fit_compact_value
+from .value_regression import DEFAULT_LAMBDA_VALUE, fit_compact_value
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ def build_compact_kv(
     num_representative_queries: int = 64,
     projection_dim: int = 32,
     lambda_beta: float = DEFAULT_LAMBDA_BETA,
-    lambda_value: float = 1e-3,
+    lambda_value: float = DEFAULT_LAMBDA_VALUE,
     seed: int = 42,
     beta_bound: Optional[float] = DEFAULT_BETA_BOUND,
 ) -> CompactKV:

@@ -18,6 +18,7 @@
 | `fps_start_summary.json`<br>`fps_start_full.log` | `_onetime_scripts/checks/_diag_fps_start.py` | 审查项 **F2** | 180 格对照。`newest` 相对 `random` 的偏移 = 起点噪声**自身波动**的 **0.21–0.28 倍**（mix 0.255 / out 0.208 / abs_mass 0.283）⇒ **结论层面不翻转** |
 | `fps_equiv_summary.json` | `_onetime_scripts/checks/_diag_fps_equiv.py` | F2 的管道互校 | A：`random` 模式改动前后**逐位相同**（6/6 例）；B：`newest` 的首个锚点确为最新 Query（`first_is_last_index` 全 true）；C：复杂度不退化 |
 | `lam0_summary.json` | `_onetime_scripts/checks/_diag_lambda_zero.py` | `commit_log` 第 34 条 | $\lambda_\beta=0$ 的锚点诊断：绑定率中位 **6.25%**、$\beta$ 标准差中位 **1.20** ⇒ $\lambda_\beta=0$ 会让偏置发散 |
+| `lamv0_summary.json` | `_onetime_scripts/checks/_diag_lambda_value_zero.py` | 2026-09-23 一致性审查 **D1** | $\lambda_v=0$（Attention Matching 原始口径）的锚点诊断。**数值层**：$B>M$ 时 $X^\top X$ 条件数达 $3.5\times10^{18}$，闭式解范数放大 **244×**（515.7 vs 2.11）却**不报错** —— 静默的、量级失真的解。**网格层**（E11 的 180 格，$\lambda_\beta$ 固定）：输出误差中位恶化 **2.49**、最差格 **903**。**自洽性**：质量指标逐位不变（$\max|\Delta|=0$），证实 $\lambda_v$ 只进 $X^\top X$、两条通路无串扰。**互校**：与 E11 落盘 `box_lam3em2` 逐位相同（`max_abs_diff=0`）⇒ $\lambda_v=1\times10^{-3}$ 是必要取值，不是随手定的 |
 
 ## ⚠️ 读这些数字时的三条边界
 

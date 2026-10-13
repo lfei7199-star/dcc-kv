@@ -76,6 +76,9 @@ class ExperimentMetadata:
     # 显式实参覆盖，所以错值只在「直接构造 dataclass」时露出来 —— 而元数据
     # 的 λ_β 是论文可复现性的一部分，不能有两套默认值。
     lambda_beta: float = 3e-2
+    # 与 src.dcc_kv_ref.value_regression.DEFAULT_LAMBDA_VALUE 一致。
+    # 同 lambda_beta：此处刻意**不 import** dcc_kv_ref（元数据模块不应依赖
+    # 参考实现），一致性由 tests/test_adversarial_2026_09_20.py 的守卫锁死。
     lambda_value: float = 1e-3
 
     # 重复次数。论文 §6.4 要求「每点 >= 10 次 run」，E5/E6/E7 也都有

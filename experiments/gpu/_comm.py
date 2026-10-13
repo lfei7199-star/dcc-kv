@@ -336,6 +336,7 @@ def effective_chunk_count(
 
     规则与 `_split_chunks` 必须一致：
         变长（send_sizes 或 recv_sizes 不全等）  → 1（不做分块）
+        send 与 recv 的公共预算不等             → 1（不对称，无法共用切分声明）
         n_chunks <= 1 或 B < 2                   → 1
         否则                                     → ceil(B / max(1, B // n_chunks))
 
@@ -350,6 +351,11 @@ def effective_chunk_count(
     flat_send = [int(s) for s in send_sizes]
     flat_recv = [int(r) for r in recv_sizes]
     if len(set(flat_send)) != 1 or len(set(flat_recv)) != 1:
+        return 1
+    # 逐块均分用同一个 ``[k] * world`` 声明 send 与 recv，故两侧每块行数必须相等
+    # ⇒ 要求两侧公共预算相等。不对称 All-to-All（发 16 收 8）下块数相同、每块
+    # 行数不同，声明必然对不上；宁可退化为单块，也不产出错误的切分。
+    if flat_send[0] != flat_recv[0]:
         return 1
     B = flat_send[0]
     if n_chunks <= 1 or B < 2:
@@ -375,8 +381,10 @@ def _split_chunks(
     时 `sum(send_sizes) == world * 块行数 != 块行数`，必然触发
     `all_to_all_v` 的自洽性检查失败；即便绕过检查，行与目的端的对应也是错的。
 
-    等预算假设：只有 send_sizes / recv_sizes 各自全等时才能逐块均分。
-    变长预算下不做分块（宁可退化为单块，也不产出错误的切分）。
+    等预算假设：只有 send_sizes / recv_sizes 各自全等、**且两侧公共预算相等**时
+    才能逐块均分 —— 因为每个块用同一个 ``[k] * world`` 同时声明 send 与 recv，
+    不对称（发 16 收 8）时块数相同而每块行数不同，声明必然对不上。
+    变长或不对称预算下不做分块（宁可退化为单块，也不产出错误的切分）。
     """
     world = len(send_sizes)
     if world == 0 or len(recv_sizes) != world:
@@ -384,6 +392,9 @@ def _split_chunks(
     flat_send = [int(s) for s in send_sizes]
     flat_recv = [int(r) for r in recv_sizes]
     if len(set(flat_send)) != 1 or len(set(flat_recv)) != 1:
+        return [(payload, flat_send, flat_recv)]
+    if flat_send[0] != flat_recv[0]:
+        # 不对称 All-to-All：见 docstring。退化为单块。
         return [(payload, flat_send, flat_recv)]
     B = flat_send[0]
     if int(payload.shape[0]) != B * world:

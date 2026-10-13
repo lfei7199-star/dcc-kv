@@ -40,7 +40,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from src.dcc_kv_ref import CompactKV
+from src.dcc_kv_ref import CompactKV, DEFAULT_LAMBDA_VALUE
 from src.dcc_kv_ref.calibration import nonneg_least_squares
 from src.dcc_kv_ref.key_selection import select_topk_keys
 from src.dcc_kv_ref.representative_query import select_representative_queries
@@ -553,7 +553,7 @@ def build_compact_kv_variant(
     num_representative_queries: int = 32,
     projection_dim: int = 32,
     lambda_beta: float = 1e-3,
-    lambda_value: float = 1e-3,
+    lambda_value: float = DEFAULT_LAMBDA_VALUE,
     lambda_disp: Optional[float] = None,
     seed: int = 42,
     w_lower: float = 0.0,

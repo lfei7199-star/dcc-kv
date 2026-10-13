@@ -28,6 +28,7 @@ import torch
 
 from src.dcc_kv_ref import (
     DEFAULT_LAMBDA_BETA,
+    DEFAULT_LAMBDA_VALUE,
     CompactKV,
     build_compact_kv,
 )
@@ -562,7 +563,7 @@ def build_for_dest(
     num_repr_queries: int = 32,
     projection_dim: int = 32,
     lambda_beta: float = DEFAULT_LAMBDA_BETA,
-    lambda_value: float = 1e-3,
+    lambda_value: float = DEFAULT_LAMBDA_VALUE,
     seed: int = 42,
 ) -> CompactKV:
     """为单个目的端构造紧凑 KV（DCC-KV 的逐边语义）。"""
@@ -585,7 +586,7 @@ def build_shared(
     num_repr_queries: int = 32,
     projection_dim: int = 32,
     lambda_beta: float = DEFAULT_LAMBDA_BETA,
-    lambda_value: float = 1e-3,
+    lambda_value: float = DEFAULT_LAMBDA_VALUE,
     seed: int = 42,
 ) -> CompactKV:
     """构造"共享压缩"基线（FastKV 语义）：用**全部**目的端 Query 构造一份紧凑 KV。
