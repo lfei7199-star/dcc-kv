@@ -1,7 +1,7 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**200** 个受控文件 = 83 `.py` / 32 `.csv` / 31 `.json` /
+> 统计口径：`git ls-tree -r HEAD`（**201** 个受控文件 = 84 `.py` / 32 `.csv` / 31 `.json` /
 > 23 `.md` / 10 `.tex` / 8 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
 > `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
 > 不含编译产物与本地素材（见 §9）。其中 **72 个在 `results/` 下（32 `.csv` + 31 `.json` +
@@ -10,6 +10,13 @@
 > （`tests/test_audit_2026_09_23.py` + `results/diagnostics/lamv0_summary.json`）
 > ⇒ `198` → `200`；分布由 `82 / 32 / 30 / 23 / 10 / 8 / 6 / 1` 变为
 > `83 / 32 / 31 / 23 / 10 / 8 / 6 / 1`（`.py` 与 `.json` 各 +1）。
+> ⚠️ **2026-10-13 按提交后实测刷新（`152e5ac`）**：**新增 1 个受控文件**
+> （`tests/test_fstring_backslash_guard_2026_10_13.py`）⇒ `200` → `201`；
+> 分布由 `83 / 32 / 31 / 23 / 10 / 8 / 6 / 1` 变为
+> `84 / 32 / 31 / 23 / 10 / 8 / 6 / 1`（`.py` +1）。同轮刷新 §3.2 的
+> `e9_knob_localization.py` 行数（`389` → `438`）—— 该行在 HEAD 态即已陈旧
+> （HEAD 实为 432，非 389；漂移 43 行，原因未考据、不擅归因），本轮改动使其
+> +6 行，按实测登记。
 > 与 `README.md` 的关系：README 讲"这是什么、怎么跑"，本文讲"每个文件是什么"。
 > **2026-09-20 新增 11 个受控文件**：G1 算子核、G3 基线向量化算子、G2 桥接层、G5 评测集转换器，以及对应的 7 个锚点文件（含 2026-09-18 自查与 2026-09-20 对抗性审查各一份）。
 > **2026-09-21 新增 2 个受控文件**：`src/distributed/attention_hook.py`（H0 的方法侧 —— 把 G1 的算子核挂进真实模型 attention 的钩子）与其锚点 `tests/test_attention_hook.py`。同日一并修了两处实现缺陷（见下）并把 I 组守卫的扫描面从 `tests/test_*.py` 扩到**仓库内任意 `.py` 引用**。
@@ -207,7 +214,7 @@
 | `probe_e3_heldout.py` | 226 | **E3 留出集判定探针**（一次性，保留以便复现）：同场景并排跑 in-sample 与 heldout 两套口径，只打印不写结果。结论：负对照上样本内口径造出 +0.156 的假优势；主线 \|Δ\| 缩水约 31%；方向稳定性 20/20 → 18/20 |
 | `e4_dist_equivalence.py` | 283 | 分布式等价性（单进程 mock） |
 | `e5a_mechanism_ablation.py` | 234 | A3 的机制级版本（重构误差口径，对应 GPU 版的任务指标口径）；落 `results/cpu/a3/`，用 `absolute_mass_error` |
-| `e9_knob_localization.py` | 389 | **M–B 旋钮定位**：525 格扫描（`L_s=2048`、`B/L_s<=0.05`），分离"可达上界（B）"与"能否触及上界（M）" |
+| `e9_knob_localization.py` | 438 | **M–B 旋钮定位**：525 格扫描（`L_s=2048`、`B/L_s<=0.05`），分离"可达上界（B）"与"能否触及上界（M）" |
 | `e10_beta_stability.py` | 656 | **β 稀疏塌缩**的定位与修复；把 β 分解为"块级常数分量（收益）"与"per-key 离散分量（代价）" |
 | `e11_lambda_tuning.py` | 774 | λ_β 调参（尺度无关的相对正则强度） |
 | `e12_representative_query.py` | 421 | **代表 Query 投影维度 $d_p$** 的扫描（`$d_p\in\{4,8,16,32,64\}$` + 无投影参照），报 JL 畸变 / 覆盖率 / 下游误差；5 种子 + 留出 |
