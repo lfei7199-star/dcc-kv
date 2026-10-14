@@ -174,4 +174,4 @@
 > 配套文档：
 > - `git_strategy.md` — 仓库管理
 > - `reproducibility.md` — 可复现性
-> - `../experiment_matrix.yaml` v1.2.0 — 实验矩阵
+> - `../experiment_matrix.yaml` v1.2.0 — 实验矩阵（**不存在**：用户 2026-09-15 确认手边无此文件；当前格点由需求反推，记账见 README「上级文档」节 / `commit_log.md` C11）

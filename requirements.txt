@@ -1,5 +1,8 @@
 # DCC-KV 依赖
 # 对齐 experiment_matrix.yaml `requirements.software`
+# （该规划件**不存在**：用户 2026-09-15 确认手边无此文件，"对齐"一词无从核对；
+#  本清单按实际运行环境维护，版本口径以
+#  docs/reports/2026-09-30-实验结果复核操作手册.md 为准。）
 
 # 核心（torch 2.3 在 PyPI CPU index 已撤，最早 2.6.0）
 torch>=2.6.0

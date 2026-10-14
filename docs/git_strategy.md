@@ -1,6 +1,8 @@
 # Git 仓库管理策略
 
 > 配套文档：blueprint v1.1 / experiment_matrix.yaml v1.2.0
+> （两份均**不在仓库内、也不在相邻目录**：用户 2026-09-15 确认手边无此文件，
+> 记账见 README「上级文档」节与 `docs/commit_log.md` C11；实验格点当前由需求反推。）
 
 ## 0. 设计目标
 

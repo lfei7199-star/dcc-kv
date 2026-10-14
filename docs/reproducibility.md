@@ -310,5 +310,5 @@ CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一
 > 配套文档：
 > - `release_checklist.md`
 > - `git_strategy.md`
-> - `../experiment_matrix.yaml` v1.2.0
+> - `../experiment_matrix.yaml` v1.2.0（**不存在**：用户 2026-09-15 确认手边无此文件；当前格点由需求反推，记账见 README「上级文档」节 / `commit_log.md` C11）
 > - blueprint v1.1（见父目录）
