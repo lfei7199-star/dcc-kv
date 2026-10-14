@@ -13,6 +13,11 @@
 # E5 需要 ≥2 卡 + NCCL；E8 单卡即可（但必须 GPU，除非显式 --allow-cpu）。
 # E6/E7 单卡即可，但需要真实模型权重。
 #
+# 退出码：0 = 全部通过；3 = 环境闸门未通过（无可用 GPU 或缺 torch，**不是实验失败**）；
+#         2 = 参数层拒绝；127 = 缺少命令（如 torchrun）；1 = 实验真失败。
+# 环境自举：默认用 PATH 里的 python；可用 PYTHON=<解释器> 覆盖（本机默认 python
+#           若无 torch，脚本会以退出码 3 报错并给出指引，而不是 import 阶段崩掉）。
+#
 # --print-env / --plan **必须跟在实验名后面**（如 `run_gpu.sh e6 --plan`）。
 # 原因：本脚本把 $1 无条件当作实验名（见下方 EXP="$1"），所以
 # `run_gpu.sh --plan` 会把 --plan 当成实验名并落到「未知实验」分支，
@@ -29,6 +34,27 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 PY="${PYTHON:-python}"
+
+# --- 环境自举（2026-10-14 补）--------------------------------------------------
+# 原先这里直接把 PATH 里的 `python` 当解释器用：本机默认 python 没有 torch 时，
+# 内层脚本在 import 阶段就 ModuleNotFoundError，**环境闸门（退出码 3）根本
+# 够不着** —— README 承诺的「3 = 环境闸门未通过」在最常用入口上不可达。
+# 现在先探测两件事，失败都带明确指引：
+#   解释器不存在        -> 127（找不到命令）
+#   解释器在但缺 torch  -> 3（环境闸门未通过：GPU 实验的底座不完整）
+if ! command -v "$PY" >/dev/null 2>&1; then
+  echo "错误：找不到 Python 解释器：$PY" >&2
+  echo "      请用 PYTHON=<带 torch 的解释器> 指定环境，例如：" >&2
+  echo "      PYTHON=<repo>/dcc-kv/venv/Scripts/python.exe bash experiments/run_gpu.sh ..." >&2
+  exit 127
+fi
+if ! "$PY" -c "import torch" >/dev/null 2>&1; then
+  echo "错误：解释器 $PY 无法 import torch —— GPU 实验的底座不完整。" >&2
+  echo "      请用 PYTHON=<带 torch 的解释器> 指定环境（venv 或 repo-tests 均可）：" >&2
+  echo "      PYTHON=<repo>/dcc-kv/venv/Scripts/python.exe bash experiments/run_gpu.sh ..." >&2
+  echo "      torch 缺失属于环境闸门未通过，退出码 3（不是实验失败）。" >&2
+  exit 3
+fi
 
 usage() {
   sed -n '2,16p' "$0"
@@ -88,34 +114,58 @@ run_one() {
   torchrun --nproc_per_node="$nproc" --standalone "$file" "$@"
 }
 
-FAILED=0
+# 退出码汇总规则（2026-10-14 修）：取所有实验里**最大的非零退出码**。
+# 优先级：3（环境闸门未通过）> 2（参数/用法拒绝）> 127（缺命令）> 1（实验失败）。
+# 旧实现是 `|| FAILED=1`：内层 gate 的退出码 3 被无条件压成 1，
+# README 承诺的「退出码 3 = 环境闸门未通过，不是实验失败」经本入口
+# **永远不可达**，自动化/CI 无法区分「没显卡」与「实验失败」。
+FINAL=0
+track() {  # track <rc>：把单个实验的退出码并入 FINAL（只升不降）
+  if [ "$1" -gt "$FINAL" ]; then FINAL="$1"; fi
+}
 case "$EXP" in
   e5)
+    RC=0
     run_one "E5 消融 A1/A2/A3/A5" experiments/gpu/e5_gpu_ablation.py "$NPROC" \
-      "${PASSTHRU[@]}" || FAILED=1
+      "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
     ;;
   e6)
+    RC=0
     run_one "E6 主表与可扩展性" experiments/gpu/e6_main_table.py "$NPROC" \
-      "${PASSTHRU[@]}" || FAILED=1
+      "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
     ;;
   e7)
+    RC=0
     run_one "E7 负结果与适用边界" experiments/gpu/e7_negative_results.py "$NPROC" \
-      "${PASSTHRU[@]}" || FAILED=1
+      "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
     ;;
   e8)
+    RC=0
     run_one "E8 低精度数值稳定性" experiments/gpu/e8_low_precision.py "$NPROC" \
-      "${PASSTHRU[@]}" || FAILED=1
+      "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
     ;;
   all)
     # 按 tests/gpu/README.md 的资源就绪顺序：先最省资源的，再最费的
+    RC=0
     run_one "E8 低精度数值稳定性（单卡）" experiments/gpu/e8_low_precision.py 1 \
-      "${PASSTHRU[@]}" || FAILED=1
+      "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
+    RC=0
     run_one "E7 负结果与适用边界（单卡+模型）" experiments/gpu/e7_negative_results.py 1 \
-      "${PASSTHRU[@]}" || FAILED=1
+      "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
+    RC=0
     run_one "E6 主表（单卡+模型）" experiments/gpu/e6_main_table.py 1 \
-      "${PASSTHRU[@]}" || FAILED=1
+      "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
+    RC=0
     run_one "E5 消融 A1/A2/A5（多卡+NCCL）" experiments/gpu/e5_gpu_ablation.py \
-      "${NPROC:-4}" "${PASSTHRU[@]}" || FAILED=1
+      "${NPROC:-4}" "${PASSTHRU[@]}" || RC=$?
+    track "$RC"
     ;;
   *)
     echo "未知实验：$EXP" >&2
@@ -125,10 +175,22 @@ esac
 
 echo
 echo "############################################################"
-if [ "$FAILED" -eq 0 ]; then
-  echo "# 完成。"
-else
-  echo "# 有实验未通过（注意：退出码 3 = 环境闸门未通过，不是实验失败）。" >&2
-fi
+case "$FINAL" in
+  0)
+    echo "# 完成。"
+    ;;
+  3)
+    echo "# 环境闸门未通过（退出码 3）：没有可用 GPU / 环境不完整 —— 不是实验失败。" >&2
+    ;;
+  2)
+    echo "# 有实验在参数层被拒绝（退出码 2）：检查命令行参数（如 e6 必须显式给 --dcc-world）。" >&2
+    ;;
+  127)
+    echo "# 缺少命令（退出码 127，例如 torchrun）：参见上方错误信息。" >&2
+    ;;
+  *)
+    echo "# 有实验失败（退出码 $FINAL）。" >&2
+    ;;
+esac
 echo "############################################################"
-exit "$FAILED"
+exit "$FINAL"
