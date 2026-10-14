@@ -1,8 +1,8 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**202** 个受控文件 = 84 `.py` / 32 `.csv` / 31 `.json` /
-> 24 `.md` / 10 `.tex` / 8 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
+> 统计口径：`git ls-tree -r HEAD`（**205** 个受控文件 = 86 `.py` / 32 `.csv` / 31 `.json` /
+> 25 `.md` / 10 `.tex` / 8 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
 > `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
 > 不含编译产物与本地素材（见 §9）。其中 **72 个在 `results/` 下（32 `.csv` + 31 `.json` +
 > 8 `.log` + 1 `.md`）—— 自 2026-09-16 起入库**（决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
@@ -10,6 +10,12 @@
 > （`tests/test_audit_2026_09_23.py` + `results/diagnostics/lamv0_summary.json`）
 > ⇒ `198` → `200`；分布由 `82 / 32 / 30 / 23 / 10 / 8 / 6 / 1` 变为
 > `83 / 32 / 31 / 23 / 10 / 8 / 6 / 1`（`.py` 与 `.json` 各 +1）。
+> ⚠️ **2026-10-14 按提交后实测刷新**：上一轮（第 47 条，run_gpu.sh 修复）提交后
+> HEAD 实为 **203 / 85**，而本段写的仍是 **202 / 84** —— 只同步了 `commit_log.md`
+> 的「仓库当前规模」一处，漏了本段（两处副本必须同改，见该文件维护约定）。
+> 本轮（第 48 条，显存风险修复）新增 2 个文件 ⇒ `203 → 205`、分布
+> `85 / 32 / 31 / 24 / 10 / 8 / 6 / 1` → `86 / 32 / 31 / 25 / 10 / 8 / 6 / 1`
+> （`.py` +1 = 显存守卫测试；`.md` +1 = GPU 显存预估报告）。
 > ⚠️ **2026-10-14 按提交后实测刷新（第 46 条 docs 提交）**：新增 1 个文件
 > （`docs/reports/2026-09-30-实验结果复核操作手册.md`，`.md`）—— 该手册此前
 > **从未入过库**（`docs/reports/` 下 9 个对外文档当时全部未跟踪），本轮因
@@ -155,7 +161,7 @@
 | `calibration.py` | 232 | **β（质量偏置）拟合**。`DEFAULT_BETA_BOUND = 3.0`（箱约束，默认生效）、`DEFAULT_LAMBDA_BETA`、`nonneg_least_squares`（箱约束求解器，非旧版纯 NNLS）、`fit_logit_bias` |
 | `value_regression.py` | 98 | 紧凑 V 的岭回归拟合。`ridge_regression_value`、`fit_compact_value` |
 | `compact_kv.py` | 134 | **构造链路总入口**。`CompactKV` 数据类（keys / logit_bias / values / selected_indices）+ `build_compact_kv`，串起代表 Query → 选键 → β 拟合 → V 回归 |
-| `attention_kernel.py` | 514 | **G1**：把 `CompactKV` 送进注意力的算子核（device-agnostic）。这是补齐 GPU 侧缺口的**第一块** —— 此前"紧凑 KV 算 attention"只以逐 query 的 Python 循环存在于 `src/distributed/dcc_kv_sync_cpu.py`（CPU、单 head、只做数值等价性验证），既不能批量化也跑不了 GPU。接口：`causal_visibility`（只认 `selected_indices`，**不**按块/锚点数组的行序切片）、`identity_compact`（B = L_s 的参照块、β≡0）、`compact_kv_attention`、`dense_attention`、`merge_partial_attention`、`dcc_kv_attention`（G2 与 H0 钩子共用的前向入口）。三条"形状对、量级对、只算错"的约束：SDPA 加性掩码的 ndim ≤ query 的 ndim；跨块归并必须等于"拼接后一次算完"（这条不成立则 A3/A4/E6 的 `dcc_kv` 行全错、而且错得很安静）；`query_chunk` 只到 ULP 级、非逐位。**2026-09-21 补（`b44a7b3`）**：`dcc_kv_attention` 的因果策略拆成**两个独立开关**（`local_causal` / `remote_causal`），使「源块全可见 + 本地因果」这一组合可表达（H0 的钩子要的正是它）；不给开关时按 `query_positions` 推导，旧调用点行为**逐位不变** |
+| `attention_kernel.py` | 563 | **G1**：把 `CompactKV` 送进注意力的算子核（device-agnostic）。这是补齐 GPU 侧缺口的**第一块** —— 此前"紧凑 KV 算 attention"只以逐 query 的 Python 循环存在于 `src/distributed/dcc_kv_sync_cpu.py`（CPU、单 head、只做数值等价性验证），既不能批量化也跑不了 GPU。接口：`causal_visibility`（只认 `selected_indices`，**不**按块/锚点数组的行序切片）、`identity_compact`（B = L_s 的参照块、β≡0）、`compact_kv_attention`、`dense_attention`、`merge_partial_attention`、`dcc_kv_attention`（G2 与 H0 钩子共用的前向入口）。三条"形状对、量级对、只算错"的约束：SDPA 加性掩码的 ndim ≤ query 的 ndim；跨块归并必须等于"拼接后一次算完"（这条不成立则 A3/A4/E6 的 `dcc_kv` 行全错、而且错得很安静）；`query_chunk` 只到 ULP 级、非逐位。**2026-09-21 补（`b44a7b3`）**：`dcc_kv_attention` 的因果策略拆成**两个独立开关**（`local_causal` / `remote_causal`），使「源块全可见 + 本地因果」这一组合可表达（H0 的钩子要的正是它）；不给开关时按 `query_positions` 推导，旧调用点行为**逐位不变** | **2026-10-14（第 48 条）**：`dense_attention` 新增 `query_chunk`（514→563 行）—— 源端 Lq == Lk == L_s，整段一次前向每层都物化 `[g, Lq, Lk]` 显式 logits 及 3–4 个同尺寸中间张量（Qwen g=7、32K 时单张量 7.9 GB），是 32K 档 OOM 的主因。分块**不改变"刻意不走 SDPA"的性质**（每个子块仍是写开的三步，交叉验证价值保留），`query_chunk=None` 时逐位不变；`dcc_kv_attention` 同时把 `query_chunk` 透传给本地块（此前只覆盖远端紧凑块） |
 
 > 原创边界：`key_selection` / `calibration` / `value_regression` 三个压缩机制源自 MIT CSAIL 的
 > Attention Matching（arXiv 2602.16284），**非本文原创**，正文须显式声明（见 `paper/sections/06-experiment.tex`）。
@@ -170,7 +176,7 @@
 | `full_attention_cpu.py` | 195 | 精确注意力的 CPU 参考实现（精度上界） |
 | `dcc_kv_sync_cpu.py` | 210 | DCC-KV 的 CPU **同步**版。只做数值等价性验证，**没有 GPU attention kernel** —— 这是 A3、E6 的关键阻断点 |
 | `var_len_msg.py` | 139 | 变长消息的编码/解码协议 |
-| `attention_hook.py` | 844 | **H0 的方法侧**（2026-09-21）：把 G1 的算子核挂进真实模型 attention 的钩子。要点：注册**专用键**而非覆盖 `eager`/`sdpa`（后者一旦用 `pop` 还原就是把 transformers 自带实现删掉，不是还原）；source / destination 两阶段由调用方**显式声明**（不许靠「past 是不是 None」去猜 —— 猜错时产物看着完全正常）；目的端用 state 里的源端 K/V，**不是**传进来的 key（`cache.update` 在钩子之前，传进来的是「完整 cache + 本次新 token」）；返回值必须转置回 `[B, Lq, H_q*D_v]`；GQA 分组按 `repeat_interleave` 连续切；**不吃 `attention_mask`**（整列被遮蔽即抛错，否则 padding 会被当真 key）；`dcc_world` 单卡模拟**不体现代价化**（summary 里如实记 False 并附原因）。本机用本地构造的 tiny Llama 端到端验证：dense 参照臂与原生前向差 9.7e-08 | **2026-09-21 同日重写（`b44a7b3`，597→844 行）**：修掉两个被接线撞出来的契约漏洞 —— ① 本地块契约改为「传入的 cache **只含目的端本地 KV**」（旧实现取尾部 Lq，会丢掉评测路径的目的端本地上下文），并加**指纹守卫** `_assert_local_cache_excludes_source`（传入 cache 的前缀与 state 里源端 K 的 4 行采样逐位相同即抛错）；② `destination_phase(compacts=...)` 的 `compacts` 改为**必填**（`build` / `reuse`），杜绝「拿被打分的 token 去条件化」。另加 `budget_ratio`（评测源长逐样本变化）、`query_chunk`、`resolve_budget` / `edge_budget` / `describe`，并把因果策略交给 `K.dcc_kv_attention(local_causal=True, remote_causal=False)` |
+| `attention_hook.py` | 894 | **H0 的方法侧**（2026-09-21）：把 G1 的算子核挂进真实模型 attention 的钩子。要点：注册**专用键**而非覆盖 `eager`/`sdpa`（后者一旦用 `pop` 还原就是把 transformers 自带实现删掉，不是还原）；source / destination 两阶段由调用方**显式声明**（不许靠「past 是不是 None」去猜 —— 猜错时产物看着完全正常）；目的端用 state 里的源端 K/V，**不是**传进来的 key（`cache.update` 在钩子之前，传进来的是「完整 cache + 本次新 token」）；返回值必须转置回 `[B, Lq, H_q*D_v]`；GQA 分组按 `repeat_interleave` 连续切；**不吃 `attention_mask`**（整列被遮蔽即抛错，否则 padding 会被当真 key）；`dcc_world` 单卡模拟**不体现代价化**（summary 里如实记 False 并附原因）。本机用本地构造的 tiny Llama 端到端验证：dense 参照臂与原生前向差 9.7e-08 | **2026-09-21 同日重写（`b44a7b3`，597→844 行）**：修掉两个被接线撞出来的契约漏洞 —— ① 本地块契约改为「传入的 cache **只含目的端本地 KV**」（旧实现取尾部 Lq，会丢掉评测路径的目的端本地上下文），并加**指纹守卫** `_assert_local_cache_excludes_source`（传入 cache 的前缀与 state 里源端 K 的 4 行采样逐位相同即抛错）；② `destination_phase(compacts=...)` 的 `compacts` 改为**必填**（`build` / `reuse`），杜绝「拿被打分的 token 去条件化」。另加 `budget_ratio`（评测源长逐样本变化）、`query_chunk`、`resolve_budget` / `edge_budget` / `describe`，并把因果策略交给 `K.dcc_kv_attention(local_causal=True, remote_causal=False)` | **2026-10-14（第 48 条，844→894 行）**：新增 `DEFAULT_LOCAL_QUERY_CHUNK = 512` 与 `resolve_query_chunk(cfg)`，源端 / 本地块 / 远端块三条路径**默认就分块**（`HookConfig.query_chunk` 为 None 时不再是不分块）。原文档写「本地块走 `dense_attention`，不受它影响」—— 那不成立：本地块与源端的 `[Lq, Lk]` 显式 logits 正是 32K OOM 的主因。`_source_attention` 双层保险（调用点传 `resolve_query_chunk(cfg)`，函数内 None 再兜底）；单测 Lq 均 < 512 ⇒ 分块不触发 ⇒ **逐位不变** |
 
 ### 2.4 `src/baselines/` —— 基线（CPU mock）
 
@@ -237,7 +243,7 @@
 | `__init__.py` | 17 | **声明 CPU/GPU 两套证据的量纲关系**（E3↔A2、A3 机制↔A3 任务、E0↔E8），并明确不可互推 |
 | `_env.py` | 622 | 环境闸门（`probe` / `enforce`，不达标退出码 3）、计时（`benchmark_ms`；窗口内只做 `device_sync()`，集合 barrier 留窗口外）、设备绑定（`local_rank_of` / `local_device`，取 `LOCAL_RANK`）、`CUDA_CONSTRUCTION_DEFECTS` 历史清单、元数据构造 |
 | `_comm.py` | 469 | 变长 All-to-Allv（阻塞 / 异步）、同步与异步流水线（`run_sync_pipeline` / `run_async_pipeline`）、分块 `_split_chunks`（逐 dst 取片，尺寸自洽）、体积口径（`make_uniform_plan`） |
-| `_hf.py` | 897 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时（**2026-09-21 起三段化**：源端构造 → 压缩 → 目的端前向，由 `PREFILL_TIMING_CONSUMES_COMPACT_KV=True` 声明且压缩臂缺 `dest_len` 即抛错）、KV 字节数 | **2026-09-21 补（`b44a7b3`）**：`attn_hook` 参数打通三个入口（`measure_prefill` / `score_choices` / `evaluate`）；新增 `prompt_split`，成为源段 / 目的端本地段切分的**唯一出处**（此前计时侧与评测侧各算一遍，实测导致同一行的预算读数对不上质量侧）；钩子路径下 `measure_prefill` 开**两个**计时窗口（含构造的 `prefill_ms_*` + 只目的端的 `dest_ms_*`，后者才是 kernel-matched 的量）；`_token_bound` 从**真实词表**取随机 token 上界（写死 1000 会让词表 < 1000 的模型死在 `F.embedding`，症状指向 embedding、真因在输入生成） |
+| `_hf.py` | 918 | HF 模型加载、KV 预算裁剪（`apply_kv_budget`：identity / topk_rms / topk_norm / stride / random）、多项选择打分（`score_choices`，含独立 cache 副本 + 显式 position_ids）、评测（`evaluate`）、prefill 计时（**2026-09-21 起三段化**：源端构造 → 压缩 → 目的端前向，由 `PREFILL_TIMING_CONSUMES_COMPACT_KV=True` 声明且压缩臂缺 `dest_len` 即抛错）、KV 字节数 | **2026-09-21 补（`b44a7b3`）**：`attn_hook` 参数打通三个入口（`measure_prefill` / `score_choices` / `evaluate`）；新增 `prompt_split`，成为源段 / 目的端本地段切分的**唯一出处**（此前计时侧与评测侧各算一遍，实测导致同一行的预算读数对不上质量侧）；钩子路径下 `measure_prefill` 开**两个**计时窗口（含构造的 `prefill_ms_*` + 只目的端的 `dest_ms_*`，后者才是 kernel-matched 的量）；`_token_bound` 从**真实词表**取随机 token 上界（写死 1000 会让词表 < 1000 的模型死在 `F.embedding`，症状指向 embedding、真因在输入生成） | **2026-10-14（第 48 条，897→918 行）**：全部 12 处 `lm.model(...)` 显式传 `logits_to_keep`（源段/目的段 prefill = 1；continuation = T）。transformers 5.5.4 默认 0 = 全长过 lm_head ⇒ 32K 源段白物化 5.9–7.0 GB，且 `score_choices` 的 `base_logit` 是**视图**会把整份 logits 拖到打分结束。该口径写进 `score_choices` 文档第 5 条与 `measure_prefill` 的 Args，并有 AST 守卫（见 `test_gpu_memory_guards_2026_10_14.py`） |
 | `_forward.py` | 426 | **G2**：异步 All-to-Allv 接**真实前向**的桥接层。`make_uniform_layout`（统一布局，供等价性验证）/ `pack_edges`（变长 edge 打包）/ `chunk_source_sizes`（源端分段约定，与 `attention_hook.source_partition` 同款 —— 两处必须一致，否则"每段长度"在两套代码里不同值）/ `decode_edges` / `pipelined_attention`（同步、异步两条流水）/ `assert_same_answer`。计时纪律：`T_build / T_comm / T_comp / T_total` 必须**拆开报**；异步的 `comp_ms` 是**上界**（`wait(handle)` 之后不允许任何 device-wide 同步，否则把正在飞的集合通信也等掉 ⇒ overlap 恒为 0）；同步与异步之间**只有 `total_ms` 可比**。⚠️ 单卡下真 `dist.all_to_all_single` 退化成一次本地拷贝、`chunks_effective=1`、**没有可重叠窗口** |
 | `build_eval_set.py` | 557 | **G5**：评测集转换器 —— 把 LongBench 转成 `_hf.EvalSample` 的 JSONL。为什么需要它：E5-A2/A3、E6、E7 的**准确率列全部依赖它**，而 `_hf.score_choices` 只认 `{prompt, choices, answer, task, length_tag}` 这种多项选择形态。含 `convert_records` / `validate_samples`（转换后自检）/ `write_jsonl` / `write_report` 与 `run_selftest`（无数据也能跑）。⚠️ **评测集本体仍需生成** —— 本脚本是纯转换器，需要外部的 LongBench 输入数据 |
 | `e5_gpu_ablation.py` | 1211 | **A1** 通信集大小、**A2** 压缩预算扫描、**A3** 组件拆分（被阻断，拒绝产假数字）、**A5** 异步 vs 同步（H4 判据走 `hypotheses.h4_pass`）。**A4**（压缩 × 异步交互，2026-09-20 已实现）。**A3 仍被阻断** —— 但**理由已换**（2026-09-21）：G1 算子核与 H0 的钩子都已就绪（`src/distributed/attention_hook.py`），真正剩下的是**逐边条件化的多设备语义**：单进程 harness 只有单一目的端，无法区分 DCC-KV 与 FastKV，故 A3 的对照必须走多设备路径。在此之前拒绝产假数字 |
@@ -273,6 +279,8 @@
 | `test_audit_2026_09_23.py` | 229 | **2026-09-23 论文架构 ↔ 代码工程一致性审查的回归锚点**（2026-10-13 随 D8 批次入库，10 项）。守卫本轮 D8 修复的核心事实：论文 §4.4 点名的三项机制（循环错位 `[s+p]` 调度 / `cuda.Stream`+`cuda.Event` 独立双流 / §4.2 的 `N-1` 轮 Ring All-Gather）在代码中**不存在** —— 实际是单次全局 `all_to_all_single` + 块级双缓冲。故处理方式是**改纸面追上实现**而非改代码圆纸面：单次集合通信在带宽利用上本就优于 `N-1` 轮环形，且改代码需 GPU 验证而本机无 CUDA。每条断言先说明「它本可以不被发现」：`grep async` 与 `grep All-to-Allv` **都会**命中，唯独三个具体机制名（错位轮次 / CUDA Stream / all_gather）零命中 —— 这正是「公式忠实、区间正确、假设对齐，而机制从未被建造」那一类偏差 |
 | `test_discrimination.py` | 434 | **量具判据（`experiments/common/discrimination.py`）的锚点**（2026-09-30 新增，29 项）。四类断言：①**判据字面**（用户裁定的三段式不得被改动）；②**真实黄金值** —— NIAH x20 / LongBench n=20 的逐样本对错**抄自落盘产物**（抄进来而非读文件，因为产物在 `_onetime_scripts/_out/`、**仓库测试不得依赖仓外文件**）；③**边界语义**（`b=0,c=5` 的 `p=0.0625` **不算**方向可分辨 —— 这正是 n=8 那轮把「方向复现」误当结论的坑）；④**声明↔实现绑定**（阈值只有一处赋值，用 AST 按**结构**判定而非 grep 字符串；文档必须点到该模块）。另含一条反例锚点：`b=0,c=4,n=20` 时分辨率读数 19.6 pp < `|Δ|` 20 pp 却**不显著** ⇒ 钉死「读数不是置信区间、推断以 `p_value` 为准」 |
 | `test_errbound_fix_2026_10_13.py` | 301 | **式(37) 误差界修正的回归锚点**（2026-10-13 新增，11 项）。四组守卫：①**反例回归** —— 初版界必须在构造反例（O₁=0、O₂=e₁、δM₁=0.1、δO₁=6e₁，前置条件满足而 LHS=3.119 > RHS=3.100）上违反（哨兵：证明反例有杀伤力），修正界两种形式必须成立，且 δM≡0 时必须退化为旧界的取等情形（「修正不丢旧界已正确的部分」）；②**对抗搜索哨兵** —— 固定种子 5000 次多块随机搜索，新界在 1e-9 相对容差外零真反例，同时旧界必须被击穿 > 0 次（证明搜索有击穿能力，不是「搜不到」）；③**实现 ↔ 论文学术对齐** —— E13 脚本的 RHS 必须含 `eps_mass * (o_hat_max + o_max) / S_hat_q`（三项缺一不可），论文方程必须含 `\widehat{S}` 与紧凑输出项，且论文三节必须携带本轮数字（2.23/7.37/9.56/190/14.6%）而不残留旧轮次排他数字（2.10/3.51/2.08/3.61/6.2%/4/60）；④**落盘产物复算** —— 论文引用的汇总数字从 `results/cpu/e13/e13_results.json` 逐位复算，并断言旧界留档副本存在（它承载「旧界为什么错」的对照证据，按项目删除边界不得删除） |
+| `test_fstring_backslash_guard_2026_10_13.py` | 117 | **f-string 反斜杠全仓守卫**（2026-10-13 新增，2 项）。背景：e9 表头 `f"{'M\B':>6}"` 在 py3.11 是 SyntaxError（整个模块导入即失败）、py3.12+（PEP 701）合法 ⇒ 该类 bug 在 repo-tests（py3.13）全绿下能隐身多轮。守卫按**解释器精度分流**：py3.12+ 查 `FormattedValue` 源码段（位置精确）；py3.11 改查「表达式内字符串常量的解码值」（`get_source_segment` 在 py3.11 会溢出到字面部分，实测误报 7 个文件） |
+| `test_gpu_memory_guards_2026_10_14.py` | 323 | **GPU 前向显存口径守卫**（2026-10-14 新增，10 项）。四道：① AST 守卫 `_hf.py` 每个 `lm.model(...)` 必须显式含 `logits_to_keep`（含 10 处单点变异自测 —— 删任一处的参数都必须变红）；② AST 守卫 `attention_hook.py` 中 `dense_attention` / `dcc_kv_attention` / `_source_attention` 调用必须传 `query_chunk`，且钩子内必须走 `resolve_query_chunk(cfg)`（不能退回裸 `cfg.query_chunk` = 默认不分块）；③ `dense_attention` 分块后与不分块 ULP 级等价（数值，含 `query_chunk=None` 逐位不变的锚点）；④ `_source_attention` 默认分块**真的发生**（spy 抓实收参数）且结果与显式不分块 ULP 级等价。设计原则：默认分块的阈值（512）远大于全部单测的 Lq ⇒ 单测逐位不变，只有真实长序列才分块 |
 `tests/gpu/`（默认跳过）：
 
 | 文件 | 行数 | 内容 |
@@ -322,6 +330,8 @@
 | `gpu_execution_plan.md` | 460 | **GPU 实验执行计划与预算控制**（2026-09-16 新增）。结论先行：现在不能开跑 —— 缺的不是卡是代码，依据 `e6_main_table.py --plan` 实测 6 方法中 4 个 `blocked`（含本文方法 `dcc_kv`）。含 G1–G6 前置缺口、S0–S3 四级梯队、数据量与时长估算、预算纪律十条、租卡前 checklist、论文完整性核对。**§0/§5/§6/§7 已于 2026-09-21 第二次同步**：G1–G5 已**提交**（`c9ca6b0`），**H0 已接**（`measure_prefill` 三段化 + `PREFILL_TIMING_CONSUMES_COMPACT_KV` 翻正 + E6 加 `--dest-fraction`）。**未变的是结论，变了的是理由**：现在阻的是「`dcc_kv` 的构造路径还没独立」（仍与 `kv_budget_shared` 共用共享裁剪 ⇒ 质量差恒为 0）与 **G6 未做**；翻 `measurable` 仍不可以（否则得到假阳性） | ⚠️ **已被 `b44a7b3` 修正**（上句保留）：**接线已完成、`measurable` 已翻**；§0/§5/§7 已第三次同步，口径变化三条（sync 轴折叠判据推广、prefill 加速比两列、计时与评测同一份切分） |
 | `ssh_setup.md` | 141 | SSH / 远程机器配置 |
 | `FILE_MAP.md` | 本文 | 文件说明（你正在读的这份） |
+| `reports/2026-09-30-实验结果复核操作手册.md` | 950 | **对外复核操作手册**（2026-09-30，第 46 条首次入库）。「准备篇」讲路径替换与自建环境；§11 是给发件人的打包清单。⚠️ 手册全部数字在 transformers **5.5.4** 上跑出，而 `requirements.txt` 当时锁 4.41.0 —— 第 46 条已把锁改成 5.5.4 并同步手册三处版本口径 |
+| `reports/2026-10-14-GPU显存需求预估与机型建议.md` | 370 | **GPU 显存需求预估与机型建议**（2026-10-14，第 48 条入库）。委托：实验室配 GPU（48G vs 96G、独占式分配）前的申请依据。结论：两处代码级显存风险修复后**全部场景 ≤ 27.7 GB，48 GB 卡全覆盖**。含量化口径（三条建模口径不说明就会被读错）、修复前/后双口径汇总表、分量拆解、机型判定、申请梯队与费用对照（校内 A800 3.5 元/卡时 ≈ 144 元全轮）。⚠️ 复算脚本 `gpu_memory_estimate_20261014.py` 在**仓库外** `_onetime_scripts/`（纯算术、约 250 行），未随仓库分发；报告 §1.1/§2.2 列全了输入参数与分量定义，可依其重写复算 |
 
 ---
 

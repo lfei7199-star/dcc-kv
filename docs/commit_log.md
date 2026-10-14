@@ -4,9 +4,11 @@
 > 与 `docs/git_strategy.md`（规范）互补 —— 那份说「应该怎么提交」，这份说「实际提交了什么、验没验证过」。
 >
 > 生成时间：2026-09-22 19:18 (GMT+8)
-> 当前 HEAD：`6e94b1c`（分支 `paper/sections-5-8`；第 46 条推送记录提交，已推远端）。
-> ⚠️ 第 47 条（run_gpu.sh 修缺陷①②）及本轮规模刷新见该条与「仓库当前规模」段；
-> 其内容提交为 `62b2b3b`，本条 docs 提交不单独立条（惯例同第 42–45 条）。
+> 当前 HEAD：`54e284b`（分支 `paper/sections-5-8`；第 48 条内容提交，已推远端）。
+> ⚠️ 第 48 条（显存风险修复）及本轮规模刷新见该条与「仓库当前规模」段；
+> 其内容提交为 `54e284b`，本条 docs 提交不单独立条（惯例同第 42–45 条）。
+> ⚠️ 第 47 条（run_gpu.sh 修缺陷①②）见该条；其内容提交为 `62b2b3b`，
+> 本条 docs 提交不单独立条（惯例同第 42–45 条）。
 > ⚠️ 头部 HEAD 记的是**内容提交**；其后的日志提交自身按仓库惯例不单独立条
 > （第 42 条的日志提交为 `e1ea97d`，第 43 条的为 `8a04fdd`，第 44 条的为
 > `44849c0` —— 上一版漏登，本轮补入；本条的为本次 docs 提交）。
@@ -124,10 +126,14 @@
 > 371 行 / 26 行**。差额来源未考据（历史某次增量叠加时的抄录误差，逐行加总与任何单行
 > 都不对应），**本轮不擅自归因**，只把合计改为逐行加总并在同一处保留原文差额。
 
-仓库当前规模（**2026-10-14 按提交后 `git ls-tree -r HEAD` 刷新**）：**203** 个受版本控制文件，
-其中 85 个 `.py`、10 个 `.tex`、**24** 个 `.md`、32 个 `.csv`、31 个 `.json`、8 个 `.log`
+仓库当前规模（**2026-10-14 按提交后 `git ls-tree -r HEAD` 刷新**）：**205** 个受版本控制文件，
+其中 86 个 `.py`、10 个 `.tex`、**25** 个 `.md`、32 个 `.csv`、31 个 `.json`、8 个 `.log`
 （后三者**全部**来自 `results/`，共 71 个；`results/` 下受控文件合计 72 个，另 1 个是
 `results/diagnostics/README.md`。见第 24 条）。
+第 48 条（显存风险修复）新增 2 个文件：
+`tests/test_gpu_memory_guards_2026_10_14.py`（`.py`，守卫测试 10 项）与
+`docs/reports/2026-10-14-GPU显存需求预估与机型建议.md`（`.md`，370 行），
+故 `203 → 205`、`.py` `85 → 86`、`.md` `24 → 25`。
 第 47 条（run_gpu.sh 修缺陷①②）新增 1 个文件：
 `tests/test_run_gpu_entry_2026_10_14.py`（`.py`，守卫测试 6 项），
 故 `202 → 203`、`.py` `84 → 85`。
@@ -190,6 +196,91 @@
 > 29），加上 `ebb8cce..90934a6` 的 5 个才是 34。此前抄录有误，一并更正。
   main                 →  origin/main                  （未动）
 ```
+
+---
+
+## 48. 显存风险修复：logits_to_keep 全覆盖 + dense_attention query 维分块（48G 可跑全部场景）
+
+> 内容提交 `54e284b`（2026-10-14，分支 `paper/sections-5-8`；**已推远端**，
+> 推送前实测 `ls-remote` 远端 = `132a979`（本地祖先，快进安全），推送后
+> 远端 = 本地 = `54e284b` 逐位一致，`refs/remotes/origin/*` 同步刷新、
+> 与 HEAD diff 为空；`main` 未动（`8a1d275`）。本条 docs 提交不单独立条）。
+> 动机：西瓜先生
+> 「**解决显存风险问题**」—— 指同日《2026-10-14-GPU显存需求预估与机型建议》
+> §4 列出的两个**代码级**风险（不是"机器不够"）：① `_hf.py` 各处前向不传
+> `logits_to_keep`，transformers 5.5.4 默认 0 = 全长过 lm_head，32K 源段白占
+> 5.9–7.0 GB，且 `score_choices` 的 `base_logit` 是视图会把整份 logits 拖到
+> 打分结束；② 钩子源端/本地块走 `dense_attention` 显式 logits，物化
+> `[g, Lq, Lk]`（Qwen g=7、32K 单张量 7.9 GB），48 GB 卡放不下整条前向。
+
+**改动清单（4 个内容文件 + 2 个 docs）**：
+
+1. `experiments/gpu/_hf.py`（897→918）：全部 **12 处** `lm.model(...)`
+   显式传 `logits_to_keep` —— 源段/目的段 prefill 传 1（只取最后位置），
+   continuation 打分传 `T`（第 i 个 token 由第 i-1 个位置的 logits 预测，
+   逐位置都要用）。口径写进 `score_choices` 文档第 5 条与 `measure_prefill`
+   的 Args。
+2. `src/dcc_kv_ref/attention_kernel.py`（514→563）：`dense_attention` 新增
+   `query_chunk`（沿 query 维分块）。**不改变"刻意不走 SDPA"的性质** ——
+   每个子块仍是写开的三步，与紧凑核的交叉验证价值保留；`query_chunk=None`
+   时逐位不变（旧调用点不受影响）。`dcc_kv_attention` 同时把 `query_chunk`
+   透传给本地块（此前只覆盖远端紧凑块）。
+3. `src/distributed/attention_hook.py`（844→894）：新增
+   `DEFAULT_LOCAL_QUERY_CHUNK = 512` 与 `resolve_query_chunk(cfg)`，
+   源端 / 本地块 / 远端块三条路径**默认就分块**（`HookConfig.query_chunk`
+   为 None 时不再是不分块）。`_source_attention` 双层保险：调用点传
+   `resolve_query_chunk(cfg)`，函数内 None 再兜底。原 HookConfig 文档写
+   「本地块走 `dense_attention`，不受它影响」已修正 —— 那不成立。
+4. `tests/test_gpu_memory_guards_2026_10_14.py`（**新增**，323 行 / 10 项）：
+   两道 AST 守卫（`logits_to_keep` 全覆盖 + 钩子接线必须走
+   `resolve_query_chunk`）+ 两道数值/行为守卫（分块 ULP 等价、默认分块
+   真的发生）。含**正反例自测**：10 处单点变异（删任一处的
+   `logits_to_keep=1`）全部必须被检出；磁盘级变异闭环（把调用点改回裸
+   `cfg.query_chunk` ⇒ 红，还原 ⇒ 绿，sha256 逐位一致）。
+5. `docs/reports/2026-10-14-GPU显存需求预估与机型建议.md`（**新增**，370 行）：
+   报告同日修订 —— 「修·」列从预测改为**已落地的实际口径**，结论随之改变：
+   **修复后全部场景 ≤ 27.7 GB，48 GB 卡全覆盖，96 GB 不再是必需项**
+   （修复前 32K dcc 为 43.3–63.9 GB）。复算脚本在仓库外
+   `_onetime_scripts/gpu_memory_estimate_20261014.py`（纯算术）。
+
+**验证**：
+
+- 双环境全量**对称零失败**：repo-tests（py3.13）与 venv（py3.11）均为
+  **554 passed / 7 deselected / 2 xfailed**（收集集合 = 10-13 基线 + 本轮
+  10 项守卫，git status 可证）；相关 6 个测试文件 212 项先行全绿。
+- py3.11 侧单独 import 四个改动模块全部 OK（`_hf.py` 只在 GPU marker
+  测试里被 import，而该 marker 默认 deselect，故补测）。
+- 变异闭环：注入红 / 还原绿（见改动清单 4）。
+
+**数值影响与"不同表"声明**：分块是**显存控制手段而非数值等价手段**
+（query 维是 GEMM 的 M 维，BLAS 按 M 选核 ⇒ 实测 1–3 ULP 差异）。
+E5–E8 **从未在 GPU 上执行过**（无 CUDA，退出码 3），故不存在
+"新旧结果逐位同表"的问题；钩子 dense 参照臂与原生 HF 的 9.7e-08 断言
+仍通过（ULP 不改变其量级）。单测 Lq 全部 < 512 ⇒ 分块条件不触发
+⇒ 既有锚点**逐位不变**。
+
+**踩坑记录（两条，均已处置）**：
+
+1. **同文件并行 Edit 会静默丢改动**：本轮首批 3 个 Edit 并发发到 `_hf.py`，
+   其中 2 个的"成功"回报与磁盘不符（continuation 与目的段两处没落上），
+   是守卫测试跑红才暴露。对策：**同文件的 Edit 一律串行单笔**，改完立即
+   grep/AST 复核，不信任批量回报。
+2. **`pathlib` 文本往返会把 LF 写成 CRLF**：变异还原脚本用
+   `read_text/write_text`（默认 `newline=None`），把 `.gitattributes`
+   （`text eol=lf`）下的整个文件 894 行从 LF 污染成 CRLF，还原后 sha256
+   不符才发现。对策：变异/还原类脚本一律 `read_bytes/write_bytes`；
+   已用二进制写回修复，`git ls-files --eol` 复测 `i/lf w/lf`，
+   diff 规模回到 53 插入/4 删除（= 本轮修复本身）。
+3. **`git ls-files` 对中文文件名加引号 ⇒ 按扩展名计数会漏算**：实测
+   `grep -c "\.md$"` 得 23，而真实值是 25 —— 差额正是两个中文名报告
+   （手册与本轮报告），其行尾是 `md"` 而非 `md`。本轮 FILE_MAP 顶部与
+   「仓库当前规模」写的 25 是**对的**，差点被这条错误度量"修错"。
+   对策：扩展名计数用 `grep -cE '\.md"?$'`，或 `git ls-files -z` +
+   NUL 拆分；**刷新口径前先跑一次 breakdown 验和**
+   （各扩展数之和必须等于文件总数）。
+
+**遗留**：`docs/reports/` 下另有 8 个对外报告仍未跟踪（是否补齐入库待裁）；
+复算脚本不入库（仓库外），报告 §1.1/§2.2 已列全可重写所需的参数与分量定义。
 
 ---
 
