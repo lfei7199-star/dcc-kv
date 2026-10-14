@@ -1,8 +1,8 @@
 # 仓库文件说明（FILE MAP）
 
 > 本文逐项说明本仓库每个受控文件的**作用**与**内容**，供接手者、协作者与未来的自己定位代码。
-> 统计口径：`git ls-tree -r HEAD`（**201** 个受控文件 = 84 `.py` / 32 `.csv` / 31 `.json` /
-> 23 `.md` / 10 `.tex` / 8 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
+> 统计口径：`git ls-tree -r HEAD`（**202** 个受控文件 = 84 `.py` / 32 `.csv` / 31 `.json` /
+> 24 `.md` / 10 `.tex` / 8 `.log` / 6 `.sh` / 1 `.bib`，另 6 个为 `.gitattributes` /
 > `.gitignore` ×2 / `pytest.ini` / `requirements.txt` / `.github/workflows/test.yml`），
 > 不含编译产物与本地素材（见 §9）。其中 **72 个在 `results/` 下（32 `.csv` + 31 `.json` +
 > 8 `.log` + 1 `.md`）—— 自 2026-09-16 起入库**（决定与体积策略见 §9 与 `docs/git_strategy.md` §8.1）。
@@ -10,6 +10,11 @@
 > （`tests/test_audit_2026_09_23.py` + `results/diagnostics/lamv0_summary.json`）
 > ⇒ `198` → `200`；分布由 `82 / 32 / 30 / 23 / 10 / 8 / 6 / 1` 变为
 > `83 / 32 / 31 / 23 / 10 / 8 / 6 / 1`（`.py` 与 `.json` 各 +1）。
+> ⚠️ **2026-10-14 按提交后实测刷新（第 46 条 docs 提交）**：新增 1 个文件
+> （`docs/reports/2026-09-30-实验结果复核操作手册.md`，`.md`）—— 该手册此前
+> **从未入过库**（`docs/reports/` 下 9 个对外文档当时全部未跟踪），本轮因
+> 内容被改动（三处版本口径同步）而首次入库；其余 8 个报告仍未跟踪。
+> ⇒ `201` → `202`、`.md` `23` → `24`。
 > ⚠️ **2026-10-13 按提交后实测刷新（`152e5ac`）**：**新增 1 个受控文件**
 > （`tests/test_fstring_backslash_guard_2026_10_13.py`）⇒ `200` → `201`；
 > 分布由 `83 / 32 / 31 / 23 / 10 / 8 / 6 / 1` 变为
@@ -124,7 +129,7 @@
 | `CONTRIBUTING.md` | 178 | 协作规范。分支模型、commit 体例、**禁止直接 commit 到 main**、M2 验收口径（引 blueprint v1.1 §6） |
 | `conftest.py` | 65 | pytest 根配置：注册自定义 marker（`gpu` / `distributed` 等）、把仓库根注入 `sys.path`。**按名自动打 marker 时取函数名本体**（`item.originalname`）而非 `item.name` —— 后者**含 parametrize id**，会把`@parametrize("sub", [..., "tests/gpu"])` 这种“以 gpu 为审查对象”的 CPU 守卫**静默排除**，而全量测试仍报全绿（2026-09-20 对抗性审查 D11） |
 | `pytest.ini` | 30 | 测试发现与默认行为。`addopts = -m "not gpu"` ⇒ **GPU 测试默认跳过**；`testpaths = tests` |
-| `requirements.txt` | 23 | 依赖清单。⚠️ torch 写 `>=2.6.0`，而 README / CONTRIBUTING 写 `2.3.0+cpu`，**三处不一致**（待决 C5） |
+| `requirements.txt` | 26 | 依赖清单。⚠️ torch 写 `>=2.6.0`，而 README / CONTRIBUTING 写 `2.3.0+cpu`，**三处不一致**（待决 C5）；`transformers` 已于 2026-10-14 由 4.41.0 改锁 5.5.4（数字产出版本，见 commit_log 第 46 条） |
 | `.gitattributes` | 19 | **行尾策略**（2026-09-16 新增）：固定 `*.sh` / `*.py` 为 LF。本机 `core.autocrlf=true`，索引侧虽始终是 `i/lf`（Linux clone 不受影响），但工作区有 36 个 `.py` + 2 个 `.sh` 是 CRLF —— 直接拷到 Linux 会 `bad interpreter`，而这种失败本地看不出来 |
 | `.gitignore` | 142 | 忽略规则。Python / pytest / IDE 常规项 + 项目特定：`models/`、`data/`、`traces/`、LaTeX 中间产物。**`results/` 自 2026-09-16 起不再忽略**（改为 `!results/**` 显式放行；该规则必须排在 LaTeX 段的 `*.log` 之后，否则 `results/cpu/*_run.log` 仍会被挡掉）；末尾有 `!` 白名单例外 |
 
