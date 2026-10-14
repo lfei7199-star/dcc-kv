@@ -356,7 +356,7 @@ def score_choices(
     （长度归一），这是长文 QA 评测里的常规做法。所有选项共用**同一份
     prefill 结果**（各自持一份副本），因此选项差异不会污染 prefill 计时。
 
-    四处实现细节是正确性的前提，不要"优化"掉：
+    五处实现细节是正确性/显存的前提，不要"优化"掉：
 
     1. **每个选项一份 cache 副本。** 前缀只算一次（prefill 的代价是 O(S²)，
        不能按选项重算），但 `DynamicCache` 在前向中会**就地追加**新 token：
@@ -371,6 +371,14 @@ def score_choices(
        去条件化等于让压缩看见答案（见模块文档）。
     4. **钩子路径下目的端前向不传源端 cache**（`past_key_values=None`）：
        源端由钩子的 state 携带，传进去会让源端被算两遍，且钩子会抛错拦下。
+    5. **每次前向都显式给 `logits_to_keep`**（2026-10-14 修）。transformers
+       5.5.4 的默认值是 0 = "全长过 lm_head"：32K 源段会白物化
+       `[1, 24576, 151936]` 的 bf16 logits ≈ 7.0 GB，而这里只取最后一个
+       位置。源段/目的段 prefill 一律传 1；continuation 打分传 `T`
+       （每个位置都要用，见 `_score_continuations`）。显式写出来而不是
+       "忘了就忘了"：默认值不会报错，只会在长上下文上 OOM，
+       而那种失败看起来像"卡不够"，不像配置遗漏。
+       守卫：`tests/test_gpu_memory_guards_2026_10_14.py`。
 
     Args:
         attn_hook: `attention_hook.HookConfig` 或 None。给了就由钩子接管
@@ -423,12 +431,12 @@ def score_choices(
         with _A.dcc_attention(lm.model, attn_hook) as st:
             # ① 源段：只记录源端 K/V（输出不用）
             st.source_phase()
-            lm.model(input_ids=src_ids, use_cache=True)
+            lm.model(input_ids=src_ids, use_cache=True, logits_to_keep=1)
             # ② 目的端探针：**这一段是 unique 合法的条件化 query 来源**
             dest_pos = torch.arange(n_src, S, device=device).unsqueeze(0)
             st.destination_phase(compacts="build")
             probe = lm.model(input_ids=dst_ids, use_cache=True,
-                             position_ids=dest_pos)
+                             position_ids=dest_pos, logits_to_keep=1)
             base_logit = probe.logits[0, -1, :]
             base_cache = probe.past_key_values        # 只含目的端本地段
             # ③ 各选项：复用同一批条件化块（不得重建 —— 重建就用上了被打分的 token）
@@ -437,7 +445,7 @@ def score_choices(
                 lm, sample.choices, base_cache, base_logit, S, device)
             hook_summary = st.summary()
     else:
-        prefix = lm.model(input_ids=src_ids, use_cache=True)
+        prefix = lm.model(input_ids=src_ids, use_cache=True, logits_to_keep=1)
         cache = prefix.past_key_values
         base_logit = prefix.logits[0, -1, :]
         if budget_ratio is not None:
@@ -447,7 +455,8 @@ def score_choices(
         if dst_ids is not None:
             dest_pos = torch.arange(n_src, S, device=device).unsqueeze(0)
             dest_out = lm.model(input_ids=dst_ids, past_key_values=cache,
-                                use_cache=True, position_ids=dest_pos)
+                                use_cache=True, position_ids=dest_pos,
+                                logits_to_keep=1)
             cache = dest_out.past_key_values
             base_logit = dest_out.logits[0, -1, :]
         scores = _score_continuations(
@@ -499,8 +508,13 @@ def _score_continuations(lm, choices, cache, base_logit, S, device) -> List[floa
         T = int(cont_ids.shape[1])
         past = copy.deepcopy(cache)
         position_ids = torch.arange(S, S + T, device=device).unsqueeze(0)
+        # logits_to_keep=T：这里**每个位置都要用**（第 i 个 token 由第 i-1
+        # 个位置的 logits 预测，见下），不能压成 1。T 是选项文本长度
+        # （几十 token），[T, V] 的量级可忽略；显式写出来是为了与
+        # "不传 = 全长" 的默认值区分开 —— 那句话对长 prefill 是 7 GB。
         out = lm.model(input_ids=cont_ids, past_key_values=past,
-                       use_cache=True, position_ids=position_ids)
+                       use_cache=True, position_ids=position_ids,
+                       logits_to_keep=T)
         logits = out.logits[0]                       # [T, V]
         # 第 i 个 continuation token 由第 i-1 个位置的 logits 预测
         prev = torch.cat([base_logit.reshape(1, -1), logits[:-1, :]], dim=0)
@@ -730,6 +744,10 @@ def measure_prefill(
             dcc 臂看到的 token 序列不同，配对性就没了（而"两臂唯一差别是 KV
             长度"这条断言正是配对性的全部内容）。
 
+    显存口径（2026-10-14）：本函数所有前向都显式传 `logits_to_keep`
+    （源段/目的段 = 1）。默认值 0 = 全长过 lm_head，24K 源段白占 ~7 GB，
+    而计时窗口里没有任何一个位置需要它。见 `score_choices` 文档第 5 条。
+
     Raises:
         ValueError: 压缩臂/钩子路径而 `dest_len <= 0`（此时 ③ 不会发生，窗口里
             没有任何一次前向使用紧凑 KV ⇒ 加速比结构上恒 <= 1；静默返回会把
@@ -780,7 +798,7 @@ def measure_prefill(
     if not hook_path:
         def _one() -> None:
             # ① 源端构造（两臂共有）
-            out = lm.model(input_ids=src_ids, use_cache=True)
+            out = lm.model(input_ids=src_ids, use_cache=True, logits_to_keep=1)
             cache = out.past_key_values
             # ② 压缩（仅压缩臂）。其产出必须被 ③ 消费，否则不该静默通过。
             if budget_ratio is not None:
@@ -797,7 +815,7 @@ def measure_prefill(
                 # 「两臂唯一差别是 KV 长度」不再成立。这一条与 score_choices 早已
                 # 显式给 position_ids 的做法对齐（见其文档要点 ②）。
                 lm.model(input_ids=dst_ids, past_key_values=cache, use_cache=True,
-                         position_ids=dst_pos)
+                         position_ids=dst_pos, logits_to_keep=1)
             del out
 
         _reset_peak()
@@ -809,9 +827,10 @@ def measure_prefill(
         with _A.dcc_attention(lm.model, attn_hook) as st:
             def _one_full() -> None:
                 st.source_phase()
-                lm.model(input_ids=src_ids, use_cache=True)
+                lm.model(input_ids=src_ids, use_cache=True, logits_to_keep=1)
                 st.destination_phase(compacts="build")
-                lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos)
+                lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos,
+                         logits_to_keep=1)
 
             _reset_peak()
             samples = _env.benchmark_ms(_one_full, warmup=warmup, iters=iters)
@@ -822,13 +841,15 @@ def measure_prefill(
             # 与"下一个源端前向"没有关系，而窗口 2 不跑源端前向 —— 直接复用
             # 会让"块对应的源"与"配置声明的源"不是同一次前向。
             st.source_phase()
-            lm.model(input_ids=src_ids, use_cache=True)
+            lm.model(input_ids=src_ids, use_cache=True, logits_to_keep=1)
             st.destination_phase(compacts="build")
-            lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos)
+            lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos,
+                     logits_to_keep=1)
             st.destination_phase(compacts="reuse")
 
             def _one_dest() -> None:
-                lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos)
+                lm.model(input_ids=dst_ids, use_cache=True, position_ids=dst_pos,
+                         logits_to_keep=1)
 
             _reset_peak()
             dest_samples = _env.benchmark_ms(_one_dest, warmup=warmup, iters=iters)

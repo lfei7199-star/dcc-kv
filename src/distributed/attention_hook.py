@@ -153,6 +153,42 @@ SOURCE_FINGERPRINT_ROWS = 4
 O(L_s * d_h) 的额外读写，会进到计时窗口里；4 行是 O(4 * d_h)，且"两张不同来源的
 张量在这 4 行上逐位相同"实际上不会发生。"""
 
+DEFAULT_LOCAL_QUERY_CHUNK = 512
+"""源端 / 本地块 `dense_attention` 的 query 维默认分块（显存控制，2026-10-14）。
+
+为什么需要默认值：源端阶段 Lq == Lk == L_s，整段一次前向，每层都物化
+`[g, Lq, Lk]` 显式 logits 及其 3–4 个同尺寸中间张量。Qwen GQA 组宽 g=7、
+32K 上下文 ⇒ 单张量 7.9 GB、整层瞬时 25 GB 以上，48 GB 卡放不下整条前向
+（实测估算见 `docs/reports/2026-10-14-GPU显存需求预估与机型建议.md`）。
+分块把峰值降到 `[g, chunk, Lk]`：chunk=512 时 Qwen 32K 单张量 168 MB。
+
+为什么是 512 而不是更激进的值：源端前向在 prefill 计时窗口内，分块越小
+kernel 启动次数越多。512 行对 bf16 的 `[g, Lk]` 已是 ~0.17 GB 量级，
+再减小收益递减而计时开销线性涨。
+
+为什么默认开启不破坏既有测试：全部单元测试的 Lq 都远小于 512
+（钩子测试源长 ≤ 数百）⇒ 分块条件 `Lq > chunk` 不触发 ⇒ **逐位不变**。
+只有真实长序列（GPU 实验）才分块，而那批数字从未跑过，无旧表可破。
+`HookConfig.query_chunk` 可以覆盖它（传 None 之外的任意 ≥1 值）。
+
+⚠️ 这是**显存控制手段，不是数值等价手段**：query 维是 GEMM 的 M 维，
+BLAS 按 M 选核 ⇒ 同一元素累加顺序随分块改变，实测 1–3 ULP 差异
+（锚点 `tests/test_attention_kernel.py::test_query_chunk_ulp_equivalent`）。
+"""
+
+
+def resolve_query_chunk(cfg: "HookConfig") -> int:
+    """解析本地/源端路径实际使用的 query 维分块。
+
+    `HookConfig.query_chunk` 为 None 时取 `DEFAULT_LOCAL_QUERY_CHUNK`
+    —— 即"默认就分块"，而不是"默认不分块、等调用方想起来再传"。
+    显存是结构性的：忘了传不会报错，只会在 32K 上下文上 OOM，
+    而那种失败看起来像"机器不够"，不像配置遗漏。
+    """
+    qc = cfg.query_chunk
+    return DEFAULT_LOCAL_QUERY_CHUNK if qc is None else int(qc)
+
+
 
 @dataclass(frozen=True)
 class HookConfig:
@@ -685,7 +721,7 @@ def _layer_attention(
                 # 源块整体位于目的端 query 之前 ⇒ 全可见；本地块因果。
                 # 这两条策略已解耦（见 attention_kernel.dcc_kv_attention）。
                 local_causal=True, remote_causal=False,
-                scale=q_scale, query_chunk=cfg.query_chunk,
+                scale=q_scale, query_chunk=resolve_query_chunk(cfg),
             )
             outs[b, h * g:(h + 1) * g] = out_g.float()
             state.n_local_blocks += 1
@@ -705,6 +741,7 @@ def _source_attention(
     value: torch.Tensor,
     num_kv_heads: int,
     scale: float,
+    query_chunk: Optional[int] = None,
 ) -> torch.Tensor:
     """源端阶段：精确、因果。
 
@@ -712,7 +749,16 @@ def _source_attention(
     输出会变（后续层的 K/V 也就跟着变），于是"dense 参照臂与原生 HF 一致"
     这条断言会**红在源端**，而症状看起来像钩子接线错了。
     参照实现是 `attention_kernel.dense_attention`，与目的端阶段同一个核。
+
+    Args:
+        query_chunk: 沿 query 维分块（显存控制）。**None = 用
+            `DEFAULT_LOCAL_QUERY_CHUNK`，不是"不分块"** —— 源端
+            Lq == Lk == L_s，是全程最大的显式 logits，忘了传只会静默
+            退回 OOM（2026-10-14；见该常量文档）。要显式不分块，
+            传一个 ≥ Lq 的值（如 `query.shape[-2]`）。
+            双层保险：调用点已传 `resolve_query_chunk(cfg)`，这里再兜底。
     """
+    qc = DEFAULT_LOCAL_QUERY_CHUNK if query_chunk is None else int(query_chunk)
     B, H_q, Lq, D_h = query.shape
     D_v = int(value.shape[-1])
     groups = query_groups(query, num_kv_heads)
@@ -728,7 +774,8 @@ def _source_attention(
             v_h = value[b, h]
             part = K.dense_attention(
                 groups[h][b], k_h, v_h, causal=True, query_positions=pos,
-                block_offset=0, scale=float(scale), return_lse=False)
+                block_offset=0, scale=float(scale), return_lse=False,
+                query_chunk=qc)
             outs[b, h * g:(h + 1) * g] = part.out.float()
     return outs.to(query.dtype).transpose(1, 2).reshape(B, Lq, H_q * D_v).contiguous()
 
@@ -753,7 +800,8 @@ def make_hook(state: DccAttentionState):
         if cfg.layers is not None and layer_idx not in cfg.layers:
             # 不在接管范围内：按源端方式算（精确因果），但不写 state。
             return _source_attention(
-                query, key, value, int(key.shape[1]), scaling), None
+                query, key, value, int(key.shape[1]), scaling,
+                query_chunk=resolve_query_chunk(cfg)), None
 
         num_kv_heads = int(key.shape[1])
         if state.phase == "source":
@@ -761,7 +809,8 @@ def make_hook(state: DccAttentionState):
             if cfg.mode == "dcc_kv":
                 L_s = int(key.shape[-2])
                 state.resolved_budget[L_s] = cfg.resolve_budget(L_s)
-            out = _source_attention(query, key, value, num_kv_heads, scaling)
+            out = _source_attention(query, key, value, num_kv_heads, scaling,
+                                    query_chunk=resolve_query_chunk(cfg))
             return out, None
 
         if state.compacts_mode is None:

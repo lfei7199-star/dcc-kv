@@ -289,6 +289,7 @@ def dense_attention(
     causal: bool = False,
     scale: Optional[float] = None,
     return_lse: bool = True,
+    query_chunk: Optional[int] = None,
 ) -> PartialAttention:
     """精确注意力（不压缩）—— 独立参考实现。
 
@@ -297,7 +298,47 @@ def dense_attention(
     二者的吻合才是交叉验证，而不是"同一个核调用两次"。
 
     因果掩码按全局位置：key 的全局位置 = block_offset + i。
+
+    Args:
+        query_chunk: 沿 query 维分块，限制显式 logits `[..., Lq, Lk]` 的峰值
+            显存。语义与 `compact_kv_attention.query_chunk` 完全一致：
+            **显存控制手段，不是数值等价手段**（实测 1–3 ULP 差异，锚点
+            `tests/test_attention_kernel.py::test_query_chunk_ulp_equivalent`）。
+            分块不改变"不走 SDPA"的性质 —— 每个子块走的仍是写开的三步。
+            默认 None = 不分块（旧调用点逐位不变）。
+
+    为什么这里也必须能分块（2026-10-14）
+    ------------------------------------
+    源端 prefill 时 Lq == Lk == L_s：整段源一次前向，每层都物化
+    `[g, Lq, Lk]` 的 logits 及其 3–4 个同尺寸中间张量。Qwen 的 GQA 组宽
+    g=7、32K 上下文 ⇒ 单张量 7.9 GB，整层瞬时 25 GB 以上，48 GB 卡放不下
+    整条前向。query 维分块把峰值降到 `[g, chunk, Lk]`，与
+    `compact_kv_attention` 早已具备的手段对齐。
     """
+    Lq_total = int(query.shape[-2])
+    if (query_chunk is not None and int(query_chunk) > 0
+            and Lq_total > int(query_chunk)):
+        outs: List[torch.Tensor] = []
+        lses: List[torch.Tensor] = []
+        step = int(query_chunk)
+        for lo in range(0, Lq_total, step):
+            hi = min(Lq_total, lo + step)
+            qp = (None if query_positions is None
+                  else query_positions[lo:hi])
+            part = dense_attention(
+                query[..., lo:hi, :], keys, values,
+                query_positions=qp, block_offset=block_offset,
+                causal=causal, scale=scale, return_lse=return_lse,
+                query_chunk=None,
+            )
+            outs.append(part.out)
+            if part.lse is not None:
+                lses.append(part.lse)
+        out = torch.cat(outs, dim=-2)
+        lse = torch.cat(lses, dim=-1) if lses else None
+        return PartialAttention(out=out, lse=lse, lse_available=return_lse,
+                                n_keys=int(keys.shape[0]))
+
     d_h = int(query.shape[-1])
     sc = default_scale(d_h) if scale is None else float(scale)
     logits = torch.matmul(query, keys.transpose(-1, -2)) * sc
@@ -409,6 +450,12 @@ def dcc_kv_attention(
 
     这是 A3 / E6 的 `dcc_kv` 行、以及注意力替换钩子共用的入口。
 
+    Args:
+        query_chunk: 沿 query 维分块。**同时覆盖远端紧凑块与本地精确块**
+            （2026-10-14 起；此前只传 `compact_kv_attention`，本地块的
+            `[Lq, Lk]` 显式 logits 不在其管辖内）。显存控制手段，非数值
+            等价手段（ULP 量级）。
+
     因果语义（**两条独立策略，2026-09-21 解耦**）
     ------------------------------------------------
     本地块（目的端自己的 token）与远端块（源端）的可见性**本来就是两件事**：
@@ -480,10 +527,12 @@ def dcc_kv_attention(
                 query, local_keys, local_values,
                 query_positions=query_positions, block_offset=local_offset,
                 causal=True, scale=scale, return_lse=True,
+                query_chunk=query_chunk,
             )
         else:
             part = dense_attention(query, local_keys, local_values,
-                                   causal=False, scale=scale, return_lse=True)
+                                   causal=False, scale=scale, return_lse=True,
+                                   query_chunk=query_chunk)
         partials.append(part)
 
     Lq = int(query.shape[-2])
