@@ -257,6 +257,15 @@
   提示，信息可行动）。属第三个环境问题，未擅自扩大战线。
 - E5–E8 的 GPU gate 语义、`--print-env` 探测即判定等既有设计未动。
 
+### 六、推送记录（2026-10-14）
+
+推送前 `ls-remote` 比对：远端 tip `6e94b1c` 为本地祖先、快进安全、无分叉。
+走 SSH deploy key（`~/.ssh/dcc_kv_local`，一次性 insteadOf 走 origin 名，
+跟踪引用正常刷新）。两个提交 `2d31cf6`（内容）→ `e717bdd`（docs）已推，
+推送后复测 **远端 = 本地 = `e717bdd`，逐位一致**；`main` 未动（`8a1d275`）；
+远端抽验：`run_gpu.sh` 含 8 处 `track "` 调用与 `FINAL=0`、
+`tests/test_run_gpu_entry_2026_10_14.py` 在位。
+
 ## 46. transformers 4.41.0 → 5.5.4 升级（venv + requirements 锁 + 复核手册三处同步）
 
 > 提交 `62b2b3b`（2026-10-14，分支 `paper/sections-5-8`；1 file changed,
