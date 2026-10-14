@@ -4,7 +4,10 @@
 # 核心（torch 2.3 在 PyPI CPU index 已撤，最早 2.6.0）
 torch>=2.6.0
 torchvision>=0.18.0
-transformers==4.41.0
+# 锁 5.5.4 = 本仓库全部实验数字的产出版本（docs/reports/2026-09-30-实验
+# 结果复核操作手册.md §1）。4.41.0 缺 ALL_ATTENTION_FUNCTIONS（4.46+ 才有），
+# src/distributed/attention_hook.py 的钩子在其上无法导入。
+transformers==5.5.4
 accelerate>=0.30.0
 einops
 datasets>=2.19.0
