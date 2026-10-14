@@ -252,6 +252,17 @@ pip 解决计划（dry-run 先行）：transformers 5.5.4 + tokenizers **0.22.2*
   （phantom 引用，历史遗留；全仓无该文件），本轮未擅造。
 - 工作区未跟踪项（`pyproject.toml` 等 8 项）不在本轮范围。
 
+### 五、推送与核验（2026-10-14）
+
+推送前 `ls-remote` 比对：远端 tip `8c15f59` 为本地祖先、快进安全、无分叉；
+HTTPS 直连被 reset、代理未监听，走 SSH + `~/.ssh/dcc_kv_local` deploy key
+（一次性 insteadOf 走 `origin` 名，跟踪引用正常刷新）。两个提交
+（`62b2b3b` 内容 + `dabfd0f` docs）已推送。
+
+推送后复测：**远端 = 本地 = `dabfd0f0e5a65ef1d98f8e9837cbf0c74de9d081`，
+逐位一致**；远端内容抽验（`requirements.txt` 锁 `transformers==5.5.4`、
+`docs/reports/` 下含手册）通过；`main` 未动（`8a1d275`）。
+
 ---
 
 ## 45. e9 表头 f-string 反斜杠语法错误修复（py3.11 导入即失败）+ 全仓守卫
