@@ -194,7 +194,7 @@
 | `README.md` | 171 | 实验总览：CPU/GPU 分工、编号体系（E0–E13 / A1–A5）、如何跑 |
 | `__init__.py` | 15 | 声明 `experiments` 包 |
 | `run_cpu.sh` | 65 | CPU 实验入口 |
-| `run_gpu.sh` | 135 | GPU 实验入口（封装 `torchrun`）。⚠️ 数组展开必须用 `"${ARR[@]}"`，**不能**写 `"${ARR[@]:-}"`（后者会退化成空字符串参数） |
+| `run_gpu.sh` | 196 | GPU 实验入口（封装 `torchrun`）。⚠️ 数组展开必须用 `"${ARR[@]}"`，**不能**写 `"${ARR[@]:-}"`（后者会退化成空字符串参数）。2026-10-14 修缺陷①②：退出码透传（汇总取最大非零码，gate 的 3 不再被吞成 1）＋环境自举（解释器缺 torch→exit 3 带指引，不再 import 阶段崩掉） |
 
 ### 3.1 `experiments/common/` —— 公共模块（纯 CPU，只依赖 torch + numpy）
 
