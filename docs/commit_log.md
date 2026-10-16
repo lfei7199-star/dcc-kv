@@ -4,7 +4,9 @@
 > 与 `docs/git_strategy.md`（规范）互补 —— 那份说「应该怎么提交」，这份说「实际提交了什么、验没验证过」。
 >
 > 生成时间：2026-09-22 19:18 (GMT+8)
-> 当前 HEAD：`e25a1b2`（分支 `paper/sections-5-8`；第 49 条内容提交，已推远端）。
+> 当前 HEAD：`2f5ac6a`（分支 `paper/sections-5-8`；第 50 条内容提交，已推远端）。
+> ⚠️ 第 50 条（G6 探针设备比较误判修复）见该条；其内容提交为 `2f5ac6a`，
+> 本条 docs 提交不单独立条（惯例同第 42–48 条）。
 > ⚠️ 第 49 条（遗留问题清理：8 报告入库 + run_gpu.sh 缺陷③④ + 论文自相矛盾修复
 > + phantom 引用标注）及本轮规模刷新见该条与「仓库当前规模」段；
 > 其内容提交为 `e25a1b2`，本条 docs 提交不单独立条（惯例同第 42–48 条）。
@@ -129,10 +131,13 @@
 > 371 行 / 26 行**。差额来源未考据（历史某次增量叠加时的抄录误差，逐行加总与任何单行
 > 都不对应），**本轮不擅自归因**，只把合计改为逐行加总并在同一处保留原文差额。
 
-仓库当前规模（**2026-10-14 按提交后 `git ls-tree -r HEAD` 刷新**）：**214** 个受版本控制文件，
-其中 87 个 `.py`、10 个 `.tex`、**33** 个 `.md`、32 个 `.csv`、31 个 `.json`、8 个 `.log`
+仓库当前规模（**2026-10-16 按提交后 `git ls-tree -r HEAD` 刷新**）：**215** 个受版本控制文件，
+其中 88 个 `.py`、10 个 `.tex`、**33** 个 `.md`、32 个 `.csv`、31 个 `.json`、8 个 `.log`
 （后三者**全部**来自 `results/`，共 71 个；`results/` 下受控文件合计 72 个，另 1 个是
 `results/diagnostics/README.md`。见第 24 条）。
+第 50 条（G6 探针误判修复）新增 1 个文件：
+`tests/test_gpu_construction_probe_2026_10_16.py`（`.py`，守卫 7 项），
+故 `214 → 215`、`.py` `87 → 88`。
 第 49 条（遗留问题清理）新增 9 个文件：
 `tests/test_paper_hypothesis_wiring_2026_10_14.py`（`.py`，论文↔代码接线状态守卫 3 项）与
 `docs/reports/` 下**剩余 8 个报告全部入库**（`.md`；该目录 10 个报告自此全部受版本控制），
@@ -205,6 +210,48 @@
 ```
 
 ---
+
+## 50. G6 探针设备比较误判修复：torch.device('cuda') 与 cuda:0 恒不相等（首日上机实测驱动）
+
+### 一、动机（不是预防性重构，是实测撞出来的）
+
+2026-10-16 首日上机（RTX PRO 6000 Blackwell 48 GB / cgroup 32 GiB / 东南亚节点）按手册 Step 2 跑 G6 探针，返回 `ok=false` 且触发「当天收工」停止规则。但 checks 里记录的两条张量设备全是 `cuda:0`——与结论自相矛盾。
+
+### 二、根因（代码级定位）
+
+探针 `probe_gpu_construction` 的 `all_on_device` 判定写 `t.device == dev`，其中 `dev = torch.device("cuda")`（默认参数无索引）。`torch.device("cuda")` 的 `index` 为 `None`，而张量的 `.device` 永远带索引（`"cuda:0"`），二者 `==` 严格比较**恒为 False**——与 torch 版本无关，本地 CPU 版 torch 一条命令即可复现（`torch.device('cuda') == torch.device('cuda:0')` → False）。⇒ 该探针在**任何** GPU 机器上都不可能返回 PASS，是探针自身的缺陷。
+
+构造链路无罪：四个链路函数（`select_representative_queries` / `select_topk_keys` / `fit_logit_bias` / `fit_compact_value`）均为纯 torch 且设备跟随输入；同机 E6 dense 冒烟 200 ms 正常（prefill 200.72 ms / 15295.5 tok/s / peak 14.84 GB）、E8 全量 rc=0 落盘。E6/E7/E8 的环境闸（`_env.probe`/`enforce`）本就不调用本探针，唯一消费者是 E5（本期单卡出局）与论文的「构造可用性」结论。
+
+### 三、修法
+
+1. `_env.py` 新增 `_same_device` helper：type 相同且（dev 无索引或索引相同）——`'cuda'` 匹配 `'cuda:0'`，`'cuda:0'` 不匹配 `'cuda:1'`，`cpu` 不匹配 `cuda`；
+2. checks 补记 `keys_device` / `values_device` 两条字段——旧版只记 logit_bias 与 selected_indices，若真有张量滞留 CPU，肇事者无从辨认（记账盲区）；
+3. `CUDA_CONSTRUCTION_DEFECTS` 追加第五条（探针自身缺陷，`fixed-in 2026-10-16`），与四条构造链路历史缺陷（`5b5ce98` / `b10ea0e`）明确区分，清单头部注释同步改口径。
+
+### 四、守卫（tests/test_gpu_construction_probe_2026_10_16.py，7 项，CPU 可跑）
+
+- 钉住 `torch.device('cuda') != torch.device('cuda:0')` 语义（坑的根，未来 torch 改语义会报警）；
+- mock 假张量复现服务器场景「四条张量全在 cuda:0 ⇒ 必须 ok=true」（修复前此场景恒 false，无需 GPU 即在 CPU 上验服务器场景）；
+- 反向「真有一条滞留 CPU ⇒ 必须 ok=false 且 checks 指名肇事者」（防修复把探针改成永真）；
+- checks 四设备字段齐全；AST 源码守卫（probe 函数体内裸 `X.device == dev` 比较不得回归、`_same_device` 必须被调用）。
+
+⚠️ 测试基建坑（本轮实操踩到，记此备查）：同一文件多个 Edit **并行发出会互相覆盖**（lost update），曾令两个测试函数丢失 `fake_cuda_randn` 参数、randn mock 未生效而报 "Torch not compiled with CUDA enabled"。改为整文件 Write 重写后 7/7 通过。教训：同文件的多个 Edit 必须串行，或干脆整文件重写。
+
+### 五、验证
+
+- 新守卫双环境各 7 项全过（repo-tests py3.13 / venv py3.11）；
+- 双环境全量：**571 passed / 7 deselected / 2 xfailed**（564 基线 + 7 新守卫 = 精确 delta），零失败零错误；
+- `_same_device` 七例语义矩阵本地实测全过（cuda:0 vs cuda / cuda:1 vs cuda / cuda:1 vs cuda:0 / cpu vs cuda / cpu vs cpu / cuda:0 vs cpu / cuda:0 vs cuda:0）。
+
+### 六、服务器侧重跑（待用户执行）
+
+修复在本地仓库，服务器 clone 的是旧 commit ⇒ 手册 Step 2 已写入「先 `git pull origin paper/sections-5-8` 再重跑探针」。期望重跑 `ok=true` 且 checks 四条设备全 `cuda:0`。
+
+### 七、遗留（仍开）
+
+- H2 三参数（`--h2-delta-pp` / `--h2-noise-floor-pp`）仍无默认值，待方法论裁定；
+- E5 待多卡环境；G6 重跑结果待回传；cgroup 32 GiB 限额已入手册 §6（`free` 的 122 GB 是宿主假象）。
 
 ## 49. 遗留问题清理：8 个报告入库 + run_gpu.sh 缺陷③④ + 论文自相矛盾修复 + phantom 引用标注
 
