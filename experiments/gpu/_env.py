@@ -485,10 +485,13 @@ def memory_report() -> Dict[str, Any]:
 
 # 构造链路在 CUDA 上的 device 缺陷**历史清单**。
 #
-# 三者均已在提交 5b5ce98 中修复（representative_query.py 现按 queries.device /
-# queries.dtype 生成；value_regression.py 的 torch.eye 带 device；key_selection.py
-# 的 arange 带 device）。保留本清单是为了让 `probe_gpu_construction` 在**仍然**
-# 失败时能给出可比对的线索，而不是让读者以为它描述的是当前状态。
+# 前四者均已在提交 5b5ce98 / b10ea0e 中修复（representative_query.py 现按
+# queries.device / queries.dtype 生成；value_regression.py 的 torch.eye 带
+# device；key_selection.py 的 arange 带 device）。保留本清单是为了让
+# `probe_gpu_construction` 在**仍然**失败时能给出可比对的线索，而不是让
+# 读者以为它描述的是当前状态。
+#
+# 第五条（2026-10-16）不同：它是**探针自身**的缺陷，与构造链路无关。
 #
 # 注意：本机无 CUDA，"已修复"只是**静态审计**结论（源码中不再有无 device 的
 # 张量构造），是否真正可用必须由目标机上的 `probe_gpu_construction()` 实测确认。
@@ -525,7 +528,35 @@ CUDA_CONSTRUCTION_DEFECTS: List[Dict[str, str]] = [
         "fix": "torch.arange(L_s, device=keys.device)",
         "status": "fixed-in b10ea0e+audit",
     },
+    {
+        "file": "experiments/gpu/_env.py",
+        "line": "probe_gpu_construction 的 all_on_device 判定",
+        "symptom": "探针在**所有** GPU 机器上返回 ok=false，但 checks 里记录的"
+                   "张量设备全是 cuda:0；且 checks 未记录 keys/values 的设备，"
+                   "真正的肇事张量无从辨认。",
+        "fix": "根因：torch.device('cuda') 的 index 为 None，与张量的 .device"
+               "（'cuda:0'，永远带索引）做 == 严格比较恒为 False（任何 torch "
+               "版本皆然，CPU 版 torch 即可复现）。改为 type + index 规范化比较"
+               "（_same_device helper），checks 补记四条张量的设备。"
+               "构造链路本身无罪——同机 dense 冒烟 200 ms 正常。",
+        "status": "fixed-in 2026-10-16",
+    },
 ]
+
+
+def _same_device(tensor: torch.Tensor, dev: torch.device) -> bool:
+    """tensor.device 与 dev 比较，允许 dev 不带索引。
+
+    直接写 `tensor.device == dev` 是坑：`torch.device("cuda")` 的 index 为
+    None，而张量的 `.device` 永远带索引（"cuda:0"），二者 `==` 严格比较
+    **恒为 False**（与 torch 版本无关，本地 CPU 版即可复现：
+    `torch.device('cuda') == torch.device('cuda:0')` → False）。
+    2026-10-16 之前 `probe_gpu_construction` 正是因此而在所有 GPU 机器上
+    误报 ok=false（checks 里记录的张量设备全是 cuda:0）。
+    """
+    return tensor.device.type == dev.type and (
+        dev.index is None or tensor.device.index == dev.index
+    )
 
 
 def probe_gpu_construction(device: str = "cuda") -> Dict[str, Any]:
@@ -563,11 +594,13 @@ def probe_gpu_construction(device: str = "cuda") -> Dict[str, Any]:
             )
             checks[case] = {
                 "budget": budget,
+                "keys_device": str(ck.keys.device),
                 "logit_bias_device": str(ck.logit_bias.device),
+                "values_device": str(ck.values.device),
                 "selected_indices_device": str(ck.selected_indices.device),
                 "all_on_device": all(
-                    t.device == dev for t in (ck.keys, ck.logit_bias, ck.values,
-                                              ck.selected_indices)
+                    _same_device(t, dev) for t in (ck.keys, ck.logit_bias,
+                                                   ck.values, ck.selected_indices)
                 ),
             }
         ok = all(c["all_on_device"] for c in checks.values())
