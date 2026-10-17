@@ -57,10 +57,18 @@ H2 的跨长度聚合规则已于 2026-09-16 定下（见 :data:`H2_LENGTH_AGGRE
 E6 把逐样本判对错与该样本的配对身份键随聚合准确率**同行落盘**，配对 95% CI
 因此算得出来，:func:`quality_comparable_non_inferior` 有了可消费的输入。
 
-判定仍为 ``no-judge``，但**唯一剩下的原因是参数取值**：非劣边界 ``delta``
-与噪声底线按设计**无默认值**（有默认值等于假称前提永远成立），必须由实验者
-显式声明。**这不是「结论未定」** —— 链路、口径、阈值都已就位，缺的是一次
-带参数的运行，以及一次真实的重复 run 来把噪声底线测出来。
+判定仍为 ``no-judge``，且缺的**不止**参数。非劣边界 ``delta`` 与噪声底线按设计
+**无默认值**（有默认值等于假称前提永远成立），必须由实验者显式声明；但即便补齐
+这两个参数，单卡模拟下 H2 的第②条（相对共享压缩的质量提升 ≥ 1.5 pp）**仍然
+恒不成立**：所有源段看到同一批目的端 query，``dcc_kv`` 与共享压缩在数值上不可
+区分（``src/distributed/attention_hook.py`` 的
+``conditionalization_marginal_available = False``）。这一情形在落盘产物里记
+``unresolved_reasons = "structural"``，与缺参数的 ``"resolution"`` 分开记账
+（见 :data:`H2_UNRESOLVED_REASON_KINDS`）。
+
+**因此「再跑一轮把参数测出来就能判 H2」是错的**：参数补上只让「质量相近」这一
+前提可以判定，第二个合取项要等多设备路径。论文 §6 据此写「结构性不可判（单卡
+模拟）」，不写「参数待测」。
 
 **规则为什么是「每个长度分别判定、全通过才算成立」而不是把 4 个长度池化**
 
@@ -90,6 +98,7 @@ __all__ = [
     "QUALITY_COMPARABLE_MAX_DELTA_PP",
     # H2 跨上下文长度的聚合规则（2026-09-16）
     "H2_LENGTH_AGGREGATION",
+    "H2_UNRESOLVED_REASON_KINDS",
     "H2PerLength",
     "H2AcrossLengths",
     "h2_pass_across_lengths",
@@ -258,6 +267,29 @@ H2_LENGTH_AGGREGATION = "all"
 """
 
 
+H2_UNRESOLVED_REASON_KINDS = ("resolution", "instrument", "structural")
+"""H2 某长度「判不了」的三类原因，**语义不可互换**。
+
+``resolution``
+    分辨率不足：缺一个**可补**的输入（非劣边界 ``delta``、噪声底线，或逐样本
+    配对数据）。补齐后同一构型下就能判。对应处置是「再测一次/再给参数」。
+
+``instrument``
+    量具无效：计时窗口里根本没有使用裁剪后的 KV，``prefill_speedup`` 结构上
+    恒 <= 1。对应处置是「先修量具，不要解读这批数」。
+
+``structural``
+    结构性不可判：**补参数也判不了**，因为测量构型使被测量不成立。当前唯一
+    实例是单卡模拟——所有源段看到同一批目的端 query，故 ``dcc_kv`` 与共享
+    压缩在数值上不可区分（见 ``src/distributed/attention_hook.py`` 的
+    ``conditionalization_marginal_available``），H2 的第②条（相对共享压缩
+    ≥ 1.5 pp）恒为假。对应处置是「换多卡构型」，不是「补参数」。
+
+把 ``structural`` 报成 ``resolution`` 会暗示「再跑一轮就能判」，而那是假的；
+把它报成 ``failed`` 更坏——那是把「按设计测不出的量」报成「方法没有收益」。
+"""
+
+
 @dataclass(frozen=True)
 class H2PerLength:
     """H2 在**单个**上下文长度上的三个原始量。
@@ -274,6 +306,14 @@ class H2PerLength:
             下 ``prefill_speedup`` 结构上恒 <= 1 < 1.10x。为 False 时该长度记
             ``unresolved``（判不了），**不记 failed** —— 否则会把「量具测不出收益」
             报成「方法没有收益」。钩子接好后置 True，判定自动恢复。
+        unresolved_reason: ``quality_comparable`` 为 None 时，**该长度为什么判不了**
+            的**原因类别**。默认 ``None``（回落到 ``"resolution"``）。
+            允许的类别见 :data:`H2_UNRESOLVED_REASON_KINDS`；其中
+            ``"structural"``（结构性不可判）与 ``"resolution"``（分辨率不足）
+            的区别是要害：前者表示**补上参数也判不了**，因为测量构型本身
+            使被测量不成立（单卡模拟下所有源段看到同一批目的端 query），
+            后者才表示「缺一个可补的参数」。把前者写成后者会暗示
+            「再跑一轮就能判」，而那是假的。
     """
 
     length: int
@@ -281,6 +321,7 @@ class H2PerLength:
     prefill_speedup: float
     quality_comparable: bool
     prefill_instrument_valid: bool = True
+    unresolved_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -326,9 +367,9 @@ class H2AcrossLengths:
             "h2_worst_prefill_speedup": self.worst_prefill_speedup,
             "h2_quality_comparable_all": self.quality_comparable_all,
             "h2_unresolved_lengths": list(self.unresolved),
-            # 为什么判不了，逐长度写下来：'resolution'（非劣边界未定）
-            # 与 'instrument'（量具测不出收益）是两件完全不同的事，
-            # 只报 unresolved 会让人以为是数据不够。
+            # 为什么判不了，逐长度写下来：'resolution'（缺可补的输入）、
+            # 'instrument'（量具测不出收益）、'structural'（构型上判不了）
+            # 是三件完全不同的事，只报 unresolved 会让人以为是数据不够。
             "h2_unresolved_reasons": {str(k): v
                                       for k, v in self.unresolved_reasons},
         }
@@ -384,7 +425,16 @@ def h2_pass_across_lengths(points) -> H2AcrossLengths:
             continue
         if pt.quality_comparable is None:
             unresolved.append(pt.length)
-            reasons.append((pt.length, "resolution"))
+            # 原因类别由调用方声明；未声明时回落 ``resolution``（缺可补的输入）。
+            # ``structural`` 必须由调用方显式给出 —— 本函数看不到测量构型，
+            # 无从自行判断「补参数是否就能判」，猜一个会把两类原因混掉。
+            reason = pt.unresolved_reason or "resolution"
+            if reason not in H2_UNRESOLVED_REASON_KINDS:
+                raise ValueError(
+                    f"unresolved_reason={reason!r} 不是已知类别，"
+                    f"允许值：{H2_UNRESOLVED_REASON_KINDS}"
+                )
+            reasons.append((pt.length, reason))
             continue
         if not isinstance(pt.quality_comparable, bool):
             raise ValueError(

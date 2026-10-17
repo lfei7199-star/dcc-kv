@@ -10,6 +10,11 @@
 修法：:102 改为三态表述 —— 已判定 ``judged``（H1/H4）／入口已接·参数待测（H2）／
 尚未接线（H3/H5）。
 
+**2026-10-17 升级为四态**：H2 那一态拆成两条 —— 「入口已接·参数缺」与
+「结构性不可判（单卡模拟）」。后者不是措辞调整：单卡模拟下所有源段看到同一批
+目的端 query，`dcc_kv` 与共享压缩数值上不可区分，H2 第（i）项恒不成立，
+补 δ 与噪声底线无用。论文据此改写，守卫同步钉住「不许退回参数待测」。
+
 本守卫钉住两侧不再各自漂移：
   ① 那句 stale 二元表述不许回来；
   ② 论文现状表述与 ``hypotheses.py`` 登记（judged 集合、H2 的 judge 名与
@@ -51,15 +56,37 @@ def test_stale_binary_wiring_claim_is_gone():
     )
 
 
-def test_paper_states_three_way_wiring_status():
-    """论文必须陈述三态：judged / 入口已接·参数待测 / 尚未接线。"""
+def test_paper_states_four_way_wiring_status():
+    """论文必须陈述四态（2026-10-17 由三态升级）：
+
+        judged        —— H1/H4 已判定
+        入口已接·参数缺 —— H2 的两个参数（δ、噪声底线）无默认值
+        结构性不可判   —— H2 第（i）项在单卡模拟下恒不成立（`structural`）
+        尚未接线       —— H3/H5
+
+    第四态是这次修的重点：旧稿把 H2 的缺口写成「仅剩参数待测」，暗示再跑一轮
+    就能判；代码事实是 `attention_hook.conditionalization_marginal_available`
+    恒 False（所有源段共享同一批目的端 query），补参数无济于事。论文若退回
+    「参数待测」，本测试红。
+    """
     code = _tex_code()
     assert "已判定" in code and "judged" in code, "论文未陈述 judged 一侧（H1/H4）"
-    assert "H2 的判定入口已接进 E6" in code, (
-        "论文未陈述「H2 入口已接进 E6、仅剩参数待测」—— "
-        "这正是 2026-09-23 审查记账的自相矛盾点"
+    assert "h2\\_pass\\_across\\_lengths" in code, (
+        "论文未提到 H2 的聚合入口 —— 「入口已接」的表述失去锚点"
+    )
+    assert "结构性不可判（单卡模拟）" in code, (
+        "论文未陈述 H2 的第四态：单卡模拟下第（i）项结构上恒不成立。"
+        "这正是 2026-10-17 修正的口径 —— 它不是「参数待测」。"
+    )
+    assert "structural" in code, (
+        "论文未把该状态与落盘产物的 `structural` 原因对应起来，"
+        "读者无法在产物里复核"
     )
     assert "尚未接线" in code, "论文未陈述 H3/H5 尚未接线"
+    # 回退守卫：把 H2 说成「仅剩参数待测」就等于宣称一条不存在的补测路径
+    assert "仅剩两个" not in code and "降为「参数待测」" not in code, (
+        "论文退回「H2 仅剩参数待测」—— 与单卡模拟的结构性限制矛盾"
+    )
 
 
 def test_registry_matches_paper():

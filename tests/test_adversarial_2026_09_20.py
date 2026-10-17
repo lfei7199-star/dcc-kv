@@ -256,30 +256,49 @@ def _h2_rows(dest_dcc=10.0, dest_dense_kernel=12.0, prefill_shared=130.0,
 
 
 def test_a2_h2_separates_instrument_trouble_from_resolution(monkeypatch):
-    """量具有效 ⇒ 未定原因是 `resolution`；量具失效 ⇒ `instrument`。
+    """量具有效 ⇒ 未定原因是 `resolution`；量具失效 ⇒ `instrument`；
+    单卡构型 ⇒ `structural`。三类原因的处置完全不同：
 
-    两个原因必须能区分：它们的处置完全不同（前者去测噪声底线，后者去修量具），
-    而且 `instrument` 绝不能落成「未达标」。H0 接上后默认走前者；后者由本用例
-    显式把契约翻回假来验证 —— 这样「钩子接好没接好」在产物里始终看得出来。
+      resolution  → 去测噪声底线 / 补 δ（同一构型下可补）
+      instrument  → 去修量具（先别解读这批数）
+      structural  → 换多设备构型（补参数无用）
+
+    而且三者都绝不能落成「未达标」。H0 接上后默认走 resolution；instrument 由本
+    用例把契约翻回假来验证；structural 由 `ranks=1` 触发。这样「钩子接没接好」
+    「是不是单卡模拟」在产物里始终看得出来。
     """
     from experiments.gpu import e6_main_table as E
     assert _hf.PREFILL_TIMING_CONSUMES_COMPACT_KV is True
 
-    pts = E.h2_points_from_rows(_e6_ns(), _h2_rows())
+    # 非单卡构型：参数缺口是原因（可补）
+    ns_multi = _e6_ns(ranks=2)
+    pts = E.h2_points_from_rows(ns_multi, _h2_rows())
     assert len(pts) == 1
     assert pts[0].prefill_instrument_valid is True
+    assert pts[0].unresolved_reason is None, (
+        "ranks>1 时不该预先断言结构性不可判 —— 那会把「构型限制」变成默认假设"
+    )
 
-    out = E.compute_h2(_e6_ns(), _h2_rows())
+    out = E.compute_h2(ns_multi, _h2_rows())
     assert out["h2_unresolved_reasons"] == {"4096": "resolution"}
     assert out["h2_n_failed"] == 0, "前提未定不等于未达标"
     assert out["h2_prefill_instrument_valid"] is True
 
     # 反向：量具契约被翻回假时，同一批行必须改判为 instrument
     monkeypatch.setattr(_hf, "PREFILL_TIMING_CONSUMES_COMPACT_KV", False)
-    out2 = E.compute_h2(_e6_ns(), _h2_rows())
+    out2 = E.compute_h2(ns_multi, _h2_rows())
     assert out2["h2_unresolved_reasons"] == {"4096": "instrument"}
     assert out2["h2_n_failed"] == 0, "量具无效不等于未达标"
     assert out2["h2_prefill_instrument_valid"] is False
+    monkeypatch.setattr(_hf, "PREFILL_TIMING_CONSUMES_COMPACT_KV", True)
+
+    # 单卡模拟：原因必须是 structural，且产物自己说明「补参数无用」
+    out3 = E.compute_h2(_e6_ns(ranks=1), _h2_rows())
+    assert out3["h2_unresolved_reasons"] == {"4096": "structural"}
+    assert out3["h2_n_failed"] == 0, "结构性不可判不等于未达标"
+    assert "结构上恒不成立" in out3["h2_note"]
+    detail = out3["h2_comparable_diagnostics"]["lengths"]["4096"]
+    assert "结构性不可判" in detail["unresolved_reason_detail"]
 
 
 def test_a3_compressed_arm_refuses_to_run_without_a_destination_forward():

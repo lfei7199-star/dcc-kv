@@ -225,7 +225,15 @@ CPU 侧结果全部落在 `results/cpu/**`，与论文 §6 的机制级数字一
 >
 > `h2_pass` 仍把 `quality_comparable` 作为**必填**关键字参数 —— 定义解决的是
 > 「按什么程序判」，而 `delta` 与噪声底线两个**参数**依赖尚未取得的测量，
-> 所以 H2 的 `code_status` 仍是 `no-judge`。缺口已由「定义缺失」降为「**参数待测**」。
+> 所以 H2 的 `code_status` 仍是 `no-judge`。
+>
+> **2026-10-17 更正：缺口不只剩参数。** 单卡模拟下所有源段看到同一批目的端 query
+> （`attention_hook.summary()` 的 `conditionalization_marginal_available = False`），
+> `dcc_kv` 与共享压缩数值上不可区分，H2 第②条（相对共享压缩 >= 1.5 pp）
+> **结构上恒不成立**。补齐 `delta` 与噪声底线只能让「质量相近」这一前提可判，
+> 不能解除第②项。落盘产物把原因记 `structural`，与缺参数的 `resolution`、
+> 量具无效的 `instrument` 分开（`hypotheses.H2_UNRESOLVED_REASON_KINDS`）。
+> 论文 §6 的措辞已同步为「结构性不可判（单卡模拟）」，**不得再写「参数待测」**。
 >
 > **prefill 加速比的分子已改判为 dense**（2026-09-21）。E6 原先实现为
 > `prefill_shared / prefill_dcc`，与论文 §7.5 的三段划分不符 —— 那三段是

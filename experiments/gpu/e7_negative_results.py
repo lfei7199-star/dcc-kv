@@ -355,7 +355,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan", action="store_true", help="只打印条件清单并退出，无需 GPU")
     p.add_argument("--conditions", nargs="+", default=list(CONDITIONS),
                    choices=list(CONDITIONS))
-    p.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
+    p.add_argument("--model", type=str, default="Qwen/Qwen2.5-7B-Instruct",
+                   help="默认 Qwen2.5-7B-Instruct（与 E6 的默认清单一致、本地已缓存）。"
+                        "**刻意不默认 Llama-3.1-8B**：该权重在 HF 与 ModelScope 上都是 "
+                        "gated，未取得授权时加载会直接 401/403，而后台长跑要到模型加载"
+                        "那一步才失败（浪费排队时间）。要用 Llama 须显式传 --model，"
+                        "并确认 HF_TOKEN 或本地路径已就绪。")
     p.add_argument("--eval-file", dest="eval_file", type=str, default=None)
     p.add_argument("--eval-limit", dest="eval_limit", type=int, default=None)
     p.add_argument("--max-prompt-tokens", dest="max_prompt_tokens", type=int, default=None)

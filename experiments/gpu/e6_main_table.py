@@ -1,15 +1,27 @@
 #!/usr/bin/env python
 """E6：主表与可扩展性 —— GPU 端。
 
-论文 §6.4 现把 E6 描述为
+点数口径（2026-10-17 修正，**不要再写死总数**）
+-----------------------------------------------
+旧稿（论文与本题注）写的是
     "3 模型 × 4 上下文长度 × 2 GPU 数 × 2 同步模式 × 3 基线 = 144 个数据点"
+并自称"算术自洽"。该算式有三处与代码不符：
 
-算术自洽（3 × 4 × 2 × 2 × 3 = 144）。
+    ① 只数了 3 个**基线**，漏掉 DCC-KV 自身 —— 默认 `--methods` 是 6 项；
+    ② sync/async 轴在 `--ranks 1` 时对所有方法**折叠**（`sync_axis_applies`），
+       「×2 同步」不成立；
+    ③ 代码里没有「GPU 数」这一网格轴。`gpu_count` 是**方法的要求**
+       （`gpu_count_required`），不是可自由扫描的自变量；H5 的可扩展性另行测量。
 
-（历史）论文原稿写的是"5 上下文长度 = 144 个数据点"，与 180 对不上；
-`72af7db` 已把长度档位改为 4 档修掉。本脚本曾把这条不一致硬编码成警告，
-现在改为**按 `--context-lengths` 的实参现算**数据点数并打印，不再复述
-一个已经过期、且与论文当前状态相反的结论。
+因此任何固定总数都会随 `--methods` / `--ranks` 漂移，产物里的 `paper_claim`
+已置 None 并标记 retired。**计划点数一律读 `n_points_planned`**
+（由 `planned_points()` 按每个方法各自的轴现算）。`n_points_planned_naive_product`
+只保留作"旧口径虚增了多少"的对照，不得当作计划点数引用。
+
+另一条硬约束：逐点落盘。`e6_rows.partial.jsonl` 每产出一个点就 append 并 fsync，
+中途断连时已测的点不会全丢（旧版只在全部模型跑完后写一次盘）。重跑**不自动续跑**
+——参数一致性无法自证，续跑会把两次不同条件的数混进一张表；上一次的 partial 会
+被改名归档，保留可查。
 
 本脚本另一个必须明确的点：**GPU 数不是所有方法都能调的自变量。**
     dense / kv_budget_shared —— 单卡测量。它们不涉及跨设备通信，
@@ -99,9 +111,12 @@ REFERENCE`），检验量是 `Q_DCC − Q_dense` 的**配对 95% CI 下界**。�
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import pathlib
 import sys
+import time
 import traceback
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -294,18 +309,17 @@ def print_plan(a: argparse.Namespace) -> int:
               f"多卡方法在单卡上跑时也没有第二次设备参与）。"
               f"若按简单相乘会虚增 {overcount} 个永不生成的数据点")
     if n_methods != 3:
-        print(f"  ⚠ 注意：方法数是 {n_methods}，而论文的 144 是按「3 基线」算的。"
-              f"折叠 sync/async 轴后本脚本算出 {n_points} 点，"
-              f"与论文的 144 既不同值也不同义 —— 不要把本脚本的总数当成"
-              f"论文声称的数据点数。（旧版不折叠轴时数字曾凑到 144，纯属巧合。）")
+        print(f"  ⚠ 方法数是 {n_methods}。旧版此处会把总数与论文的 144 相比，"
+              f"但 144 本身是把 DCC-KV 漏出乘式的错误口径（见下），不再作参照。")
     print(f"  每点 ≥{a.iters} 次 run（报告规范要求）"
           f" => 总前向次数 ≥ {n_points * a.iters}")
 
     print()
-    print("  论文 §6.4 现写「3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144」，")
-    print("  算术自洽（3 × 4 × 2 × 2 × 3 = 144）。")
-    print("  （历史）原稿写「5 上下文长度 = 144」，与 180 对不上；`72af7db` 已改为 4 档。")
-    print("  下面按本次实参现算，不复述过期结论。")
+    print("  点数口径：**不写死总数**。原因有三：")
+    print("    ① 旧稿「3 基线」的乘式漏掉 DCC-KV 自身；")
+    print("    ② sync/async 轴在 ranks=1 时被折叠；")
+    print("    ③ 代码中没有「GPU 数」这一网格轴，H5 另行单独测量。")
+    print("  论文 §6.4 已同步改为按网格维度陈述，点数以 n_points_planned 为准。")
 
     print()
     print("  方法前置条件：")
@@ -750,6 +764,21 @@ def _paired_quality_ci(r_dcc: Dict[str, Any], r_ref: Dict[str, Any],
     return out
 
 
+def _structural_unjudgeable(a: argparse.Namespace) -> bool:
+    """本次运行的构型是否使 H2 第②条**结构上不可判**。
+
+    判据是「源端是否真的分处不同设备」。单卡模拟（``--ranks 1``）下，
+    ``attention_hook`` 把所有源段切在同一进程里，各段看到的是**同一批**目的端
+    query，故 ``dcc_kv`` 与共享压缩在数值上不可区分；此时
+    ``conditionalization_marginal_available`` 恒为 False，H2 的
+    「相对共享压缩提升 ≥1.5 pp」不是「没测出来」，而是**这个构型里不存在**。
+
+    刻意不读 ``attention_hook`` 的私有字段：那会让 E6 依赖观测实现的内部形态，
+    而这里要判断的是**本次运行的设备构型**，`ranks` 就是它的声明源。
+    """
+    return int(getattr(a, "ranks", 1) or 1) <= 1
+
+
 def h2_points_from_rows(a: argparse.Namespace,
                         rows: List[Dict[str, Any]],
                         diagnostics: Optional[Dict[str, Any]] = None,
@@ -905,6 +934,14 @@ def h2_points_from_rows(a: argparse.Namespace,
                     why = "参数越界（分辨率不足）：%s" % exc
             if comparable is None and diagnostics is not None:
                 diagnostics["lengths"][str(ctx)]["unresolved_reason"] = why
+                if _structural_unjudgeable(a):
+                    diagnostics["lengths"][str(ctx)]["unresolved_reason_detail"] = (
+                        (why + "；" if why else "")
+                        + "且为**结构性不可判**：本次 ranks=1，所有源段看到同一批"
+                          "目的端 query ⇒ dcc_kv 与共享压缩数值上不可区分 ⇒ H2 的"
+                          "「相对共享压缩 ≥1.5pp」恒不成立。补齐 delta / 噪声底线"
+                          "不能解除该阻塞，须改用多设备路径。"
+                    )
 
             # 量具是否体现压缩收益：由 `_hf` 的契约决定，不在本文件里写死。
             # **并且**这一格必须真的算出了 kernel-matched 那一列：契约声明灵敏、
@@ -924,6 +961,12 @@ def h2_points_from_rows(a: argparse.Namespace,
                                  else float(sp_km)),
                 quality_comparable=comparable,
                 prefill_instrument_valid=instrument_ok,
+                # 单卡模拟（ranks=1）：所有源段看到同一批目的端 query
+                # （attention_hook.summary 的 conditionalization_marginal_available
+                # 恒 False）⇒ dcc_kv 与共享压缩在数值上不可区分 ⇒ H2 第②条
+                # 结构上恒不成立。此时「补 delta / 噪声底线」无济于事，原因必须
+                # 记 structural 而不是 resolution，否则产物会暗示「再跑一轮就能判」。
+                unresolved_reason=("structural" if _structural_unjudgeable(a) else None),
             ))
     return points
 
@@ -949,10 +992,19 @@ def compute_h2(a: argparse.Namespace,
         "quality_comparable 为 None 表示该长度上「质量相近」前提无法判定"
         "（缺逐样本数据 / 两边键不同源 / 未声明非劣边界与噪声底线 / 参数越界），"
         "记入 h2_unresolved_lengths，**不计入** h2_n_failed —— "
-        "分辨率不足不等于未达标。"
+        "判不了不等于未达标。原因类别见 h2_unresolved_reasons："
+        "resolution=缺一个可补的输入，instrument=量具无效，"
+        "structural=构型上判不了（补参数无用）。"
         "逐长度的具体原因见 h2_comparable_diagnostics.lengths[<ctx>]"
         ".unresolved_reason；判定量是该长度的 ci_95_low_pp。"
     )
+    if _structural_unjudgeable(a):
+        out["h2_note"] += (
+            "；**本次 ranks=1 为单卡模拟**：所有源段看到同一批目的端 query，"
+            "H2 第②条（相对共享压缩 ≥1.5pp）结构上恒不成立。故本产物的 "
+            "h2_unresolved_reasons 记 structural —— 即使补齐 delta 与噪声底线"
+            "也判不了，不得读作「参数待补」。"
+        )
     out["h2_comparable_diagnostics"] = diagnostics
     out["h2_comparable_note"] = (
         "前提的参照物是 dense（hypotheses.QUALITY_COMPARABLE_REFERENCE）："
@@ -1077,6 +1129,37 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def prepare_partial_rows(path: pathlib.Path) -> Optional[pathlib.Path]:
+    """把上一次留下的逐点落盘**改名归档**（不删除），返回归档路径。
+
+    不做自动续跑：续跑要求两次运行的参数逐项一致，而脚本无法自证这一点；
+    把不同构型的点混进一张表，比丢数据更坏。归档只为人可查，不参与本次计算。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        return None
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime(path.stat().st_mtime))
+    archived = path.with_name(f"{path.stem}.{stamp}.jsonl")
+    n = 1
+    while archived.exists():
+        archived = path.with_name(f"{path.stem}.{stamp}-{n}.jsonl")
+        n += 1
+    path.replace(archived)
+    return archived
+
+
+def append_row(path: pathlib.Path, row: Dict[str, Any]) -> None:
+    """逐点 append + fsync：断连时已测的点不丢。
+
+    旧版只在全部模型跑完后 `save_summary` 一次，中途断连 = 全丢；按模型切调用
+    只是把损失从约 2 h 压到约 40 min，没有改变"丢"这个事实。
+    """
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def main() -> int:
     a = build_parser().parse_args()
 
@@ -1115,6 +1198,14 @@ def main() -> int:
         print(f"评测集：{len(samples)} 条（{a.eval_file}）")
 
     rows: List[Dict[str, Any]] = []
+    partial_path = pathlib.Path(a.out) / "e6_rows.partial.jsonl"
+    if not partial_path.is_absolute():
+        partial_path = REPO_ROOT / partial_path
+    archived = prepare_partial_rows(partial_path)
+    if archived is not None:
+        print(f"[归档] 上一次的逐点落盘已改名为 {archived.name}；"
+              f"本次从零开始，不自动续跑（参数一致性无法自证）。")
+    print(f"[落盘] 逐点写入 {partial_path}")
     for model in a.models:
         print()
         print("=" * 78)
@@ -1144,6 +1235,7 @@ def main() -> int:
                             "accuracy": None, "prefill_ms_median": None,
                         }
                     rows.append(r)
+                    append_row(partial_path, r)
                     if r["status"] == "ok":
                         acc_str = ("n/a" if r["accuracy"] is None
                                    else f"{r['accuracy']:.4f}")
@@ -1186,6 +1278,7 @@ def main() -> int:
     payload: Dict[str, Any] = {
         "experiment": "E6",
         "rows": rows,
+        "rows_partial_jsonl": str(partial_path),
         "metadata": meta.to_dict(),
         "report_admissibility": admissible,
         "grid": {            "dcc_world": a.dcc_world,
@@ -1203,8 +1296,22 @@ def main() -> int:
                                             if not sync_axis_applies(m, a)],
             "n_points_measured": sum(1 for r in rows if r["status"] == "ok"),
             "n_points_blocked": sum(1 for r in rows if r["status"] == "blocked"),
-            "paper_claim": "3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144",
-            "paper_claim_check": "3×4×2×2×3 = 144，与论文 §6.4 自洽（原稿的 5 档已由 72af7db 改为 4 档）",
+            "n_points_error": sum(1 for r in rows if r["status"] == "error"),
+            # 2026-10-17：固定总数已**废止**，改为由 planned_points() 现算。
+            "paper_claim": None,
+            "paper_claim_retired": True,
+            "paper_claim_note": (
+                "原字段写死「3 模型 × 4 上下文长度 × 2 GPU × 2 同步 × 3 基线 = 144」"
+                "并自称与论文 §6.4 自洽。该算式有三处与代码不符："
+                "① 只数了 3 个基线，漏掉 DCC-KV 自身（默认 --methods 为 6 项）；"
+                "② sync/async 轴在 --ranks 1 时对所有方法折叠"
+                "（sync_axis_applies），「×2 同步」不成立；"
+                "③ 代码中没有「GPU 数」这一网格轴，可扩展性由 H5 单独测量。"
+                "任何固定总数都会随 --methods / --ranks 漂移，故不再作为主张："
+                "点数一律读 n_points_planned（planned_points() 现算）。"
+                "n_points_planned_naive_product 仅保留作「旧口径虚增了多少」的对照，"
+                "**不得**当作计划点数引用。"
+            ),
         },
         "repetitions": {
             "warmup": a.warmup,
